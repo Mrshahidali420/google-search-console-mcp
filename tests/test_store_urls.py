@@ -84,7 +84,10 @@ def test_mark_submitted_sets_timestamp(tmp_path):
     store.upsert_url(conn, url, PROP, "NOT_INDEXED", "discovered", None)
     stamp = _iso(datetime.now(UTC))
     store.mark_submitted(conn, url, stamp)
-    assert store.get_urls(conn, PROP)[0]["last_submitted"] == stamp
+    stored = store.get_urls(conn, PROP)[0]["last_submitted"]
+    # Compare instants, not text: the store normalises to fixed-width UTC, so
+    # a raw isoformat() with zero microseconds will not match textually.
+    assert datetime.fromisoformat(stored) == datetime.fromisoformat(stamp)
 
 
 def test_get_urls_is_scoped_to_one_property(tmp_path):
@@ -127,18 +130,38 @@ def test_inspection_result_clears_a_stale_reason(tmp_path):
     assert row["reason"] is None
 
 
-def test_z_suffix_and_offset_timestamps_compare_correctly(tmp_path):
+def test_offset_timestamp_is_compared_chronologically_not_lexicographically(tmp_path):
+    """A timestamp three hours NEWER than the cutoff, written with a negative
+    UTC offset, sorts BEFORE the cutoff as a raw string: its wall-clock reads
+    five hours earlier. Unnormalised it therefore looks stale, and the URL is
+    re-inspected for nothing — a wasted call against the 2000/property/day
+    budget, on every run, for every such URL.
+    """
     conn = _conn(tmp_path)
     now = datetime.now(UTC)
-    # Same instant, three spellings Google and callers actually produce.
+    fresh_instant = now - timedelta(days=7) + timedelta(hours=3)
+    west = fresh_instant.astimezone(timezone(timedelta(hours=-8)))
+
+    store.upsert_url(conn, "https://example.com/west", PROP, "INDEXED", None,
+                     west.isoformat())
+    assert store.stale_urls(conn, PROP, ttl_days=7, now=now) == []
+
+
+def test_z_and_naive_timestamp_spellings_are_accepted(tmp_path):
+    """Google's URL Inspection API returns a 'Z' suffix and some callers pass
+    naive datetimes. Both must be storable and readable back as instants.
+    """
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
     store.upsert_url(conn, "https://example.com/z", PROP, "INDEXED", None,
                      now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-    store.upsert_url(conn, "https://example.com/offset", PROP, "INDEXED", None,
-                     now.astimezone(timezone(timedelta(hours=2))).isoformat())
     store.upsert_url(conn, "https://example.com/naive", PROP, "INDEXED", None,
                      now.replace(tzinfo=None).isoformat())
-    # None is older than the TTL, so none should be stale.
-    assert store.stale_urls(conn, PROP, ttl_days=7, now=now) == []
+
+    for row in store.get_urls(conn, PROP):
+        stored = datetime.fromisoformat(row["checked_at"])
+        assert stored.tzinfo is not None
+        assert abs((stored - now).total_seconds()) < 2
 
 
 def test_mark_submitted_raises_when_url_is_unknown(tmp_path):
