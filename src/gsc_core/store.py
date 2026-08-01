@@ -324,16 +324,24 @@ def open_submission(conn: sqlite3.Connection, url: str, property: str,
 
 
 def close_submission(conn: sqlite3.Connection, submission_id: int,
-                     verdict: str) -> None:
-    """Record the outcome and spend the slot, atomically."""
+                     verdict: str, *, used_at: str | None = None) -> None:
+    """Record the outcome and spend the slot, atomically.
+
+    used_at defaults to now, but callers reconciling an old straggler should
+    pass the original requested_at — see reconcile() for why.
+    """
     with tx(conn):
         row = conn.execute(
-            "SELECT account, property, committed FROM submissions WHERE id=?",
+            "SELECT account, property, verdict, committed "
+            "FROM submissions WHERE id=?",
             (submission_id,),
         ).fetchone()
         if row is None:
             raise KeyError(f"no submission with id {submission_id}")
         if row["committed"]:
+            log.warning(
+                "submission %s already committed as %r; ignoring re-close "
+                "with %r", submission_id, row["verdict"], verdict)
             return
 
         conn.execute(
@@ -342,7 +350,32 @@ def close_submission(conn: sqlite3.Connection, submission_id: int,
         )
         conn.execute(
             "INSERT INTO quota_slots (account, property, used_at) VALUES (?, ?, ?)",
-            (row["account"], row["property"], utc_iso(datetime.now(UTC))),
+            (row["account"], row["property"],
+             utc_iso(used_at) if used_at else utc_iso(datetime.now(UTC))),
+        )
+
+
+def abandon_submission(conn: sqlite3.Connection, submission_id: int,
+                       reason: str) -> None:
+    """Close a row WITHOUT spending a slot.
+
+    For failures that happened before the click reached Google — the page
+    never loaded, the session had expired. Charging those would drain a
+    property's budget on submissions that never occurred.
+    """
+    with tx(conn):
+        row = conn.execute(
+            "SELECT committed FROM submissions WHERE id=?", (submission_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no submission with id {submission_id}")
+        if row["committed"]:
+            log.warning("submission %s already committed; not abandoning",
+                        submission_id)
+            return
+        conn.execute(
+            "UPDATE submissions SET verdict=?, committed=1 WHERE id=?",
+            (f"abandoned:{reason}", submission_id),
         )
 
 
@@ -353,16 +386,31 @@ def open_submissions(conn: sqlite3.Connection) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def reconcile(conn: sqlite3.Connection, verdict: str = "unknown_crash") -> int:
+def reconcile(conn: sqlite3.Connection, verdict: str = "unknown_crash", *,
+             grace_minutes: int = 15, now: datetime | None = None) -> int:
     """Close rows a crash left open, charging a slot for each.
 
     Conservative on purpose: we cannot know whether Google accepted the click,
     so we assume it did. Over-counting costs a slot; under-counting fires into
     an exhausted property and earns a real 'Quota Exceeded'.
+
+    Only rows older than grace_minutes are touched. A row opened moments ago
+    may belong to a submission another process still has in flight; closing
+    it here would steal it — the real close_submission() call would then see
+    committed=1 and silently no-op, losing the true verdict.
+
+    The slot is stamped at the original requested_at, not at reconcile time.
+    Stamping "now" would make a three-day-old straggler look like it just
+    spent its slot, keeping the property looking exhausted for another
+    rolling-window cycle after the crash is already resolved.
     """
-    stragglers = open_submissions(conn)
+    moment = now or datetime.now(UTC)
+    cutoff = utc_iso(moment - timedelta(minutes=grace_minutes))
+    stragglers = [
+        row for row in open_submissions(conn) if row["requested_at"] < cutoff
+    ]
     for row in stragglers:
-        close_submission(conn, row["id"], verdict)
+        close_submission(conn, row["id"], verdict, used_at=row["requested_at"])
     if stragglers:
         log.warning("reconciled %d submission(s) left open by a crash",
                     len(stragglers))
