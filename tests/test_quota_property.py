@@ -65,6 +65,23 @@ def test_next_free_is_none_when_slots_remain(tmp_path):
     assert quota.next_free(conn, PROP_A) is None
 
 
+def test_next_free_is_none_while_capacity_remains(tmp_path):
+    """The early-return guard matters here, not on an empty store.
+
+    With some slots spent but capacity still free, MIN(used_at) is non-NULL —
+    so without the guard next_free would report a wait time for a property
+    that can be submitted to right now, and a caller would idle instead of
+    working.
+    """
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    for _ in range(3):
+        _spend(conn, PROP_A, now - timedelta(minutes=5))
+
+    assert quota.free(conn, PROP_A, now=now) > 0
+    assert quota.next_free(conn, PROP_A, now=now) is None
+
+
 def test_next_free_is_oldest_slot_plus_window(tmp_path):
     conn = _conn(tmp_path)
     now = datetime.now(UTC)
