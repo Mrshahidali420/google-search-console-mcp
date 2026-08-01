@@ -7,6 +7,7 @@ old JSON-plus-filelock arrangement could not guarantee.
 """
 from __future__ import annotations
 
+import itertools
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,8 +42,7 @@ CREATE TABLE IF NOT EXISTS urls (
     checked_at     TEXT,
     last_submitted TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_urls_property ON urls (property);
-CREATE INDEX IF NOT EXISTS idx_urls_checked  ON urls (checked_at);
+CREATE INDEX IF NOT EXISTS idx_urls_property_checked ON urls (property, checked_at);
 
 CREATE TABLE IF NOT EXISTS submissions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,16 +85,43 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 
     conn = sqlite3.connect(target, timeout=30.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # Match the connect timeout — a PRAGMA here silently overrides it, and two
+    # different waits in one function is a trap for whoever debugs a lock.
+    conn.execute("PRAGMA busy_timeout=30000")
+    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+    if str(mode).lower() != "wal":
+        log.warning(
+            "WAL unavailable (journal_mode=%s); concurrent server and CLI "
+            "access will serialise", mode)
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(_SCHEMA)
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (str(SCHEMA_VERSION),),
-    )
+
+    # Stamp the version only when the file is new. Overwriting on every open
+    # would let a v1 database silently claim to be v2, so no future migration
+    # could ever detect what it is actually looking at.
+    existing = conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()
+    if existing is None:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
     return conn
+
+
+@contextmanager
+def session(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    """Open the store and close it again afterwards.
+
+    Long-lived callers such as the MCP server may use connect() directly and
+    own the lifecycle themselves; everything short-lived should use this.
+    """
+    conn = connect(path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def schema_version(conn: sqlite3.Connection) -> int:
@@ -104,14 +131,56 @@ def schema_version(conn: sqlite3.Connection) -> int:
     return int(row["value"]) if row else 0
 
 
+def _cleanup(conn: sqlite3.Connection, statement: str) -> None:
+    """Best-effort transaction cleanup.
+
+    A ROLLBACK can itself fail — SQLite may already have auto-rolled-back on
+    a disk-full or I/O error, leaving no active transaction. Letting that
+    raise would replace the original exception with a misleading one.
+    """
+    try:
+        conn.execute(statement)
+    except sqlite3.Error:
+        log.debug("cleanup statement failed: %s", statement, exc_info=True)
+
+
+_savepoints = itertools.count()
+
+
 @contextmanager
 def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    """A write transaction. BEGIN IMMEDIATE so concurrent writers queue rather
-    than fail late with SQLITE_BUSY partway through."""
+    """A write transaction, re-entrant via SAVEPOINT.
+
+    BEGIN IMMEDIATE so concurrent writers queue at the start rather than
+    failing late with SQLITE_BUSY partway through.
+
+    Re-entrancy matters because every accessor in this module opens its own
+    transaction; without it a caller could not compose several of them into
+    one atomic batch, and a bulk path would be forced into one transaction
+    per row.
+
+    Catches BaseException, not Exception: an MCP client disconnecting mid-call
+    raises asyncio.CancelledError and a CLI interrupt raises KeyboardInterrupt.
+    Neither is an Exception, and letting either skip both COMMIT and ROLLBACK
+    would leave the transaction open — poisoning the connection for every
+    later tx and holding the write lock against the other process.
+    """
+    if conn.in_transaction:
+        name = f"sp_{next(_savepoints)}"
+        conn.execute(f"SAVEPOINT {name}")
+        try:
+            yield conn
+        except BaseException:
+            _cleanup(conn, f"ROLLBACK TO {name}")
+            _cleanup(conn, f"RELEASE {name}")
+            raise
+        conn.execute(f"RELEASE {name}")
+        return
+
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
-    except Exception:
-        conn.execute("ROLLBACK")
+    except BaseException:
+        _cleanup(conn, "ROLLBACK")
         raise
     conn.execute("COMMIT")
