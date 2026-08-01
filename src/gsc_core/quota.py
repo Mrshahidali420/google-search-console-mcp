@@ -42,16 +42,26 @@ def used(conn: sqlite3.Connection, property: str, *,
     rows older than its grace period, so without this an in-flight submission
     is invisible to both — and a second process would read the property as
     having more capacity than it does.
+
+    The two SELECTs are separate reads on an autocommit connection, not one
+    transaction — no store.tx here, since that issues BEGIN IMMEDIATE and
+    would take a write lock for what is a pure read. That leaves a race: a
+    submission closing between the two reads. Reading submissions first and
+    quota_slots second is deliberate — it biases that race toward counting
+    the same submission twice (over-count by one, wasting a slot) rather
+    than the reverse order, which can count it zero times (under-count,
+    which is what earns a hard Quota Exceeded). Over-counting is
+    recoverable; under-counting is not.
     """
     moment = now or datetime.now(UTC)
     cutoff = _window_start(moment)
-    committed = conn.execute(
-        "SELECT COUNT(*) AS n FROM quota_slots WHERE property=? AND used_at > ?",
-        (property, cutoff),
-    ).fetchone()["n"]
     in_flight = conn.execute(
         "SELECT COUNT(*) AS n FROM submissions "
         "WHERE property=? AND committed=0 AND requested_at > ?",
+        (property, cutoff),
+    ).fetchone()["n"]
+    committed = conn.execute(
+        "SELECT COUNT(*) AS n FROM quota_slots WHERE property=? AND used_at > ?",
         (property, cutoff),
     ).fetchone()["n"]
     return int(committed) + int(in_flight)
@@ -66,15 +76,28 @@ def free(conn: sqlite3.Connection, property: str, *,
 def next_free(conn: sqlite3.Connection, property: str, *,
               slots: int = DEFAULT_PROPERTY_SLOTS,
               now: datetime | None = None) -> datetime | None:
-    """When the next slot frees, or None if slots are already available."""
+    """When the next slot frees, or None if slots are already available.
+
+    The MIN() below must span the same two sources used() counts — quota_slots
+    and submissions still open — and stay in step with it. If one counts a
+    source the other ignores, this exact hole reopens: a property filled
+    entirely by the uncounted source reads as having capacity and no wait
+    time, and a caller submits into a hard Quota Exceeded.
+    """
     moment = now or datetime.now(UTC)
     if free(conn, property, slots=slots, now=moment) > 0:
         return None
 
+    cutoff = _window_start(moment)
     row = conn.execute(
-        "SELECT MIN(used_at) AS oldest FROM quota_slots "
-        "WHERE property=? AND used_at > ?",
-        (property, _window_start(moment)),
+        "SELECT MIN(stamp) AS oldest FROM ("
+        "  SELECT used_at AS stamp FROM quota_slots "
+        "   WHERE property=? AND used_at > ? "
+        "  UNION ALL "
+        "  SELECT requested_at AS stamp FROM submissions "
+        "   WHERE property=? AND committed=0 AND requested_at > ? "
+        ")",
+        (property, cutoff, property, cutoff),
     ).fetchone()
     if row is None or row["oldest"] is None:
         return None

@@ -14,7 +14,15 @@ def _conn(tmp_path):
 def _spend(conn, property, when, account=ACCOUNT):
     conn.execute(
         "INSERT INTO quota_slots (account, property, used_at) VALUES (?, ?, ?)",
-        (account, property, when.isoformat()),
+        (account, property, store.utc_iso(when)),
+    )
+
+
+def _open_submission(conn, property, when, account=ACCOUNT):
+    conn.execute(
+        "INSERT INTO submissions "
+        "(url, property, account, requested_at, committed) VALUES (?, ?, ?, ?, 0)",
+        ("https://example.com/pending", property, account, store.utc_iso(when)),
     )
 
 
@@ -43,6 +51,23 @@ def test_slot_frees_exactly_one_minute_after_24h(tmp_path):
     assert quota.used(conn, PROP_A, now=just_past) == 0
 
 
+def test_slot_is_still_held_one_minute_before_the_window_closes(tmp_path):
+    """Pins the window length rather than restating it: a slot 1440 minutes
+    old is still held. Setting SLOT_WINDOW_MINUTES to 1440 fails this."""
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    _spend(conn, PROP_A, now - timedelta(minutes=1440))
+    assert quota.used(conn, PROP_A, now=now) == 1
+
+
+def test_slot_at_exactly_the_window_edge_is_free(tmp_path):
+    """Pins '>' rather than '>=': a slot exactly 1441 minutes old is free."""
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    _spend(conn, PROP_A, now - timedelta(minutes=1441))
+    assert quota.used(conn, PROP_A, now=now) == 0
+
+
 def test_properties_are_independent(tmp_path):
     conn = _conn(tmp_path)
     now = datetime.now(UTC)
@@ -58,6 +83,15 @@ def test_free_never_goes_negative(tmp_path):
     for _ in range(quota.DEFAULT_PROPERTY_SLOTS + 3):
         _spend(conn, PROP_A, now - timedelta(minutes=5))
     assert quota.free(conn, PROP_A, now=now) == 0
+
+
+def test_open_submissions_count_against_the_property(tmp_path):
+    """A clicked-but-unclosed submission has really spent its slot at Google."""
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    _open_submission(conn, PROP_A, now - timedelta(minutes=5))
+    assert quota.used(conn, PROP_A, now=now) == 1
+    assert quota.free(conn, PROP_A, now=now) == quota.DEFAULT_PROPERTY_SLOTS - 1
 
 
 def test_next_free_is_none_when_slots_remain(tmp_path):
@@ -91,4 +125,23 @@ def test_next_free_is_oldest_slot_plus_window(tmp_path):
         _spend(conn, PROP_A, now - timedelta(minutes=100 - offset))
 
     expected = oldest + timedelta(minutes=quota.SLOT_WINDOW_MINUTES)
+    assert quota.next_free(conn, PROP_A, now=now) == expected
+
+
+def test_next_free_is_set_when_open_submissions_fill_the_property(tmp_path):
+    """used() counts open submissions, so next_free must see them too.
+
+    Otherwise a property filled entirely by in-flight submissions reports zero
+    capacity AND no wait time — and None is documented as "go ahead".
+    """
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    oldest = now - timedelta(minutes=100)
+    _open_submission(conn, PROP_A, oldest)
+    for offset in range(1, quota.DEFAULT_PROPERTY_SLOTS):
+        _open_submission(conn, PROP_A, now - timedelta(minutes=100 - offset))
+
+    assert quota.free(conn, PROP_A, now=now) == 0
+    expected = (datetime.fromisoformat(store.utc_iso(oldest))
+                + timedelta(minutes=quota.SLOT_WINDOW_MINUTES))
     assert quota.next_free(conn, PROP_A, now=now) == expected
