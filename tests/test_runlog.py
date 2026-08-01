@@ -69,15 +69,41 @@ def test_get_child_writes_nothing_to_stdout_after_init(monkeypatch, tmp_path, ca
     assert "child error message" in captured.err
 
 
-def test_get_child_before_init_writes_nothing_to_stdout(monkeypatch, tmp_path, capsys):
-    """Regression test for Finding 1: get() before init() must not escape to stdout."""
+def test_gsc_logger_does_not_propagate_at_import(monkeypatch, tmp_path):
+    """The import-time guard must survive a reload. Set propagate back to the
+    stdlib default, reload the module, and assert the guard restores it."""
+    import importlib
+    import logging as stdlib_logging
+
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    stdlib_logging.getLogger(runlog.ROOT_NAME).propagate = True
+    importlib.reload(runlog)
+    assert stdlib_logging.getLogger(runlog.ROOT_NAME).propagate is False
+
+
+def test_child_log_before_init_cannot_reach_a_root_stdout_handler(
+    monkeypatch, tmp_path, capsys
+):
+    """Simulate a dependency calling logging.basicConfig() and attaching a
+    stdout handler to the TRUE root logger before our entrypoint runs init().
+
+    Deliberately does NOT call _reset_for_tests(): that helper re-asserts
+    propagate=False and would mask a regression of the import-time guard.
+    """
+    import logging as stdlib_logging
     import sys
 
     monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
-    runlog._reset_for_tests()
-    # Do NOT call init() - this tests the propagation protection
-    child = runlog.get("gsc_core.example")
-    child.error("message before init")
+    root = stdlib_logging.getLogger()
+    hostile = stdlib_logging.StreamHandler(stream=sys.stdout)
+    previous_level = root.level
+    root.addHandler(hostile)
+    root.setLevel(stdlib_logging.DEBUG)
+    try:
+        runlog.get("gsc_core.example").error("must not reach stdout")
+    finally:
+        root.removeHandler(hostile)
+        root.setLevel(previous_level)
+        hostile.close()
 
-    captured = capsys.readouterr()
-    assert captured.out == ""
+    assert capsys.readouterr().out == ""
