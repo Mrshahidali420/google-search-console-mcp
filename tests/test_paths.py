@@ -9,6 +9,11 @@ def test_env_override_wins(monkeypatch, tmp_path):
     assert paths.config_dir() == tmp_path / "custom"
 
 
+def test_env_override_relative_resolves_absolute(monkeypatch):
+    monkeypatch.setenv(paths.ENV_OVERRIDE, "relative/path")
+    assert paths.config_dir().is_absolute()
+
+
 def test_windows_uses_appdata(monkeypatch):
     monkeypatch.delenv(paths.ENV_OVERRIDE, raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
