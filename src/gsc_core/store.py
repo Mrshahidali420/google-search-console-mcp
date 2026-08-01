@@ -191,7 +191,7 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%f+00:00"
 
 
-def _utc_iso(value: str | datetime | None) -> str | None:
+def utc_iso(value: str | datetime | None) -> str | None:
     """Normalise a timestamp to fixed-width UTC ISO-8601.
 
     Timestamps here are compared as strings, so lexicographic order has to
@@ -219,7 +219,7 @@ def upsert_site(conn: sqlite3.Connection, property: str, host: str,
             "  host=excluded.host, permission=excluded.permission, "
             "  sitemaps=excluded.sitemaps, synced_at=excluded.synced_at",
             (property, host, permission, json.dumps(sitemaps),
-             _utc_iso(datetime.now(UTC))),
+             utc_iso(datetime.now(UTC))),
         )
 
 
@@ -260,7 +260,7 @@ def upsert_url(conn: sqlite3.Connection, url: str, property: str,
             "               THEN urls.reason ELSE excluded.reason END, "
             "  checked_at = COALESCE(excluded.checked_at, urls.checked_at)",
             (url, property, status, reason,
-             _utc_iso(datetime.now(UTC)), _utc_iso(checked_at)),
+             utc_iso(datetime.now(UTC)), utc_iso(checked_at)),
         )
 
 
@@ -286,7 +286,7 @@ def stale_urls(conn: sqlite3.Connection, property: str, ttl_days: int,
     what has gone stale instead of the whole sitemap.
     """
     moment = now or datetime.now(UTC)
-    cutoff = _utc_iso(moment - timedelta(days=ttl_days))
+    cutoff = utc_iso(moment - timedelta(days=ttl_days))
     rows = conn.execute(
         "SELECT url FROM urls WHERE property=? "
         "AND (checked_at IS NULL OR checked_at < ?) ORDER BY url",
@@ -304,7 +304,66 @@ def mark_submitted(conn: sqlite3.Connection, url: str, when: str) -> None:
     with tx(conn):
         cursor = conn.execute(
             "UPDATE urls SET last_submitted=? WHERE url=?",
-            (_utc_iso(when), url),
+            (utc_iso(when), url),
         )
         if cursor.rowcount == 0:
             raise KeyError(f"no url row for {url}")
+
+
+def open_submission(conn: sqlite3.Connection, url: str, property: str,
+                    account: str, job_id: str | None) -> int:
+    """Record intent to submit, before the click. Spends no slot yet."""
+    with tx(conn):
+        cursor = conn.execute(
+            "INSERT INTO submissions "
+            "(url, property, account, requested_at, job_id, committed) "
+            "VALUES (?, ?, ?, ?, ?, 0)",
+            (url, property, account, utc_iso(datetime.now(UTC)), job_id),
+        )
+        return int(cursor.lastrowid)
+
+
+def close_submission(conn: sqlite3.Connection, submission_id: int,
+                     verdict: str) -> None:
+    """Record the outcome and spend the slot, atomically."""
+    with tx(conn):
+        row = conn.execute(
+            "SELECT account, property, committed FROM submissions WHERE id=?",
+            (submission_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no submission with id {submission_id}")
+        if row["committed"]:
+            return
+
+        conn.execute(
+            "UPDATE submissions SET verdict=?, committed=1 WHERE id=?",
+            (verdict, submission_id),
+        )
+        conn.execute(
+            "INSERT INTO quota_slots (account, property, used_at) VALUES (?, ?, ?)",
+            (row["account"], row["property"], utc_iso(datetime.now(UTC))),
+        )
+
+
+def open_submissions(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM submissions WHERE committed=0 ORDER BY id"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def reconcile(conn: sqlite3.Connection, verdict: str = "unknown_crash") -> int:
+    """Close rows a crash left open, charging a slot for each.
+
+    Conservative on purpose: we cannot know whether Google accepted the click,
+    so we assume it did. Over-counting costs a slot; under-counting fires into
+    an exhausted property and earns a real 'Quota Exceeded'.
+    """
+    stragglers = open_submissions(conn)
+    for row in stragglers:
+        close_submission(conn, row["id"], verdict)
+    if stragglers:
+        log.warning("reconciled %d submission(s) left open by a crash",
+                    len(stragglers))
+    return len(stragglers)
