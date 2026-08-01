@@ -455,6 +455,12 @@ def update_job(conn: sqlite3.Connection, job_id: str, *,
         if state in _TERMINAL_JOB_STATES:
             assignments.append("finished_at=?")
             values.append(utc_iso(datetime.now(UTC)))
+        else:
+            # Moving back to a live state: a previous run's completion time and
+            # error message are stale by definition, and a consumer treating
+            # finished_at as "done" would misread the resumed job.
+            assignments.append("finished_at=NULL")
+            assignments.append("error=NULL")
     if progress is not None:
         assignments.append("progress=?")
         values.append(json.dumps(progress))
@@ -466,9 +472,11 @@ def update_job(conn: sqlite3.Connection, job_id: str, *,
 
     values.append(job_id)
     with tx(conn):
-        conn.execute(
+        cursor = conn.execute(
             f"UPDATE jobs SET {', '.join(assignments)} WHERE id=?", values
         )
+        if cursor.rowcount == 0:
+            raise KeyError(f"no job with id {job_id}")
 
 
 def list_jobs(conn: sqlite3.Connection, state: str | None = None) -> list[dict]:
@@ -481,8 +489,37 @@ def list_jobs(conn: sqlite3.Connection, state: str | None = None) -> list[dict]:
     return [_job_row(row) for row in rows]
 
 
+def _decode(raw: str | None, fallback, job_id: str, field: str):
+    if not raw:
+        return fallback
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("job %s has unreadable %s; ignoring it", job_id, field)
+        return fallback
+
+
 def _job_row(row: sqlite3.Row) -> dict:
     job = dict(row)
-    job["params"] = json.loads(job["params"] or "{}")
-    job["progress"] = json.loads(job["progress"]) if job["progress"] else None
+    job["params"] = _decode(job["params"], {}, job["id"], "params")
+    job["progress"] = _decode(job["progress"], None, job["id"], "progress")
     return job
+
+
+def reconcile_jobs(conn: sqlite3.Connection, *,
+                   error: str = "interrupted by restart") -> int:
+    """Fail jobs that a crash or restart left marked running.
+
+    A running job implies a live worker inside this process. After a restart
+    there is none, so any row still marked running is orphaned and will never
+    progress. Call once at startup, before accepting new work.
+
+    Returns how many were reconciled.
+    """
+    orphans = list_jobs(conn, state="running")
+    for job in orphans:
+        update_job(conn, job["id"], state="failed", error=error)
+    if orphans:
+        log.warning("reconciled %d job(s) left running by a restart",
+                    len(orphans))
+    return len(orphans)
