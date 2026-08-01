@@ -8,8 +8,10 @@ old JSON-plus-filelock arrangement could not guarantee.
 from __future__ import annotations
 
 import itertools
+import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Iterator
 
@@ -184,3 +186,83 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         _cleanup(conn, "ROLLBACK")
         raise
     conn.execute("COMMIT")
+
+
+def upsert_site(conn: sqlite3.Connection, property: str, host: str,
+                permission: str | None, sitemaps: list[str]) -> None:
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO sites (property, host, permission, sitemaps, synced_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(property) DO UPDATE SET "
+            "  host=excluded.host, permission=excluded.permission, "
+            "  sitemaps=excluded.sitemaps, synced_at=excluded.synced_at",
+            (property, host, permission, json.dumps(sitemaps),
+             datetime.now(UTC).isoformat()),
+        )
+
+
+def get_sites(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM sites ORDER BY property").fetchall()
+    return [
+        {
+            "property": row["property"],
+            "host": row["host"],
+            "permission": row["permission"],
+            "sitemaps": json.loads(row["sitemaps"] or "[]"),
+            "synced_at": row["synced_at"],
+        }
+        for row in rows
+    ]
+
+
+def upsert_url(conn: sqlite3.Connection, url: str, property: str,
+               status: str | None, reason: str | None,
+               checked_at: str | None) -> None:
+    """Insert or update a URL. first_seen is written once and never changed."""
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO urls (url, property, status, reason, first_seen, checked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(url) DO UPDATE SET "
+            "  property=excluded.property, status=excluded.status, "
+            "  reason=excluded.reason, checked_at=excluded.checked_at",
+            (url, property, status, reason,
+             datetime.now(UTC).isoformat(), checked_at),
+        )
+
+
+def get_urls(conn: sqlite3.Connection, property: str,
+             status: str | None = None) -> list[dict]:
+    if status is None:
+        rows = conn.execute(
+            "SELECT * FROM urls WHERE property=? ORDER BY url", (property,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM urls WHERE property=? AND status=? ORDER BY url",
+            (property, status),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def stale_urls(conn: sqlite3.Connection, property: str, ttl_days: int,
+               now: datetime | None = None) -> list[str]:
+    """URLs never checked, or checked longer ago than ttl_days.
+
+    This is what makes discovery incremental: a second run re-inspects only
+    what has gone stale instead of the whole sitemap.
+    """
+    moment = now or datetime.now(UTC)
+    cutoff = (moment - timedelta(days=ttl_days)).isoformat()
+    rows = conn.execute(
+        "SELECT url FROM urls WHERE property=? "
+        "AND (checked_at IS NULL OR checked_at < ?) ORDER BY url",
+        (property, cutoff),
+    ).fetchall()
+    return [row["url"] for row in rows]
+
+
+def mark_submitted(conn: sqlite3.Connection, url: str, when: str) -> None:
+    with tx(conn):
+        conn.execute("UPDATE urls SET last_submitted=? WHERE url=?", (when, url))
