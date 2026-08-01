@@ -1,8 +1,11 @@
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone, UTC
+
+import pytest
 
 from gsc_core import store
 
 PROP = "sc-domain:example.com"
+PROP_B = "sc-domain:other.example"
 
 
 def _conn(tmp_path):
@@ -82,3 +85,64 @@ def test_mark_submitted_sets_timestamp(tmp_path):
     stamp = _iso(datetime.now(UTC))
     store.mark_submitted(conn, url, stamp)
     assert store.get_urls(conn, PROP)[0]["last_submitted"] == stamp
+
+
+def test_get_urls_is_scoped_to_one_property(tmp_path):
+    conn = _conn(tmp_path)
+    now = _iso(datetime.now(UTC))
+    store.upsert_url(conn, "https://example.com/a", PROP, "INDEXED", None, now)
+    store.upsert_url(conn, "https://other.example/b", PROP_B, "INDEXED", None, now)
+    assert [u["url"] for u in store.get_urls(conn, PROP)] == ["https://example.com/a"]
+
+
+def test_stale_urls_is_scoped_to_one_property(tmp_path):
+    conn = _conn(tmp_path)
+    store.upsert_url(conn, "https://example.com/a", PROP, None, None, None)
+    store.upsert_url(conn, "https://other.example/b", PROP_B, None, None, None)
+    assert store.stale_urls(conn, PROP, ttl_days=7) == ["https://example.com/a"]
+
+
+def test_rediscovery_does_not_clear_inspection_state(tmp_path):
+    conn = _conn(tmp_path)
+    url = "https://example.com/a"
+    checked = _iso(datetime.now(UTC))
+    store.upsert_url(conn, url, PROP, "NOT_INDEXED", "crawled_not_indexed", checked)
+    # A second sitemap pass carries no inspection result.
+    store.upsert_url(conn, url, PROP, None, None, None)
+    row = store.get_urls(conn, PROP)[0]
+    assert row["status"] == "NOT_INDEXED"
+    assert row["reason"] == "crawled_not_indexed"
+    assert row["checked_at"] is not None
+    assert store.stale_urls(conn, PROP, ttl_days=7) == []
+
+
+def test_inspection_result_clears_a_stale_reason(tmp_path):
+    conn = _conn(tmp_path)
+    url = "https://example.com/a"
+    store.upsert_url(conn, url, PROP, "NOT_INDEXED", "crawled_not_indexed",
+                     _iso(datetime.now(UTC)))
+    store.upsert_url(conn, url, PROP, "INDEXED", None, _iso(datetime.now(UTC)))
+    row = store.get_urls(conn, PROP)[0]
+    assert row["status"] == "INDEXED"
+    assert row["reason"] is None
+
+
+def test_z_suffix_and_offset_timestamps_compare_correctly(tmp_path):
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    # Same instant, three spellings Google and callers actually produce.
+    store.upsert_url(conn, "https://example.com/z", PROP, "INDEXED", None,
+                     now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    store.upsert_url(conn, "https://example.com/offset", PROP, "INDEXED", None,
+                     now.astimezone(timezone(timedelta(hours=2))).isoformat())
+    store.upsert_url(conn, "https://example.com/naive", PROP, "INDEXED", None,
+                     now.replace(tzinfo=None).isoformat())
+    # None is older than the TTL, so none should be stale.
+    assert store.stale_urls(conn, PROP, ttl_days=7, now=now) == []
+
+
+def test_mark_submitted_raises_when_url_is_unknown(tmp_path):
+    conn = _conn(tmp_path)
+    with pytest.raises(KeyError):
+        store.mark_submitted(conn, "https://example.com/missing",
+                             _iso(datetime.now(UTC)))

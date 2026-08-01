@@ -188,6 +188,27 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     conn.execute("COMMIT")
 
 
+_TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%f+00:00"
+
+
+def _utc_iso(value: str | datetime | None) -> str | None:
+    """Normalise a timestamp to fixed-width UTC ISO-8601.
+
+    Timestamps here are compared as strings, so lexicographic order has to
+    equal chronological order. That only holds when every value carries the
+    same offset and the same width. Callers supply values from several
+    sources — Google's URL Inspection API returns a 'Z' suffix, a naive
+    datetime carries no offset, and isoformat() omits microseconds when they
+    are zero — so normalise on write rather than trusting the caller.
+    """
+    if value is None:
+        return None
+    moment = datetime.fromisoformat(value) if isinstance(value, str) else value
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).strftime(_TS_FORMAT)
+
+
 def upsert_site(conn: sqlite3.Connection, property: str, host: str,
                 permission: str | None, sitemaps: list[str]) -> None:
     with tx(conn):
@@ -198,7 +219,7 @@ def upsert_site(conn: sqlite3.Connection, property: str, host: str,
             "  host=excluded.host, permission=excluded.permission, "
             "  sitemaps=excluded.sitemaps, synced_at=excluded.synced_at",
             (property, host, permission, json.dumps(sitemaps),
-             datetime.now(UTC).isoformat()),
+             _utc_iso(datetime.now(UTC))),
         )
 
 
@@ -219,16 +240,27 @@ def get_sites(conn: sqlite3.Connection) -> list[dict]:
 def upsert_url(conn: sqlite3.Connection, url: str, property: str,
                status: str | None, reason: str | None,
                checked_at: str | None) -> None:
-    """Insert or update a URL. first_seen is written once and never changed."""
+    """Insert or update a URL. first_seen is written once and never changed.
+
+    A re-discovery pass (from sitemaps.py) carries no inspection result, so
+    status/reason/checked_at of None mean "no new information" and must not
+    overwrite what a prior inspection recorded. An inspection result (from
+    inspect.py) always carries a status, so in that case status and reason
+    move together — including clearing a reason when status improves to a
+    value that no longer needs one.
+    """
     with tx(conn):
         conn.execute(
             "INSERT INTO urls (url, property, status, reason, first_seen, checked_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(url) DO UPDATE SET "
-            "  property=excluded.property, status=excluded.status, "
-            "  reason=excluded.reason, checked_at=excluded.checked_at",
+            "  property = excluded.property, "
+            "  status = COALESCE(excluded.status, urls.status), "
+            "  reason = CASE WHEN excluded.status IS NULL "
+            "               THEN urls.reason ELSE excluded.reason END, "
+            "  checked_at = COALESCE(excluded.checked_at, urls.checked_at)",
             (url, property, status, reason,
-             datetime.now(UTC).isoformat(), checked_at),
+             _utc_iso(datetime.now(UTC)), _utc_iso(checked_at)),
         )
 
 
@@ -254,7 +286,7 @@ def stale_urls(conn: sqlite3.Connection, property: str, ttl_days: int,
     what has gone stale instead of the whole sitemap.
     """
     moment = now or datetime.now(UTC)
-    cutoff = (moment - timedelta(days=ttl_days)).isoformat()
+    cutoff = _utc_iso(moment - timedelta(days=ttl_days))
     rows = conn.execute(
         "SELECT url FROM urls WHERE property=? "
         "AND (checked_at IS NULL OR checked_at < ?) ORDER BY url",
@@ -264,5 +296,15 @@ def stale_urls(conn: sqlite3.Connection, property: str, ttl_days: int,
 
 
 def mark_submitted(conn: sqlite3.Connection, url: str, when: str) -> None:
+    """Record a submission timestamp. Raises KeyError if the url is unknown.
+
+    A silent no-op here would read back as "not submitted", causing the
+    caller to resubmit the same url and burn another quota slot.
+    """
     with tx(conn):
-        conn.execute("UPDATE urls SET last_submitted=? WHERE url=?", (when, url))
+        cursor = conn.execute(
+            "UPDATE urls SET last_submitted=? WHERE url=?",
+            (_utc_iso(when), url),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"no url row for {url}")
