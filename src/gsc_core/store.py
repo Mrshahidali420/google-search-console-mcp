@@ -415,3 +415,74 @@ def reconcile(conn: sqlite3.Connection, verdict: str = "unknown_crash", *,
         log.warning("reconciled %d submission(s) left open by a crash",
                     len(stragglers))
     return len(stragglers)
+
+
+JOB_STATES = frozenset({
+    "pending", "running", "completed",
+    "stopped_throttled", "stopped_user", "failed",
+})
+
+_TERMINAL_JOB_STATES = frozenset({
+    "completed", "stopped_throttled", "stopped_user", "failed",
+})
+
+
+def create_job(conn: sqlite3.Connection, job_id: str, params: dict) -> None:
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO jobs (id, params, state, started_at) "
+            "VALUES (?, ?, 'pending', ?)",
+            (job_id, json.dumps(params), utc_iso(datetime.now(UTC))),
+        )
+
+
+def get_job(conn: sqlite3.Connection, job_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return _job_row(row) if row else None
+
+
+def update_job(conn: sqlite3.Connection, job_id: str, *,
+               state: str | None = None, progress: dict | None = None,
+               error: str | None = None) -> None:
+    if state is not None and state not in JOB_STATES:
+        raise ValueError(f"unknown job state: {state}")
+
+    assignments: list[str] = []
+    values: list = []
+    if state is not None:
+        assignments.append("state=?")
+        values.append(state)
+        if state in _TERMINAL_JOB_STATES:
+            assignments.append("finished_at=?")
+            values.append(utc_iso(datetime.now(UTC)))
+    if progress is not None:
+        assignments.append("progress=?")
+        values.append(json.dumps(progress))
+    if error is not None:
+        assignments.append("error=?")
+        values.append(error)
+    if not assignments:
+        return
+
+    values.append(job_id)
+    with tx(conn):
+        conn.execute(
+            f"UPDATE jobs SET {', '.join(assignments)} WHERE id=?", values
+        )
+
+
+def list_jobs(conn: sqlite3.Connection, state: str | None = None) -> list[dict]:
+    if state is None:
+        rows = conn.execute("SELECT * FROM jobs ORDER BY started_at").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE state=? ORDER BY started_at", (state,)
+        ).fetchall()
+    return [_job_row(row) for row in rows]
+
+
+def _job_row(row: sqlite3.Row) -> dict:
+    job = dict(row)
+    job["params"] = json.loads(job["params"] or "{}")
+    job["progress"] = json.loads(job["progress"]) if job["progress"] else None
+    return job
