@@ -54,3 +54,30 @@ def test_no_handler_targets_stdout(monkeypatch, tmp_path):
     logger = runlog.init()
     streams = [getattr(h, "stream", None) for h in logger.handlers]
     assert sys.stdout not in streams
+
+
+def test_get_child_writes_nothing_to_stdout_after_init(monkeypatch, tmp_path, capsys):
+    """Test the real-world path: get() after init() should never write to stdout."""
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    runlog._reset_for_tests()
+    runlog.init()
+    child = runlog.get("gsc_core.example")
+    child.error("child error message")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "child error message" in captured.err
+
+
+def test_get_child_before_init_writes_nothing_to_stdout(monkeypatch, tmp_path, capsys):
+    """Regression test for Finding 1: get() before init() must not escape to stdout."""
+    import sys
+
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    runlog._reset_for_tests()
+    # Do NOT call init() - this tests the propagation protection
+    child = runlog.get("gsc_core.example")
+    child.error("message before init")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""

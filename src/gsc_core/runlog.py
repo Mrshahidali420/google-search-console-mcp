@@ -18,6 +18,11 @@ _BACKUP_COUNT = 3
 
 _configured = False
 
+# Set at import, not only in init(): modules call get(__name__) at import time,
+# and a record emitted before init() would otherwise climb to the true root
+# logger and land on whatever handler a third-party basicConfig() attached.
+logging.getLogger(ROOT_NAME).propagate = False
+
 
 def init(level: int = logging.INFO) -> logging.Logger:
     """Attach handlers to the root gsc logger. Safe to call repeatedly."""
@@ -63,4 +68,6 @@ def _reset_for_tests() -> None:
     for handler in list(logger.handlers):
         handler.close()
         logger.removeHandler(handler)
+    # Preserve propagate = False set at import to prevent escape to root logger
+    logger.propagate = False
     _configured = False
