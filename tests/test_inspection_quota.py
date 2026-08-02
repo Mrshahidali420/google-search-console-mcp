@@ -198,3 +198,26 @@ def test_inspection_check_accepts_a_naive_now_when_blocked(conn):
     assert verdict.binding == "minute"
     assert verdict.retry_after_seconds is not None
     assert 0 < verdict.retry_after_seconds <= 60
+
+
+def test_a_request_larger_than_the_ceiling_reports_a_wait_instead_of_crashing(conn):
+    """A window can bind with nothing in it: `wanted` alone can exceed the
+    ceiling. MIN(called_at) over no rows is NULL, which used to raise
+    TypeError and take the caller's whole batch with it -- reachable from a
+    single check_status() over any site with more than 600 URLs."""
+    verdict = quota.inspection_check(
+        conn, PROP, wanted=quota.MINUTE_INSPECTION_LIMIT + 100, now=NOW)
+    assert not verdict.allowed
+    assert verdict.binding == "minute"
+    # nothing is in the window, so nothing will age out of it -- waiting
+    # cannot help, and the caller has to ask for less.
+    assert verdict.retry_after_seconds == 0
+    assert verdict.minute_free == quota.MINUTE_INSPECTION_LIMIT
+
+
+def test_a_request_larger_than_the_daily_ceiling_also_survives(conn):
+    verdict = quota.inspection_check(
+        conn, PROP, wanted=quota.DAILY_INSPECTION_LIMIT + 1, now=NOW)
+    assert not verdict.allowed
+    assert verdict.binding == "daily"
+    assert verdict.retry_after_seconds == 0

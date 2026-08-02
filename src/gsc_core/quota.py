@@ -313,6 +313,17 @@ def _retry_after_seconds(conn: sqlite3.Connection, property: str,
     inspection_used()'s cutoffs dodge this because they hand `moment` to
     utc_iso() before ever comparing it; this is the one place that instead
     does datetime arithmetic directly, so it has to normalise for itself.
+
+    A window can be binding with nothing in it: `wanted` alone can exceed the
+    ceiling, which is not hypothetical -- one check_status() call over a
+    1,400-URL site asks for more than MINUTE_INSPECTION_LIMIT on a completely
+    empty ledger. MIN() over no rows is NULL, so this used to raise TypeError
+    and take the whole batch with it. Nothing is in the window, so nothing
+    will age out of it and waiting cannot help; the caller has to ask for
+    less. Report 0 -- "no wait will fix this" -- rather than None, which
+    QuotaVerdict reserves for "not blocked at all" and which would hand a
+    caller the blocked-with-no-wait-time contradiction check() takes care to
+    avoid.
     """
     moment = datetime.fromisoformat(utc_iso(moment))
     if binding == "daily":
@@ -324,6 +335,8 @@ def _retry_after_seconds(conn: sqlite3.Connection, property: str,
         "WHERE property=? AND called_at >= ?",
         (property, cutoff),
     ).fetchone()
+    if row is None or row["oldest"] is None:
+        return 0
     oldest = datetime.fromisoformat(row["oldest"])
     remaining = ((oldest + window) - moment).total_seconds()
     return max(0, math.ceil(remaining))
