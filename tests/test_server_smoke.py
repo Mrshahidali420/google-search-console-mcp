@@ -26,7 +26,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 EXPECTED = {
     "gsc_list_sites", "gsc_doctor", "gsc_check_status",
     "gsc_quota", "gsc_performance", "gsc_submit_sitemaps",
-    "gsc_detect_browsers",
+    "gsc_detect_browsers", "gsc_setup",
 }
 
 # Belong to Plan 3 (browser-driven submission) or Plan 4 (bulk auditing) —
@@ -48,7 +48,7 @@ def test_every_tool_is_registered_and_described(tmp_path, monkeypatch):
     tools = asyncio.run(_list_tools_over_the_wire())
     names = {tool.name for tool in tools}
     # Equality, not a subset check: the claim this test makes is "exactly
-    # these six tools ship". A subset check (EXPECTED <= names) would pass
+    # these tools ship". A subset check (EXPECTED <= names) would pass
     # even if a seventh, unplanned tool were accidentally registered under
     # any name that isn't already listed in NOT_YET_SHIPPED below.
     assert names == EXPECTED

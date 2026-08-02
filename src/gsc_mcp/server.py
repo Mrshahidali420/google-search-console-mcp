@@ -1,5 +1,11 @@
 """The MCP server shell: tool registration — `gsc_list_sites`, `gsc_doctor`,
-`gsc_check_status`, `gsc_quota`.
+`gsc_check_status`, `gsc_quota`, `gsc_detect_browsers`, `gsc_setup`.
+
+The last two keep their bodies in their own modules (`tools_browsers`,
+`onboarding`) and appear here as a docstring and a one-line delegate: this
+file is already at its size ceiling, and a tool's docstring is its entire
+interface to a model, so the docstring is the part that belongs beside the
+registration.
 
 Import order is load-bearing. `runlog.init()` runs before `FastMCP` is
 constructed, and before anything else in this module can log a line —
@@ -32,7 +38,7 @@ runlog.init()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliberate
 
-from . import deps, tools_browsers  # noqa: E402 — import order is deliberate
+from . import deps, onboarding, tools_browsers  # noqa: E402 — import order is deliberate
 
 log = runlog.get(__name__)
 
@@ -877,9 +883,13 @@ def gsc_detect_browsers() -> dict:
     do not build one from the browser key, since Chromium registers no
     chromium:// scheme and uses chrome://extensions.
 
-    `has_extension` is ALWAYS null for now — whether the pairing extension
-    is installed in a profile is not checked yet. Read null as "not
-    checked", never as "not installed".
+    `has_extension` is TRI-STATE: true means the pairing extension is
+    installed in that profile, false means every preferences file was read
+    and it was not among them, and null means the check could not be
+    PERFORMED — an unreadable preferences file, or no unpacked extension
+    directory to match against. Read null as "not detected", never as "not
+    installed"; telling a user with a working install to reinstall it is
+    the one wrong answer this flag exists to avoid.
 
     `signed_in` says a Google account was found in that profile's files.
     `account_discoverable` is a fact about the BRAND: Brave, Vivaldi, Opera
@@ -897,6 +907,47 @@ def gsc_detect_browsers() -> dict:
     <exception type>, "fix": ...}`.
     """
     return tools_browsers.detect_browsers()
+
+
+@mcp.tool()
+def gsc_setup(open_browser: bool = True) -> dict:
+    """Set this server up, one step at a time. Call it, do what it says,
+    call it again — repeat until `ok` is true.
+
+    IDEMPOTENT and SAFE TO CALL REPEATEDLY. It spends no Search Console
+    indexing quota and makes at most one API call (verifying the stored
+    sign-in still works). Every call re-reports the whole state from
+    scratch, so there is no session to resume and no order to get wrong: if
+    you have lost track of where setup got to, just call it again.
+
+    There are four steps, checked in order: `oauth_client` (credentials to
+    sign in with), `consent` (the user approves Google's consent screen),
+    `browser` (a Chromium browser with a profile exists), `extension` (the
+    gsc-mcp bridge extension is loaded in the profile this server
+    recommends). The FIRST unsatisfied step is returned as `next` and the
+    call stops there — later steps are meaningless until it is done.
+
+    Returns `{"ok": bool, "done": [step], "pending": [step], "next":
+    {"step", "action", "url"?, "path"?} | None}`. `ok` is true, and `next`
+    is null, only when all four steps are satisfied. `next.action` is a
+    plain-English instruction to relay to the user. `next.url`, when
+    present, is the Google consent URL to open. `next.path`, when present,
+    is the folder to choose in the browser's "Load unpacked" dialog.
+
+    `open_browser` (default true) opens the consent URL in the user's
+    default browser when a NEW consent is started. A repeat call while one
+    is already pending returns the SAME url and opens nothing — the pending
+    consent screen is the only one whose redirect will be accepted, so
+    never assume a second call means a second link.
+
+    PRIVACY: no email address, no token field, no PKCE verifier and no
+    authorization code is ever returned. The only filesystem path returned
+    is `next.path`, which is this server's own extension directory.
+
+    Never raises. An unexpected fault comes back as `next.step:
+    "unexpected"` with an action to retry.
+    """
+    return onboarding.setup(open_browser)
 
 
 def main() -> None:
