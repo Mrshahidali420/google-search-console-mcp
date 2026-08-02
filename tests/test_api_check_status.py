@@ -94,6 +94,21 @@ def test_urls_beyond_the_daily_budget_are_skipped_not_attempted(conn):
     assert out["skipped_quota"][0]["retry_after_seconds"] > 0
 
 
+def test_the_smaller_of_the_two_windows_is_what_limits_a_partial_batch(conn):
+    """The verdict names only the FIRST binding window. Honouring that one
+    alone fires the other straight into a rejection."""
+    with store.tx(conn):
+        # 1,950 calls today, 570 of them inside the last minute:
+        # daily_free == 50, minute_free == 30.
+        quota.record_inspections(conn, PROP, 1380, when=NOW - timedelta(minutes=5))
+        quota.record_inspections(conn, PROP, 570, when=NOW - timedelta(seconds=10))
+    urls = [f"https://example.com/p{n}" for n in range(60)]
+    out = run(conn, urls, ScriptedInspect({}))
+    assert out["quota"][PROP]["binding"] == "daily"     # ...but 30 is the cap
+    assert out["checked"] == 30
+    assert len(out["skipped_quota"]) == 30
+
+
 def test_a_batch_larger_than_the_minute_ceiling_does_not_crash(conn):
     """A 1,400-url site is the motivating case; 600/min is the first ceiling
     it walks into, on a completely empty ledger."""
