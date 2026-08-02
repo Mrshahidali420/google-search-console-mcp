@@ -139,3 +139,62 @@ def test_a_database_from_a_newer_version_is_left_alone(tmp_path):
         assert store.schema_version(conn) == 99
     finally:
         conn.close()
+
+
+def _legacy_db_with_stamp(path, value):
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+    )
+    legacy.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?)", (value,)
+    )
+    legacy.commit()
+    legacy.close()
+
+
+def test_connect_does_not_crash_on_an_empty_version_stamp(tmp_path):
+    """A corrupt schema_version must not stop the database from opening --
+    the previous behaviour never parsed the value at all, so this must not
+    regress just because advancing a stale stamp now needs to parse it."""
+    path = tmp_path / "corrupt_empty.db"
+    _legacy_db_with_stamp(path, "")
+
+    conn = store.connect(path)
+    try:
+        stamp = conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()["value"]
+        assert stamp == ""
+    finally:
+        conn.close()
+
+
+def test_connect_does_not_crash_on_a_non_numeric_version_stamp(tmp_path):
+    """Same as above for a non-numeric value, not just an empty one."""
+    path = tmp_path / "corrupt_text.db"
+    _legacy_db_with_stamp(path, "abc")
+
+    conn = store.connect(path)
+    try:
+        stamp = conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()["value"]
+        assert stamp == "abc"
+    finally:
+        conn.close()
+
+
+def test_inspection_check_accepts_a_naive_now_when_blocked(conn):
+    """now: datetime | None states no tz requirement, and every other path
+    in this module tolerates naive input by normalising through
+    store.utc_iso -- the blocked path (which computes retry_after_seconds)
+    must too, not just the allowed path."""
+    naive_now = NOW.replace(tzinfo=None)
+    _spend(conn, PROP, NOW - timedelta(seconds=5),
+           count=quota.MINUTE_INSPECTION_LIMIT)
+    verdict = quota.inspection_check(conn, PROP, wanted=1, now=naive_now)
+    assert not verdict.allowed
+    assert verdict.binding == "minute"
+    assert verdict.retry_after_seconds is not None
+    assert 0 < verdict.retry_after_seconds <= 60

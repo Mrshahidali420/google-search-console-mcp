@@ -304,7 +304,17 @@ def inspection_used(conn: sqlite3.Connection, property: str,
 
 def _retry_after_seconds(conn: sqlite3.Connection, property: str,
                          binding: str, moment: datetime) -> int:
-    """Seconds until the oldest row currently blocking `binding` ages out."""
+    """Seconds until the oldest row currently blocking `binding` ages out.
+
+    Normalises `moment` through store.utc_iso() before doing arithmetic on
+    it, the same as every timestamp elsewhere in this module -- `oldest`
+    below is always tz-aware (parsed from a utc_iso-stamped column), and a
+    caller-supplied naive `moment` subtracted against it raises TypeError.
+    inspection_used()'s cutoffs dodge this because they hand `moment` to
+    utc_iso() before ever comparing it; this is the one place that instead
+    does datetime arithmetic directly, so it has to normalise for itself.
+    """
+    moment = datetime.fromisoformat(utc_iso(moment))
     if binding == "daily":
         cutoff, window = _daily_cutoff(moment), _DAILY_WINDOW
     else:

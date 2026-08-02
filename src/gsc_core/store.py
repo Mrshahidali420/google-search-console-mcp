@@ -112,6 +112,10 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     # migration required. This block only updates the version label that
     # describes what just happened:
     #   - no stamp yet -> this is a brand-new database, stamp SCHEMA_VERSION.
+    #   - stamp is not a parseable integer -> leave it alone. Refusing to
+    #     open the database over a corrupt meta row would be a worse outcome
+    #     than an inaccurate label; this matches the original behaviour,
+    #     which never parsed the value at all.
     #   - stamp < SCHEMA_VERSION -> an older gsc-mcp wrote this database, and
     #     the additive schema now brings it up to date, so the stamp follows.
     #   - stamp >= SCHEMA_VERSION -> leave it alone. Unconditionally
@@ -129,11 +133,16 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
-    elif int(existing["value"]) < SCHEMA_VERSION:
-        conn.execute(
-            "UPDATE meta SET value=? WHERE key='schema_version'",
-            (str(SCHEMA_VERSION),),
-        )
+    else:
+        try:
+            stamped = int(existing["value"])
+        except ValueError:
+            stamped = None
+        if stamped is not None and stamped < SCHEMA_VERSION:
+            conn.execute(
+                "UPDATE meta SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
     return conn
 
 
