@@ -369,6 +369,8 @@ class LoopbackReceiver:
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True
         )
+        self._started = False
+        self._closed = False
 
     @property
     def redirect_uri(self) -> str:
@@ -379,9 +381,22 @@ class LoopbackReceiver:
         outlive one stack frame — an MCP tool returning a consent URL and
         being called again later — can hold the receiver open across calls."""
         self._thread.start()
+        self._started = True
 
     def close(self) -> None:
-        self._server.shutdown()
+        """Idempotent, and safe to call on a receiver that never started.
+
+        BaseServer.shutdown() sets a flag and then blocks, with no timeout,
+        on an internal event that only serve_forever() sets on its way out.
+        If the thread never started, nothing will ever set that event, and
+        shutdown() would hang forever — a caller holding a PendingConsent it
+        never finished must be able to close it unconditionally.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self._started:
+            self._server.shutdown()
         self._server.server_close()
 
     def __enter__(self) -> "LoopbackReceiver":
@@ -504,9 +519,16 @@ def finish_consent(pending: PendingConsent, client_secret: str, *,
 
     Does NOT close the receiver on the None path — the caller polls again.
     DOES close it on every terminal path, success or raise, because the
-    port has no further purpose once a code has been consumed.
+    port has no further purpose once a code has been consumed. That includes
+    poll() itself raising: a state mismatch or a refused consent is just as
+    terminal as a successful exchange, and leaving the socket open in that
+    case would leak a port and a thread for the life of the process.
     """
-    code = pending.receiver.poll()
+    try:
+        code = pending.receiver.poll()
+    except BaseException:
+        pending.receiver.close()
+        raise
     if code is None:
         return None
     try:
