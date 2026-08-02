@@ -10,6 +10,7 @@ seventeen properties was being capped at eleven submissions total.
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
@@ -210,3 +211,153 @@ def check(conn: sqlite3.Connection, account: str, property: str, *,
         account_free=account_free,
         next_free_at=next_free_at,
     )
+
+
+# --- URL Inspection API quota -----------------------------------------------
+#
+# A completely separate mechanic from the Request-Indexing slots above: this
+# accounts calls to the URL Inspection API (urlInspection.index.inspect), not
+# clicks on the "Request Indexing" button. Google documents two ceilings --
+# 2,000 calls/day and roughly 600/minute -- both enforced per property, the
+# same granularity quota_slots already uses, so the two mechanics read the
+# same way to anyone auditing this file.
+#
+# The daily limit is enforced as a ROLLING 24-hour window, not a calendar
+# day, even though Google's own docs describe it as a daily quota. Google
+# resets it on its own schedule in an unpublished timezone, so pinning this
+# to UTC midnight (or any other fixed point) risks under-counting right after
+# a real reset -- reading a property as having headroom it does not actually
+# have, and firing into a hard rejection. A rolling window can only ever be
+# *more* conservative than whatever fixed reset Google actually uses: worst
+# case it makes a caller wait a little longer than strictly necessary, it can
+# never let a call through that Google would refuse. This mirrors the rolling
+# design already used for Request-Indexing slots above.
+
+DAILY_INSPECTION_LIMIT = 2000
+MINUTE_INSPECTION_LIMIT = 600
+
+_DAILY_WINDOW = timedelta(hours=24)
+_MINUTE_WINDOW = timedelta(seconds=60)
+
+
+@dataclass(frozen=True)
+class InspectionVerdict:
+    """Whether an inspection call may proceed, and which window is binding."""
+    allowed: bool
+    daily_free: int
+    minute_free: int
+    binding: str | None            # "daily" | "minute" | None
+    retry_after_seconds: int | None
+
+
+def _daily_cutoff(now: datetime) -> str:
+    return utc_iso(now - _DAILY_WINDOW)
+
+
+def _minute_cutoff(now: datetime) -> str:
+    return utc_iso(now - _MINUTE_WINDOW)
+
+
+def record_inspections(conn: sqlite3.Connection, property: str, count: int,
+                       when: datetime | None = None) -> None:
+    """Record `count` URL Inspection API calls against `property`.
+
+    Callers record BEFORE making the HTTP calls this accounts for, not after
+    -- "reserve then spend", the same direction Plan 1 chose for
+    close_submission()/used(): if the process dies mid-batch the count comes
+    out too high, which only costs a wait, whereas recording afterwards would
+    under-count and let a later batch walk into a hard API rejection.
+
+    One row per call, matching quota_slots. Does not open its own
+    transaction -- callers wrap this in store.tx(), exactly like every other
+    accounting write in this module.
+    """
+    moment = when or datetime.now(UTC)
+    stamp = utc_iso(moment)
+    conn.executemany(
+        "INSERT INTO inspection_calls (property, called_at) VALUES (?, ?)",
+        [(property, stamp)] * count,
+    )
+
+
+def inspection_used(conn: sqlite3.Connection, property: str,
+                    now: datetime | None = None) -> dict:
+    """Calls spent on this property inside each rolling window.
+
+    Compared as strings, not parsed datetimes -- store.utc_iso()'s fixed
+    width is what makes that safe, so every timestamp must pass through it
+    rather than being built by hand.
+    """
+    moment = now or datetime.now(UTC)
+    day = conn.execute(
+        "SELECT COUNT(*) AS n FROM inspection_calls "
+        "WHERE property=? AND called_at >= ?",
+        (property, _daily_cutoff(moment)),
+    ).fetchone()["n"]
+    minute = conn.execute(
+        "SELECT COUNT(*) AS n FROM inspection_calls "
+        "WHERE property=? AND called_at >= ?",
+        (property, _minute_cutoff(moment)),
+    ).fetchone()["n"]
+    return {"day": int(day), "minute": int(minute)}
+
+
+def _retry_after_seconds(conn: sqlite3.Connection, property: str,
+                         binding: str, moment: datetime) -> int:
+    """Seconds until the oldest row currently blocking `binding` ages out."""
+    if binding == "daily":
+        cutoff, window = _daily_cutoff(moment), _DAILY_WINDOW
+    else:
+        cutoff, window = _minute_cutoff(moment), _MINUTE_WINDOW
+    row = conn.execute(
+        "SELECT MIN(called_at) AS oldest FROM inspection_calls "
+        "WHERE property=? AND called_at >= ?",
+        (property, cutoff),
+    ).fetchone()
+    oldest = datetime.fromisoformat(row["oldest"])
+    remaining = ((oldest + window) - moment).total_seconds()
+    return max(0, math.ceil(remaining))
+
+
+def inspection_check(conn: sqlite3.Connection, property: str, wanted: int = 1,
+                     now: datetime | None = None) -> InspectionVerdict:
+    """Gate `wanted` inspection calls on both the daily and minute windows."""
+    moment = now or datetime.now(UTC)
+    used = inspection_used(conn, property, now=moment)
+    daily_free = max(0, DAILY_INSPECTION_LIMIT - used["day"])
+    minute_free = max(0, MINUTE_INSPECTION_LIMIT - used["minute"])
+
+    binding: str | None = None
+    if daily_free < wanted:
+        binding = "daily"
+    elif minute_free < wanted:
+        binding = "minute"
+
+    retry_after_seconds = (
+        None if binding is None
+        else _retry_after_seconds(conn, property, binding, moment)
+    )
+
+    return InspectionVerdict(
+        allowed=binding is None,
+        daily_free=daily_free,
+        minute_free=minute_free,
+        binding=binding,
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
+def prune_inspections(conn: sqlite3.Connection, keep_days: int = 2,
+                      now: datetime | None = None) -> int:
+    """Delete inspection_calls rows older than keep_days; return how many.
+
+    Mirrors why this is safe at scale: even at the full 2,000/day ceiling on
+    every property, a 2-day retention keeps this table small. No own
+    transaction -- callers wrap this in store.tx().
+    """
+    moment = now or datetime.now(UTC)
+    cutoff = utc_iso(moment - timedelta(days=keep_days))
+    cursor = conn.execute(
+        "DELETE FROM inspection_calls WHERE called_at < ?", (cutoff,)
+    )
+    return cursor.rowcount
