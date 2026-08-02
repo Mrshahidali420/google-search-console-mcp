@@ -493,3 +493,80 @@ def test_a_repeated_url_is_inspected_once_and_reserves_one_slot(conn):
     assert out["skipped_quota"] == []
     # every occurrence still gets a row, and it carries the real result
     assert [row["status"] for row in out["rows"]] == ["indexed", "indexed"]
+
+
+# --- the quota report's fields are measured AT THE GATE (B1) ------------------
+#
+# gsc_quota reports fields called daily_free/minute_free measured when it is
+# asked. This report's are measured before a reservation this same call then
+# spends. The names must not collide, or a caller compares two numbers that
+# were never comparable.
+
+def test_the_quota_report_names_its_free_counts_as_gate_time(conn):
+    out = run(conn, ["https://example.com/a"], ScriptedInspect({}))
+    entry = out["quota"][PROP]
+    assert "daily_free_at_gate" in entry
+    assert "minute_free_at_gate" in entry
+    assert "daily_free" not in entry
+    assert "minute_free" not in entry
+
+
+def test_the_gate_free_counts_exclude_this_batchs_own_reservation(conn):
+    """Measured BEFORE the reservation, so a two-URL batch on a fresh
+    property reports the full limit, not the limit minus two. The number is
+    only meaningful with that instant attached -- which is what the name
+    carries."""
+    out = run(conn, ["https://example.com/a", "https://example.com/b"],
+              ScriptedInspect({}))
+    entry = out["quota"][PROP]
+    assert entry["attempted"] == 2
+    assert entry["daily_free_at_gate"] == quota.DAILY_INSPECTION_LIMIT
+    assert entry["minute_free_at_gate"] == quota.MINUTE_INSPECTION_LIMIT
+    # And the store really did move -- the report is stale, not wrong.
+    after = quota.inspection_check(conn, PROP, wanted=1, now=NOW)
+    assert after.daily_free == quota.DAILY_INSPECTION_LIMIT - 2
+
+
+# --- inspection_calls is pruned to its documented retention (B4) --------------
+
+def _record_at(conn, when, count=1):
+    with store.tx(conn):
+        quota.record_inspections(conn, PROP, count, when=when)
+
+
+def _call_rows(conn) -> int:
+    return conn.execute("SELECT COUNT(*) FROM inspection_calls").fetchone()[0]
+
+
+def test_check_status_prunes_inspection_calls_older_than_the_retention(conn):
+    _record_at(conn, NOW - timedelta(days=5))
+    _record_at(conn, NOW - timedelta(days=3))
+    assert _call_rows(conn) == 2
+
+    run(conn, ["https://example.com/a"], ScriptedInspect({}))
+
+    # Both stale rows gone; only this call's own reservation remains.
+    assert _call_rows(conn) == 1
+
+
+def test_pruning_keeps_rows_inside_the_retention_window(conn):
+    """keep_days=2 is wider than the widest window the gate reads (one day),
+    so pruning can never delete a row a verdict still depends on."""
+    _record_at(conn, NOW - timedelta(hours=23), count=4)
+
+    run(conn, ["https://example.com/a"], ScriptedInspect({}))
+
+    assert _call_rows(conn) == 5   # the four 23h-old rows plus this call's
+    verdict = quota.inspection_check(conn, PROP, wanted=1, now=NOW)
+    assert verdict.daily_free == quota.DAILY_INSPECTION_LIMIT - 5
+
+
+def test_pruning_does_not_change_what_the_gate_allows(conn):
+    """A day-old row is outside the daily window but inside the retention:
+    it is neither counted nor deleted, and headroom is untouched."""
+    _record_at(conn, NOW - timedelta(days=1, hours=1), count=7)
+
+    out = run(conn, ["https://example.com/a"], ScriptedInspect({}))
+
+    assert out["quota"][PROP]["daily_free_at_gate"] == quota.DAILY_INSPECTION_LIMIT
+    assert _call_rows(conn) == 8   # seven day-old rows kept, plus this call's

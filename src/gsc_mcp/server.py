@@ -343,7 +343,14 @@ def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
     property matches" purely because nothing has been synced yet.
 
     Returns `{"rows": [...], "checked": int, "skipped_quota": [...],
-    "quota": {...}}`. Each row is `{"url", "status", "detail",
+    "quota": {...}}`. "quota" is per property, and its
+    `daily_free_at_gate`/`minute_free_at_gate` are the headroom measured
+    BEFORE this call reserved its own budget — they are a record of what
+    the gate saw, not current headroom, and are already stale by the size
+    of this batch by the time you read them. gsc_quota's similarly-shaped
+    `daily_free`/`minute_free` are the ones measured now; do not compare
+    the two pairs or plan a second batch against these. Each row is
+    `{"url", "status", "detail",
     "unverified"}`. `status` is one of: indexed, crawled_not_indexed,
     discovered_not_indexed, unknown_to_google, redirect, noindex,
     duplicate, alternate_canonical, not_found, soft_404, blocked_robots,

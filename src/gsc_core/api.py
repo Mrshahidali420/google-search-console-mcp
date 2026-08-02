@@ -301,6 +301,17 @@ def check_status(
     inspect = _inspect or inspect_url
     routed = routing.route_all(urls, properties)
 
+    # Housekeeping before the gate, not after: this is the only code path
+    # that writes inspection_calls, so pruning here is the one place the
+    # table's documented two-day retention can actually be enforced. It
+    # cannot change a verdict — the widest rolling window the gate reads is
+    # one day and prune_inspections keeps two — and it is a single indexed
+    # DELETE, so paying for it once per call is cheaper than the unbounded
+    # growth it prevents. Its own transaction, since it is not part of the
+    # reserve-then-spend atom and must not widen it.
+    with store.tx(conn):
+        quota.prune_inspections(conn, now=moment)
+
     reserved = _reserve(conn, _group_by_property(routed), moment)
     targets = _targets(routed, reserved)
 
@@ -665,8 +676,16 @@ def _quota_report(
     reserved: dict[str, tuple[list[str], list[str], quota.InspectionVerdict]],
     unverified: dict[str, str],
 ) -> dict[str, dict]:
-    """Per-property accounting. daily_free/minute_free are the headroom seen
-    AT THE GATE, before this batch reserved any of it — not what is left now.
+    """Per-property accounting. daily_free_at_gate/minute_free_at_gate are the
+    headroom seen AT THE GATE, before this batch reserved any of it — not what
+    is left now.
+
+    The `_at_gate` suffix is not decoration. gsc_quota reports fields called
+    `daily_free`/`minute_free` measured at the moment it is asked; these are
+    measured before a reservation this very call then spends, so the two
+    differ by the size of the batch. Naming both pairs identically invited a
+    caller to compare them, or to treat this one as current headroom and
+    launch a second batch against budget that is already gone.
 
     `unverified` counts rows whose suspect status no re-check confirmed, so a
     caller reading only this summary still sees that the pass was incomplete.
@@ -678,8 +697,8 @@ def _quota_report(
             "unverified": sum(1 for url in granted if url in unverified),
             "binding": verdict.binding,
             "retry_after_seconds": verdict.retry_after_seconds,
-            "daily_free": verdict.daily_free,
-            "minute_free": verdict.minute_free,
+            "daily_free_at_gate": verdict.daily_free,
+            "minute_free_at_gate": verdict.minute_free,
         }
         for property, (granted, deferred, verdict) in reserved.items()
     }
