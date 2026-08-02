@@ -1,0 +1,58 @@
+"""Wire-level smoke test: does the server actually speak MCP?
+
+Every other test in this suite calls gsc_* tool functions directly as plain
+Python. None of them proves the server starts, registers its tools with
+FastMCP, and answers a real MCP client over a real transport. That gap
+matters because the README makes exactly that claim to strangers.
+
+`FastMCP.list_tools()` (the shape suggested in the task brief) was
+considered and rejected: it calls straight into the in-process
+`ToolManager`, bypassing JSON-RPC entirely, so it cannot detect a broken
+transport, a bad initialization handshake, or a tool that fails to survive
+serialization. `mcp.shared.memory.create_connected_server_and_client_session`
+is used instead — it runs the real `Server.run()` loop against a real
+`ClientSession` over in-memory streams, so `client_session.list_tools()`
+travels through the same JSON-RPC path a real client (Claude Desktop, an
+MCP Inspector, anything else) would use. No subprocess/stdio fallback was
+needed: this transport is available in the installed mcp 1.29.0.
+"""
+from __future__ import annotations
+
+import asyncio
+
+from mcp.shared.memory import create_connected_server_and_client_session
+
+EXPECTED = {
+    "gsc_list_sites", "gsc_doctor", "gsc_check_status",
+    "gsc_quota", "gsc_performance", "gsc_submit_sitemaps",
+}
+
+# Belong to Plan 3 (browser-driven submission) or Plan 4 (bulk auditing) —
+# see the task brief's "Out of scope" list. Neither exists yet; if either
+# name shows up here, something leaked ahead of its own plan.
+NOT_YET_SHIPPED = {"gsc_request_indexing", "gsc_start_indexing_job"}
+
+
+async def _list_tools_over_the_wire():
+    from gsc_mcp import server
+
+    async with create_connected_server_and_client_session(server.mcp) as session:
+        result = await session.list_tools()
+    return result.tools
+
+
+def test_every_tool_is_registered_and_described(tmp_path, monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    tools = asyncio.run(_list_tools_over_the_wire())
+    names = {tool.name for tool in tools}
+    assert EXPECTED <= names
+    for tool in tools:
+        assert tool.description, f"{tool.name} has no description"
+
+
+def test_no_milestone_three_tools_leaked_in(tmp_path, monkeypatch):
+    """Submission tools belong to Plan 3 and must not appear yet."""
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    tools = asyncio.run(_list_tools_over_the_wire())
+    names = {tool.name for tool in tools}
+    assert not (names & NOT_YET_SHIPPED)

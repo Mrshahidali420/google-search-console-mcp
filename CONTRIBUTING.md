@@ -31,6 +31,8 @@ The full suite should be green before and after your change. It currently runs i
 
 **Every MCP tool call gets its own database connection.** `store.tx()` re-entrancy is connection-scoped, not task-scoped, so two concurrent tasks sharing one connection will silently nest transactions.
 
+**Network clients take injected `session` and `sleep` parameters.** No test may perform real network I/O or sleep for real.
+
 ## Pull requests
 
 1. Branch off `master`.
