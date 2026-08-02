@@ -169,3 +169,19 @@ def test_mark_submitted_raises_when_url_is_unknown(tmp_path):
     with pytest.raises(KeyError):
         store.mark_submitted(conn, "https://example.com/missing",
                              _iso(datetime.now(UTC)))
+
+
+def test_corrupt_sitemaps_does_not_break_the_site_listing(tmp_path):
+    conn = _conn(tmp_path)
+    store.upsert_site(conn, PROP, "example.com", "siteOwner",
+                      ["https://example.com/sitemap.xml"])
+    store.upsert_site(conn, PROP_B, "other.example", "siteOwner",
+                      ["https://other.example/sitemap.xml"])
+    conn.execute("UPDATE sites SET sitemaps='{ not json' "
+                 "WHERE property=?", (PROP,))
+
+    sites = store.get_sites(conn)
+    assert len(sites) == 2
+    assert sites[0]["sitemaps"] == []
+    # The intact row still decodes: only the corrupt one falls back.
+    assert sites[1]["sitemaps"] == ["https://other.example/sitemap.xml"]

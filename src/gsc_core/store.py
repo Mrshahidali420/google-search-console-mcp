@@ -166,6 +166,15 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     Neither is an Exception, and letting either skip both COMMIT and ROLLBACK
     would leave the transaction open — poisoning the connection for every
     later tx and holding the write lock against the other process.
+
+    Re-entrancy is connection-aware, not task-aware — a hazard once anything
+    async is built on this. Two concurrent asyncio tasks sharing a connection
+    would see each other's open transaction and nest silently: the inner
+    RELEASE only folds its savepoint into the outer transaction, so work the
+    caller believes is committed is not durable, and is lost outright if the
+    other task rolls back. Without re-entrancy that interleaving failed
+    loudly. A connection must therefore have a single owner: never share one
+    across concurrent tasks; give each its own via connect() or session().
     """
     if conn.in_transaction:
         name = f"sp_{next(_savepoints)}"
@@ -176,7 +185,14 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
             _cleanup(conn, f"ROLLBACK TO {name}")
             _cleanup(conn, f"RELEASE {name}")
             raise
-        conn.execute(f"RELEASE {name}")
+        # A failing RELEASE would leave the savepoint on the stack and the
+        # transaction open, so later tx calls nest against a dead savepoint.
+        try:
+            conn.execute(f"RELEASE {name}")
+        except sqlite3.Error:
+            _cleanup(conn, f"ROLLBACK TO {name}")
+            _cleanup(conn, f"RELEASE {name}")
+            raise
         return
 
     conn.execute("BEGIN IMMEDIATE")
@@ -185,7 +201,13 @@ def tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     except BaseException:
         _cleanup(conn, "ROLLBACK")
         raise
-    conn.execute("COMMIT")
+    # A failing COMMIT leaves in_transaction True, so the next tx() would
+    # silently become a SAVEPOINT whose RELEASE commits nothing.
+    try:
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        _cleanup(conn, "ROLLBACK")
+        raise
 
 
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%f+00:00"
@@ -230,7 +252,8 @@ def get_sites(conn: sqlite3.Connection) -> list[dict]:
             "property": row["property"],
             "host": row["host"],
             "permission": row["permission"],
-            "sitemaps": json.loads(row["sitemaps"] or "[]"),
+            "sitemaps": _decode(row["sitemaps"], [], row["property"],
+                                "sitemaps"),
             "synced_at": row["synced_at"],
         }
         for row in rows
@@ -489,13 +512,19 @@ def list_jobs(conn: sqlite3.Connection, state: str | None = None) -> list[dict]:
     return [_job_row(row) for row in rows]
 
 
-def _decode(raw: str | None, fallback, job_id: str, field: str):
+def _decode(raw: str | None, fallback, record_id: str, field: str):
+    """Decode a JSON column, falling back rather than failing the whole read.
+
+    One corrupt row must not take out the listing it appears in. record_id is
+    whatever identifies the row to an operator — a job id, a site property —
+    so the message stays accurate wherever this is reused.
+    """
     if not raw:
         return fallback
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        log.warning("job %s has unreadable %s; ignoring it", job_id, field)
+        log.warning("%s has unreadable %s; ignoring it", record_id, field)
         return fallback
 
 

@@ -161,11 +161,22 @@ _REAUTH_ERRORS = frozenset({"invalid_grant", "invalid_client"})
 
 def _post_token(session, payload: dict) -> dict:
     client = session or requests
-    response = client.post(TOKEN_ENDPOINT, data=payload, timeout=30)
-    # Drop the payload before anything can raise: it holds the client secret,
-    # the authorization code, the PKCE verifier and — on refresh — the refresh
-    # token, and a show-locals traceback would carry all four into the
+    try:
+        response = client.post(TOKEN_ENDPOINT, data=payload, timeout=30)
+    except BaseException:
+        # A network failure must not leave the payload — client secret,
+        # authorization code, PKCE verifier, refresh token — live in the
+        # raising frame for a show-locals traceback to dump.
+        del payload
+        raise
+    # Drop the payload before anything else can raise: it holds the client
+    # secret, the authorization code, the PKCE verifier and — on refresh — the
+    # refresh token, and a show-locals traceback would carry all four into the
     # caller's logs.
+    #
+    # This scrubs our frame only. A requests exception also carries the same
+    # urlencoded payload on .request.body, so callers must never log a raw
+    # exception object raised from this path — log str(exc) or a fixed message.
     del payload
     return _decode_token_response(response)
 

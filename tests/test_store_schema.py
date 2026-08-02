@@ -153,3 +153,41 @@ def test_inner_tx_failure_rolls_back_only_the_savepoint(tmp_path):
                 raise ValueError("inner fails")
     assert conn.execute("SELECT value FROM meta WHERE key='kept'").fetchone()["value"] == "1"
     assert conn.execute("SELECT value FROM meta WHERE key='dropped'").fetchone() is None
+
+
+class _CommitFails:
+    """A connection proxy whose COMMIT raises, forwarding everything else.
+
+    sqlite3.Connection.execute is a read-only C slot, so monkeypatching the
+    method on a real connection is not possible; a forwarding proxy is the
+    only way to inject the disk error tx() has to survive. tx() touches only
+    .in_transaction and .execute, both of which reach the real connection.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args):
+        if sql == "COMMIT":
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
+
+
+def test_failed_commit_does_not_poison_the_connection(tmp_path):
+    """A failed COMMIT must roll back, not leave the transaction open — the
+    next tx() would otherwise become a SAVEPOINT that commits nothing.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    with pytest.raises(sqlite3.OperationalError):
+        with store.tx(_CommitFails(conn)):
+            conn.execute("INSERT INTO meta (key, value) VALUES ('a', '1')")
+
+    assert conn.in_transaction is False
+    assert conn.execute("SELECT value FROM meta WHERE key='a'").fetchone() is None
+
+    with store.tx(conn):
+        conn.execute("INSERT INTO meta (key, value) VALUES ('b', '2')")
+    assert conn.execute("SELECT value FROM meta WHERE key='b'").fetchone()["value"] == "2"
