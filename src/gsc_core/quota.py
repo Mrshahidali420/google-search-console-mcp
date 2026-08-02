@@ -11,6 +11,7 @@ seventeen properties was being capped at eleven submissions total.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
 
 from . import runlog
@@ -103,4 +104,61 @@ def next_free(conn: sqlite3.Connection, property: str, *,
         return None
     return datetime.fromisoformat(row["oldest"]) + timedelta(
         minutes=SLOT_WINDOW_MINUTES
+    )
+
+
+@dataclass(frozen=True)
+class QuotaVerdict:
+    """Whether a submission may proceed, and which limit is holding it back."""
+    allowed: bool
+    binding: str | None
+    property_free: int
+    account_free: int | None
+    next_free_at: datetime | None
+
+
+def account_used(conn: sqlite3.Connection, account: str, *,
+                 now: datetime | None = None) -> int:
+    """Slots this account spent across every property in the window.
+
+    Tracked so that a per-account ceiling, if one exists, becomes visible in
+    real data rather than guessed at.
+    """
+    moment = now or datetime.now(UTC)
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM quota_slots WHERE account=? AND used_at > ?",
+        (account, _window_start(moment)),
+    ).fetchone()
+    return int(row["n"])
+
+
+def check(conn: sqlite3.Connection, account: str, property: str, *,
+          property_slots: int = DEFAULT_PROPERTY_SLOTS,
+          account_slots: int | None = None,
+          now: datetime | None = None) -> QuotaVerdict:
+    """Gate a submission on the property budget and, if configured, the account.
+
+    account_slots=None means the account dimension is tracked but not enforced.
+    No per-account ceiling has been observed; inventing one would cap users
+    below what Google actually permits.
+    """
+    moment = now or datetime.now(UTC)
+    property_free = free(conn, property, slots=property_slots, now=moment)
+
+    account_free: int | None = None
+    if account_slots is not None:
+        account_free = max(0, account_slots - account_used(conn, account, now=moment))
+
+    binding: str | None = None
+    if property_free <= 0:
+        binding = "property"
+    elif account_free is not None and account_free <= 0:
+        binding = "account"
+
+    return QuotaVerdict(
+        allowed=binding is None,
+        binding=binding,
+        property_free=property_free,
+        account_free=account_free,
+        next_free_at=next_free(conn, property, slots=property_slots, now=moment),
     )
