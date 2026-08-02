@@ -1,4 +1,7 @@
 import json
+import os
+import stat
+import sys
 from datetime import datetime, timedelta, UTC
 
 import pytest
@@ -128,3 +131,89 @@ def test_provider_raises_when_no_token_stored(tmp_path):
                                    token_path=tmp_path / "absent.json")
     with pytest.raises(gauth.AuthRequired):
         provider.access_token()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions only")
+def test_token_file_is_owner_readable_only(tmp_path):
+    target = tmp_path / "token.json"
+    gauth.save_token({"refresh_token": "r"}, target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions only")
+def test_no_world_readable_window_during_write(tmp_path, monkeypatch):
+    """The temp file must be 0600 from creation, not chmod'd afterwards."""
+    seen = []
+    real_fdopen = os.fdopen
+
+    def spy(handle, *args, **kwargs):
+        for candidate in tmp_path.iterdir():
+            seen.append(stat.S_IMODE(candidate.stat().st_mode))
+        return real_fdopen(handle, *args, **kwargs)
+
+    monkeypatch.setattr(gauth.os, "fdopen", spy)
+    gauth.save_token({"refresh_token": "r"}, tmp_path / "token.json")
+    assert seen and all(mode == 0o600 for mode in seen)
+
+
+def test_leaves_no_temp_file_behind(tmp_path):
+    gauth.save_token({"refresh_token": "r"}, tmp_path / "token.json")
+    assert [p.name for p in tmp_path.iterdir()] == ["token.json"]
+
+
+def test_revoked_refresh_token_raises_auth_required(tmp_path):
+    target = tmp_path / "token.json"
+    past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    gauth.save_token({"refresh_token": "r", "access_token": "stale",
+                      "expires_at": past}, target)
+    session = FakeSession({"error": "invalid_grant"}, status=400)
+    provider = gauth.TokenProvider("cid", "secret", token_path=target,
+                                   session=session)
+    with pytest.raises(gauth.AuthRequired):
+        provider.access_token()
+
+
+def test_non_json_error_body_raises_runtime_error(tmp_path):
+    class HtmlResponse:
+        status_code = 502
+        text = "<html>Bad Gateway</html>"
+
+        def json(self):
+            raise ValueError("not json")
+
+    class HtmlSession:
+        def post(self, url, data=None, timeout=None):
+            return HtmlResponse()
+
+    with pytest.raises(RuntimeError, match="502"):
+        gauth.exchange_code("cid", "secret", "code", "verifier",
+                            "http://127.0.0.1:1", session=HtmlSession())
+
+
+def test_error_message_never_carries_the_response_body(tmp_path):
+    class LeakyResponse:
+        status_code = 400
+        text = "SECRET-BODY-CONTENT"
+
+        def json(self):
+            return {"error": "invalid_request"}
+
+    class LeakySession:
+        def post(self, url, data=None, timeout=None):
+            return LeakyResponse()
+
+    with pytest.raises(RuntimeError) as caught:
+        gauth.exchange_code("cid", "secret", "code", "verifier",
+                            "http://127.0.0.1:1", session=LeakySession())
+    assert "SECRET-BODY-CONTENT" not in str(caught.value)
+
+
+def test_naive_expires_at_degrades_to_not_fresh(tmp_path):
+    target = tmp_path / "token.json"
+    naive = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    gauth.save_token({"refresh_token": "r", "access_token": "stale",
+                      "expires_at": naive.isoformat()}, target)
+    session = FakeSession({"access_token": "refreshed", "expires_in": 3599})
+    provider = gauth.TokenProvider("cid", "secret", token_path=target,
+                                   session=session)
+    assert provider.access_token() == "refreshed"

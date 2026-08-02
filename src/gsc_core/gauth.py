@@ -13,7 +13,9 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from urllib.parse import urlencode
@@ -64,22 +66,64 @@ def build_auth_url(client_id: str, redirect_uri: str, challenge: str,
     return f"{AUTH_ENDPOINT}?{urlencode(params)}"
 
 
-_EXPIRY_MARGIN_SECONDS = 60
+_EXPIRY_MARGIN_SECONDS = 300
 
 
 class AuthRequired(RuntimeError):
     """No usable credentials. The caller should route the user to setup."""
 
 
+def _harden(path: Path, *, directory: bool = False) -> None:
+    """Restrict a path to the current user. Best effort — never fatal.
+
+    POSIX uses chmod. On Windows chmod is a no-op, so we break ACL inheritance
+    and grant only the current user, which is the nearest equivalent available
+    without a keyring dependency.
+    """
+    mode = 0o700 if directory else 0o600
+    if sys.platform != "win32":
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            log.warning("could not restrict permissions on %s", path.name)
+        return
+
+    user = os.environ.get("USERNAME")
+    if not user:
+        log.warning("cannot restrict %s: USERNAME unset", path.name)
+        return
+    try:
+        subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(F)"],
+            check=True, capture_output=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("could not restrict permissions on %s: %s", path.name, exc)
+
+
 def save_token(data: dict, path: Path | None = None) -> None:
-    """Write the token file atomically, owner-readable only on POSIX."""
+    """Write the token file atomically, readable only by this user.
+
+    The file is created 0600 by mkstemp BEFORE the refresh token is written
+    into it — creating it first and chmod'ing after would leave the credential
+    world-readable at a predictable path for the width of that window, on
+    every refresh. The random temp name also stops two processes colliding and
+    promoting a half-written file.
+    """
     target = path or paths.token_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    if sys.platform != "win32":
-        os.chmod(temporary, 0o600)
-    temporary.replace(target)
+    _harden(target.parent, directory=True)
+
+    handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".token-",
+                                         suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2)
+        _harden(Path(temporary))
+        os.replace(temporary, target)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def load_token(path: Path | None = None) -> dict | None:
@@ -90,16 +134,39 @@ def load_token(path: Path | None = None) -> dict | None:
         return None
 
 
+_REAUTH_ERRORS = frozenset({"invalid_grant", "invalid_client"})
+
+
 def _post_token(session, payload: dict) -> dict:
     client = session or requests
     response = client.post(TOKEN_ENDPOINT, data=payload, timeout=30)
-    body = response.json()
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"token endpoint returned {response.status_code}: "
-            f"{body.get('error', response.text)}"
+    # Drop the payload before anything can raise: it holds the client secret,
+    # the authorization code, the PKCE verifier and — on refresh — the refresh
+    # token, and a show-locals traceback would carry all four into the
+    # caller's logs.
+    del payload
+    return _decode_token_response(response)
+
+
+def _decode_token_response(response) -> dict:
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+
+    if response.status_code == 200:
+        return body
+
+    error = body.get("error") or f"HTTP {response.status_code}"
+    if error in _REAUTH_ERRORS:
+        raise AuthRequired(
+            f"Google rejected the stored credentials ({error}). "
+            "Run gsc_setup() to authorise again."
         )
-    return body
+    detail = body.get("error_description", "")
+    raise RuntimeError(
+        f"token endpoint returned {response.status_code}: {error} {detail}".strip()
+    )
 
 
 def _with_expiry(body: dict) -> dict:
@@ -159,7 +226,8 @@ class TokenProvider:
         return refreshed["access_token"]
 
     def invalidate(self) -> None:
-        """Drop the cached access token after a 401. Refresh token is kept."""
+        """Back-date expires_at after a 401, forcing the next call to
+        refresh. It does not drop the token; the refresh token is kept."""
         stored = load_token(self._path)
         if not stored:
             return
@@ -171,9 +239,9 @@ class TokenProvider:
     def _is_fresh(stored: dict) -> bool:
         if not stored.get("access_token") or not stored.get("expires_at"):
             return False
+        margin = timedelta(seconds=_EXPIRY_MARGIN_SECONDS)
         try:
             expires_at = datetime.fromisoformat(stored["expires_at"])
-        except ValueError:
+            return datetime.now(UTC) < expires_at - margin
+        except (ValueError, TypeError):
             return False
-        margin = timedelta(seconds=_EXPIRY_MARGIN_SECONDS)
-        return datetime.now(UTC) < expires_at - margin
