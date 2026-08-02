@@ -326,9 +326,10 @@ def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
 
     READ-ONLY: this tool inspects current index status and submits
     NOTHING. It never requests indexing and never spends a
-    Request-Indexing slot — an assistant that wants a URL indexed must
-    call gsc_request_indexing instead; confusing the two burns a scarce,
-    unrecoverable Request-Indexing slot for nothing. This tool DOES spend
+    Request-Indexing slot. No tool here does yet — requesting indexing is
+    not built, so an assistant asked to get a URL indexed should say so
+    rather than reaching for this one, which answers a different question
+    and spends a different budget doing it. This tool DOES spend
     URL Inspection quota, a separate per-property budget of 2,000 calls a
     day and roughly 600 a minute (see gsc_quota) — one call per URL
     inspected.
@@ -349,7 +350,11 @@ def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
     the gate saw, not current headroom, and are already stale by the size
     of this batch by the time you read them. gsc_quota's similarly-shaped
     `daily_free`/`minute_free` are the ones measured now; do not compare
-    the two pairs or plan a second batch against these. Each row is
+    the two pairs or plan a second batch against these. `binding_at_gate`
+    (here and on each "skipped_quota" entry) carries the suffix for the
+    same reason: it names only the exhausted INSPECTION window as seen at
+    the gate, where gsc_quota's `binding` covers the submission budget too
+    and is read now. Each row is
     `{"url", "status", "detail",
     "unverified"}`. `status` is one of: indexed, crawled_not_indexed,
     discovered_not_indexed, unknown_to_google, redirect, noindex,
@@ -686,6 +691,27 @@ def _record_submitted(conn: sqlite3.Connection, snapshot: list[dict],
                 _merge_sitemaps(site["sitemaps"], newly_submitted))
 
 
+def _persist_or_log(conn: sqlite3.Connection, snapshot: list[dict],
+                    succeeded: dict[str, list[str]]) -> None:
+    """_record_submitted on the way out of a failure, never masking it.
+
+    Used only while an exception is already propagating. If the write also
+    fails there is nothing useful left to do -- raising here would replace
+    the exception that explains what actually went wrong with a second one
+    about the cleanup -- so it is logged and the original propagates. Only
+    the failure's TYPE NAME is logged, per this module's rule.
+    """
+    if not succeeded:
+        return
+    try:
+        _record_submitted(conn, snapshot, succeeded)
+    except Exception as exc:  # noqa: BLE001 — must not mask the original
+        log.warning(
+            "gsc_submit_sitemaps: %d sitemap(s) reached Google but could not "
+            "be recorded (%s); a later bare call will not resubmit them",
+            sum(len(urls) for urls in succeeded.values()), type(exc).__name__)
+
+
 def _sitemap_targets(
     sitemaps: list[str] | None, sites: list[dict], properties: list[str],
 ) -> list[tuple[str | None, str]]:
@@ -710,8 +736,8 @@ def gsc_submit_sitemaps(sitemaps: list[str] | None = None) -> dict | list[dict]:
     safe to resubmit an already-known sitemap).
 
     `sitemaps` is an optional list of sitemap URLs; each is routed to its
-    covering property via the same host-matching gsc_check_status and
-    gsc_request_indexing use. Omit it to resubmit every sitemap already on
+    covering property via the same host-matching gsc_check_status
+    uses. Omit it to resubmit every sitemap already on
     record for every property (the same list gsc_list_sites carries
     forward on refresh).
 
@@ -768,27 +794,47 @@ def _submit_sitemaps(sitemaps: list[str] | None) -> dict | list[dict]:
         results: list[dict] = []
         succeeded: dict[str, list[str]] = {}
         auth_failed = False
-        for property, sitemap_url in targets:
-            if property is None:
-                results.append({
-                    "site": None, "sitemap": sitemap_url, "http_status": None,
-                    "ok": False,
-                    "note": "no Search Console property matches this URL",
-                })
-                continue
-            try:
-                outcome = api.submit_sitemap(property, sitemap_url, active_provider)
-            except gauth.AuthRequired:
-                # A token that dies mid-loop (rather than at the very first
-                # call) must not un-submit the sitemaps that already reached
-                # Google -- stop here, persist below what already
-                # succeeded, then report auth_required rather than silently
-                # discarding real submissions.
-                auth_failed = True
-                break
-            results.append(outcome)
-            if outcome["ok"]:
-                succeeded.setdefault(property, []).append(sitemap_url)
+        try:
+            for property, sitemap_url in targets:
+                if property is None:
+                    results.append({
+                        "site": None, "sitemap": sitemap_url,
+                        "http_status": None, "ok": False,
+                        "note": "no Search Console property matches this URL",
+                    })
+                    continue
+                try:
+                    outcome = api.submit_sitemap(property, sitemap_url,
+                                                 active_provider)
+                except gauth.AuthRequired:
+                    # A token that dies mid-loop (rather than at the very
+                    # first call) must not un-submit the sitemaps that
+                    # already reached Google -- stop here, persist below
+                    # what already succeeded, then report auth_required
+                    # rather than silently discarding real submissions.
+                    auth_failed = True
+                    break
+                results.append(outcome)
+                if outcome["ok"]:
+                    succeeded.setdefault(property, []).append(sitemap_url)
+        except BaseException:
+            # AuthRequired is caught in the loop because it decides the
+            # ANSWER as well as ending the run. Every OTHER failure --
+            # a requests transport error, or the plain RuntimeError gauth
+            # raises when Google's token endpoint is transiently down --
+            # used to escape here and skip the persist below entirely, so a
+            # sitemap Google had already accepted was never recorded. The
+            # loss predates the {ok, error, fix} guard on this tool; what
+            # the guard changed is that it turned a loud isError into an
+            # inert-looking {"ok": false, "error": "unexpected"} over a
+            # store the caller has no reason to re-check.
+            #
+            # BaseException, not Exception, for store.tx's stated reason: a
+            # disconnecting MCP client raises CancelledError and a CLI
+            # interrupt raises KeyboardInterrupt, and neither is a good
+            # reason to forget a live sitemap.
+            _persist_or_log(conn, sites, succeeded)
+            raise
 
         if succeeded:
             _record_submitted(conn, sites, succeeded)

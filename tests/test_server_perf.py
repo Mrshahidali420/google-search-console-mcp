@@ -12,6 +12,7 @@ actually being exercised -- not a mock standing in for it.
 from __future__ import annotations
 
 import pytest
+import requests
 
 from gsc_core import gauth, perf, store
 from gsc_mcp import server
@@ -453,3 +454,108 @@ def test_performance_reports_an_unexpected_failure_as_data(home, monkeypatch):
     assert out["fix"]
     assert "start" in out and "end" in out
     assert "ya29.LEAK" not in repr(out)
+
+
+# --- (4) the fourth way to forget a live sitemap ------------------------------
+#
+# The loop caught gauth.AuthRequired and nothing else. Any other failure --
+# a requests transport error, or the plain RuntimeError gauth raises when
+# Google's token endpoint is transiently down -- escaped the loop, skipped the
+# persist, and (once the B3 catch-all landed) came back as an inert-looking
+# {"ok": false, "error": "unexpected"} over a store the caller has no reason to
+# re-check. Shaped like the AuthRequired tests above, deliberately.
+
+def test_a_transport_error_mid_loop_keeps_what_already_succeeded(home,
+                                                                monkeypatch):
+    """(4) The first sitemap really did reach Google. The connection dying
+    on the second must not un-record the first."""
+    def submit(prop, sitemap_url, provider, **kwargs):
+        if sitemap_url.endswith("second.xml"):
+            raise requests.ConnectionError("connection reset")
+        return _ok(prop, sitemap_url)
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    out = server.gsc_submit_sitemaps(["https://example.com/first.xml",
+                                      "https://example.com/second.xml"])
+
+    assert out["ok"] is False
+    assert out["error"] == "unexpected"
+    with store.session() as conn:
+        assert store.get_sites(conn)[0]["sitemaps"] == [
+            "https://example.com/first.xml"]
+
+
+def test_a_failing_token_endpoint_mid_loop_keeps_what_already_succeeded(
+    home, monkeypatch,
+):
+    """The same path via the exception the reviewer reproduced: gauth raises
+    a plain RuntimeError, not AuthRequired, when the token endpoint answers
+    something transient. It is not modelled anywhere, which is the point --
+    the persist must not depend on recognising the exception type."""
+    def submit(prop, sitemap_url, provider, **kwargs):
+        if sitemap_url.endswith("second.xml"):
+            raise RuntimeError("token endpoint returned 503: unavailable")
+        return _ok(prop, sitemap_url)
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    out = server.gsc_submit_sitemaps(["https://example.com/first.xml",
+                                      "https://example.com/second.xml"])
+
+    assert out["error"] == "unexpected"
+    with store.session() as conn:
+        assert store.get_sites(conn)[0]["sitemaps"] == [
+            "https://example.com/first.xml"]
+
+
+def test_a_cancelled_call_mid_loop_keeps_what_already_succeeded(home,
+                                                               monkeypatch):
+    """A disconnecting MCP client raises CancelledError and a CLI interrupt
+    raises KeyboardInterrupt -- neither is an Exception, and neither is a
+    good reason to forget a sitemap Google already has. This is why the
+    guard catches BaseException, the same reason store.tx does."""
+    def submit(prop, sitemap_url, provider, **kwargs):
+        if sitemap_url.endswith("second.xml"):
+            raise KeyboardInterrupt
+        return _ok(prop, sitemap_url)
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    with pytest.raises(KeyboardInterrupt):
+        server.gsc_submit_sitemaps(["https://example.com/first.xml",
+                                    "https://example.com/second.xml"])
+
+    with store.session() as conn:
+        assert store.get_sites(conn)[0]["sitemaps"] == [
+            "https://example.com/first.xml"]
+
+
+def test_a_failing_persist_does_not_mask_the_original_failure(home, monkeypatch):
+    """If the rescue write fails too there is nothing useful left to do, and
+    raising would replace the exception that explains what went wrong with a
+    second one about the cleanup. The original must win."""
+    def submit(prop, sitemap_url, provider, **kwargs):
+        if sitemap_url.endswith("second.xml"):
+            raise requests.ConnectionError("connection reset")
+        return _ok(prop, sitemap_url)
+
+    def no_write(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    monkeypatch.setattr(server, "_record_submitted", no_write)
+    out = server.gsc_submit_sitemaps(["https://example.com/first.xml",
+                                      "https://example.com/second.xml"])
+    # ConnectionError, not the RuntimeError from the cleanup.
+    assert out["detail"] == "ConnectionError"
+
+
+def test_a_failure_before_anything_succeeded_writes_nothing(home, monkeypatch):
+    """The rescue path must not create rows for submissions that never
+    happened -- it persists what SUCCEEDED, which here is nothing."""
+    def submit(prop, sitemap_url, provider, **kwargs):
+        raise requests.ConnectionError("connection reset")
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    out = server.gsc_submit_sitemaps(["https://example.com/first.xml"])
+    assert out["error"] == "unexpected"
+    with store.session() as conn:
+        assert store.get_sites(conn)[0]["sitemaps"] == []

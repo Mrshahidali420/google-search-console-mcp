@@ -61,3 +61,34 @@ def test_no_milestone_three_tools_leaked_in(tmp_path, monkeypatch):
     tools = asyncio.run(_list_tools_over_the_wire())
     names = {tool.name for tool in tools}
     assert not (names & NOT_YET_SHIPPED)
+
+
+def test_no_tool_description_names_a_tool_that_does_not_exist(tmp_path,
+                                                              monkeypatch):
+    """B5's defect, one layer out. gauth's sign-in advice pointed at
+    gsc_setup(), which is not registered; the guard added for that only
+    reads gauth's messages, while two tool docstrings were pointing at
+    gsc_request_indexing the same way -- and a docstring is worse, because
+    it travels over the wire as the tool's `description` and is the text an
+    assistant plans against. Told to "call gsc_request_indexing instead",
+    an assistant either invents a call that fails or picks the nearest
+    thing, which for a URL-indexing request is the one tool the same
+    paragraph is warning it off.
+
+    Reading the descriptions back over the transport rather than the
+    docstrings from source is deliberate: it is the delivered text that
+    matters, and this catches a description supplied any other way too.
+    """
+    import re
+
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    tools = asyncio.run(_list_tools_over_the_wire())
+    names = {tool.name for tool in tools}
+
+    for tool in tools:
+        mentioned = set(re.findall(r"gsc_[a-z_]+", tool.description))
+        unknown = mentioned - names
+        assert not unknown, (
+            f"{tool.name}'s description names {sorted(unknown)}, which "
+            f"no registered tool provides")
+        assert not (mentioned & NOT_YET_SHIPPED)
