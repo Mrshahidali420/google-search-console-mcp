@@ -94,8 +94,12 @@ def _harden(path: Path) -> None:
     if not user:
         log.warning("cannot restrict %s: USERNAME unset", path.name)
         return
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
     icacls = os.path.join(system_root, "System32", "icacls.exe")
+    if not os.path.isabs(icacls):
+        log.warning("cannot restrict %s: SystemRoot is not an absolute path",
+                    path.name)
+        return
     try:
         subprocess.run(
             [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:(F)"],
@@ -128,11 +132,12 @@ def save_token(data: dict, path: Path | None = None) -> None:
     handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".token-",
                                          suffix=".tmp")
     try:
-        # Harden BEFORE writing, not after: on Windows mkstemp gives no
-        # equivalent of POSIX 0600-at-creation, so writing first would put
-        # the refresh token on disk unprotected for the width of the write.
-        _harden(Path(temporary))
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            # Harden while the file is still empty: on Windows there is no
+            # equivalent of POSIX 0600-at-creation, so writing first would put
+            # the refresh token on disk unprotected. Inside the with-block so
+            # the descriptor is closed exactly once even if this raises.
+            _harden(Path(temporary))
             json.dump(data, stream, indent=2)
         os.replace(temporary, target)
     except BaseException:
