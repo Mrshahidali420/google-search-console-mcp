@@ -286,6 +286,14 @@ class ConsentFailed(RuntimeError):
     """The consent round trip did not produce a usable authorization code."""
 
 
+class _LoopbackServer(HTTPServer):
+    """An ephemeral port never needs SO_REUSEADDR, and allowing it would let
+    another local process race to bind the same 127.0.0.1:port for the
+    redirect."""
+
+    allow_reuse_address = False
+
+
 class LoopbackReceiver:
     """A one-shot local HTTP server that catches Google's redirect.
 
@@ -299,7 +307,7 @@ class LoopbackReceiver:
         self._code: str | None = None
         self._error: str | None = None
         self._received = threading.Event()
-        self._server = HTTPServer(("127.0.0.1", 0), self._handler_class())
+        self._server = _LoopbackServer(("127.0.0.1", 0), self._handler_class())
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True
         )
@@ -329,25 +337,42 @@ class LoopbackReceiver:
         receiver = self
 
         class Handler(BaseHTTPRequestHandler):
+            # Without this the stdlib blocks in readline() forever on a stalled
+            # connection, and shutdown() never gets to check its flag.
+            timeout = 10
+
             def do_GET(self) -> None:  # noqa: N802 - stdlib naming
                 query = parse_qs(_urlparse(self.path).query)
                 state = (query.get("state") or [""])[0]
                 error = (query.get("error") or [""])[0]
                 code = (query.get("code") or [""])[0]
 
-                if state != receiver.state:
-                    receiver._error = "redirect state did not match; ignoring"
-                elif error:
-                    receiver._error = f"consent refused: {error}"
-                else:
-                    receiver._code = code
+                # Anything that is not the callback — a browser's favicon
+                # probe, a speculative connection — must not be mistaken for a
+                # failed redirect, and a second request must not overwrite the
+                # first result.
+                if receiver._received.is_set() or not (state or error or code):
+                    self.send_response(204)
+                    self.end_headers()
+                    return
 
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(_CONSENT_PAGE)))
-                self.end_headers()
-                self.wfile.write(_CONSENT_PAGE)
-                receiver._received.set()
+                try:
+                    if state != receiver.state:
+                        receiver._error = "redirect state did not match"
+                    elif error:
+                        receiver._error = f"consent refused: {error[:200]}"
+                    else:
+                        receiver._code = code
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(_CONSENT_PAGE)))
+                    self.end_headers()
+                    self.wfile.write(_CONSENT_PAGE)
+                finally:
+                    # Set even if the client aborted mid-write, or the flow
+                    # stalls for the full timeout with a result already in hand.
+                    receiver._received.set()
 
             def log_message(self, *args) -> None:
                 """Silence stdlib's stderr access log."""
