@@ -22,6 +22,7 @@ passed to `log.*`.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from urllib.parse import quote
 
 import requests
@@ -97,7 +98,8 @@ def _auth_headers(provider: TokenProvider) -> dict[str, str]:
     return {"Authorization": f"Bearer {provider.access_token()}"}
 
 
-def list_properties(provider: TokenProvider, session=None) -> list[dict]:
+def list_properties(provider: TokenProvider,
+                    session: requests.Session | None = None) -> list[dict]:
     """All Search Console properties this account can see.
 
     Each entry is `{"siteUrl": ..., "permissionLevel": ...}` straight from
@@ -109,8 +111,9 @@ def list_properties(provider: TokenProvider, session=None) -> list[dict]:
     return resp.json().get("siteEntry", [])
 
 
-def inspect_url(url: str, property: str, provider: TokenProvider, session=None,
-                max_retries: int = 4, sleep=time.sleep) -> tuple[str, str]:
+def inspect_url(url: str, property: str, provider: TokenProvider,
+                session: requests.Session | None = None, max_retries: int = 4,
+                sleep: Callable[[float], None] = time.sleep) -> tuple[str, str]:
     """Inspect one URL's index status, retrying past transient failures.
 
     - 200 -> classified via classify().
@@ -160,7 +163,7 @@ def inspect_url(url: str, property: str, provider: TokenProvider, session=None,
 
 
 def submit_sitemap(property: str, sitemap_url: str, provider: TokenProvider,
-                   session=None) -> dict:
+                   session: requests.Session | None = None) -> dict:
     """PUT a sitemap onto a property. Idempotent — safe to resubmit.
 
     Both path segments are percent-encoded with safe="" because either can
@@ -181,7 +184,8 @@ def submit_sitemap(property: str, sitemap_url: str, provider: TokenProvider,
     }
 
 
-def list_sitemaps(property: str, provider: TokenProvider, session=None) -> list[dict]:
+def list_sitemaps(property: str, provider: TokenProvider,
+                  session: requests.Session | None = None) -> list[dict]:
     """All sitemaps registered against a property."""
     client = session or _session
     uri = SITEMAPS_URI.format(site=quote(property, safe=""))

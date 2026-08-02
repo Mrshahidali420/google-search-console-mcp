@@ -1,4 +1,5 @@
 import pytest
+import requests
 
 from _fakes import FakeProvider, FakeResponse, FakeSession, indexed_payload
 from gsc_core import api
@@ -110,6 +111,33 @@ def test_exhausted_retries_report_error():
                                      max_retries=4, sleep=lambda _: None)
     assert status == "error"
     assert "retries exhausted" in detail
+    # Pins the attempt count exactly: asserting only on the eventual error
+    # message cannot tell four attempts from three (or five) — an
+    # off-by-one in the loop bound still produces the same status/detail.
+    assert len(session.calls) == 4
+
+
+def test_transport_exception_backs_off_and_retries():
+    session = FakeSession(requests.ConnectionError("boom"),
+                          FakeResponse(200, indexed_payload()))
+    slept = []
+    status, _ = api.inspect_url("https://example.com/a", "sc-domain:example.com",
+                                FakeProvider(), session=session, sleep=slept.append)
+    assert status == "indexed"
+    # 2 ** attempt, deliberately different from the transient-status
+    # formula (2 ** attempt * 2) — a test that can't tell the two apart
+    # would still pass if this branch used the wrong backoff.
+    assert slept == [1]
+
+
+def test_transport_exception_on_last_attempt_returns_error():
+    session = FakeSession(*[requests.ConnectionError("boom") for _ in range(4)])
+    status, detail = api.inspect_url("https://example.com/a", "sc-domain:example.com",
+                                     FakeProvider(), session=session,
+                                     max_retries=4, sleep=lambda _: None)
+    assert status == "error"
+    assert "request failed" in detail
+    assert "boom" in detail
 
 
 def test_error_detail_is_truncated_to_200_characters():
