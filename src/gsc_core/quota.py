@@ -171,15 +171,26 @@ def _account_next_free(conn: sqlite3.Connection, account: str, *,
 def check(conn: sqlite3.Connection, account: str, property: str, *,
           property_slots: int = DEFAULT_PROPERTY_SLOTS,
           account_slots: int | None = None,
+          daily_reserve: int = 0,
           now: datetime | None = None) -> QuotaVerdict:
     """Gate a submission on the property budget and, if configured, the account.
 
     account_slots=None means the account dimension is tracked but not enforced.
     No per-account ceiling has been observed; inventing one would cap users
     below what Google actually permits.
+
+    daily_reserve holds slots back from every caller of check(): the
+    effective property ceiling used here is property_slots - daily_reserve,
+    never property_slots itself. free() and next_free() are deliberately NOT
+    given the reserve — they keep answering against the raw property_slots
+    ceiling, so a caller reading them directly still sees true remaining
+    capacity. The reserve is applied in this one place so there is exactly
+    one rule for what a submission may actually spend, not two functions
+    that can silently disagree about it.
     """
     moment = now or datetime.now(UTC)
-    property_free = free(conn, property, slots=property_slots, now=moment)
+    effective_slots = max(0, property_slots - daily_reserve)
+    property_free = free(conn, property, slots=effective_slots, now=moment)
 
     account_free: int | None = None
     if account_slots is not None:
@@ -195,7 +206,7 @@ def check(conn: sqlite3.Connection, account: str, property: str, *,
         next_free_at = None
     else:
         computed = (
-            next_free(conn, property, slots=property_slots, now=moment)
+            next_free(conn, property, slots=effective_slots, now=moment)
             if binding == "property"
             else _account_next_free(conn, account, slots=account_slots, now=moment)
         )

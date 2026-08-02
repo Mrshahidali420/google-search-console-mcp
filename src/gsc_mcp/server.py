@@ -1,4 +1,5 @@
-"""The MCP server shell: tool registration, `gsc_list_sites`, `gsc_doctor`.
+"""The MCP server shell: tool registration — `gsc_list_sites`, `gsc_doctor`,
+`gsc_check_status`, `gsc_quota`.
 
 Import order is load-bearing. `runlog.init()` runs before `FastMCP` is
 constructed, and before anything else in this module can log a line —
@@ -20,7 +21,10 @@ structured `{"ok": False, "error": ..., "fix": ...}` it can act on.
 """
 from __future__ import annotations
 
-from gsc_core import api, config, gauth, paths, routing, runlog, store
+import sqlite3
+from datetime import UTC, datetime
+
+from gsc_core import api, config, gauth, paths, quota, routing, runlog, store
 
 # Must run before FastMCP is constructed — see the module docstring.
 runlog.init()
@@ -227,6 +231,190 @@ def gsc_doctor() -> dict:
         _check_properties(),
     ]
     return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
+
+def _synced_property_urls(
+    conn: sqlite3.Connection, active_provider: gauth.TokenProvider
+) -> list[str]:
+    """Property strings known to the store, syncing from the API first if
+    the store has never been synced.
+
+    A brand-new install's first gsc_check_status call must not fail with
+    "no property matches" purely because gsc_list_sites has never run — so
+    an empty store triggers the same sync-and-persist gsc_list_sites does,
+    reusing the provider this call already obtained rather than asking for
+    a second one. There is nothing to preserve on this path (an empty store
+    has no prior sitemaps to carry forward, unlike gsc_list_sites' own
+    refresh case), so each property is written with an empty sitemap list.
+    """
+    sites = store.get_sites(conn)
+    if not sites:
+        for entry in api.list_properties(active_provider):
+            site_url = entry.get("siteUrl", "")
+            permission = entry.get("permissionLevel")
+            store.upsert_site(conn, site_url, _host_of_property(site_url),
+                              permission, [])
+        sites = store.get_sites(conn)
+    return [site["property"] for site in sites]
+
+
+@mcp.tool()
+def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
+    """Check whether each URL is indexed by Google Search, via the URL
+    Inspection API.
+
+    READ-ONLY: this tool inspects current index status and submits
+    NOTHING. It never requests indexing and never spends a
+    Request-Indexing slot — an assistant that wants a URL indexed must
+    call gsc_request_indexing instead; confusing the two burns a scarce,
+    unrecoverable Request-Indexing slot for nothing. This tool DOES spend
+    URL Inspection quota, a separate per-property budget of 2,000 calls a
+    day and roughly 600 a minute (see gsc_quota) — one call per URL
+    inspected.
+
+    `concurrency` defaults to the configured inspect_concurrency
+    (config.load()["inspect_concurrency"]) when omitted.
+
+    Properties come from the local store, the same one gsc_list_sites
+    populates. If the store has never been synced — e.g. this is the very
+    first call this install has ever made — it is synced automatically
+    first, so a first-ever gsc_check_status call does not fail with "no
+    property matches" purely because nothing has been synced yet.
+
+    Returns `{"rows": [...], "checked": int, "skipped_quota": [...],
+    "quota": {...}}`. Each row is `{"url", "status", "detail",
+    "unverified"}`. `status` is one of: indexed, crawled_not_indexed,
+    discovered_not_indexed, unknown_to_google, redirect, noindex,
+    duplicate, alternate_canonical, not_found, soft_404, blocked_robots,
+    no_property, error. `no_property` means no Search Console property in
+    this account covers that URL's host. `unverified` is True when a
+    concurrent burst produced a suspect result (unknown_to_google or
+    error) that a sequential re-check could not confirm before quota or
+    time ran out — treat such a row as UNKNOWN, not as a confirmed
+    "not indexed".
+
+    On a missing, expired, or rejected token, returns `{"ok": False,
+    "error": "auth_required", "fix": ...}` instead of raising; if no
+    OAuth client is configured at all, returns `{"ok": False, "error":
+    "not_configured", "fix": ...}`.
+    """
+    try:
+        active_provider = deps.provider()
+    except deps.NotConfigured:
+        log.info("gsc_check_status: no OAuth client configured; "
+                 "reporting not_configured")
+        return {"ok": False, "error": "not_configured", "fix": _FIX_OAUTH_CLIENT}
+    except gauth.AuthRequired:
+        log.info("gsc_check_status: no usable token; reporting auth_required")
+        return _auth_required()
+
+    effective_concurrency = concurrency
+    if effective_concurrency is None:
+        effective_concurrency = config.load()["inspect_concurrency"]
+
+    with deps.connection() as conn:
+        properties = _synced_property_urls(conn, active_provider)
+        return api.check_status(conn, urls, active_provider, properties,
+                                concurrency=effective_concurrency)
+
+
+def _submission_report(
+    conn: sqlite3.Connection, property: str, property_slots: int,
+    daily_reserve: int, moment: datetime,
+) -> tuple[quota.QuotaVerdict, dict]:
+    """The Request-Indexing submission budget for one property.
+
+    quota.check() is kept as the single source of truth for the
+    reserve-adjusted ceiling and its wait time — computing next_free_at a
+    second time here via quota.next_free() would risk exactly the
+    two-functions-disagree defect this project has already hit repeatedly
+    (Plan 1 outcomes §2). The account argument is unused: gsc_quota reports
+    property-level budgets only and never passes account_slots, so check()
+    never consults account_used() for it.
+    """
+    verdict = quota.check(conn, "", property, property_slots=property_slots,
+                          daily_reserve=daily_reserve, now=moment)
+    raw_free = quota.free(conn, property, slots=property_slots, now=moment)
+    spent = quota.used(conn, property, now=moment)
+    return verdict, {
+        "free": raw_free,
+        "spendable_free": verdict.property_free,
+        "used": spent,
+        "slots": property_slots,
+        "daily_reserve": daily_reserve,
+        "next_free_at": store.utc_iso(verdict.next_free_at),
+    }
+
+
+def _quota_binding(verdict: quota.QuotaVerdict,
+                   inspection: quota.InspectionVerdict) -> str | None:
+    if not verdict.allowed:
+        return "submission"
+    if inspection.binding == "daily":
+        return "inspection_daily"
+    if inspection.binding == "minute":
+        return "inspection_minute"
+    return None
+
+
+@mcp.tool()
+def gsc_quota() -> list[dict]:
+    """Report Request-Indexing and URL Inspection budget for every property
+    the store currently knows about.
+
+    Local-only: reads the store and the config file, makes no Search
+    Console API call, and needs no OAuth token — safe to call at any time,
+    including before signing in. An empty store (nothing synced yet via
+    gsc_list_sites or gsc_check_status) returns [].
+
+    One entry per property: `{"property", "submission", "inspection",
+    "binding"}`.
+
+    "submission" is the Request-Indexing slot budget: `{"free",
+    "spendable_free", "used", "slots", "daily_reserve", "next_free_at"}`.
+    `free` is the RAW free-slot count and ignores daily_reserve;
+    `spendable_free` is `free` minus `daily_reserve` — the count actually
+    safe to submit against right now. ACT ON spendable_free, NOT free:
+    daily_reserve exists to hold slots back from every tool, and a caller
+    that submits up to `free` instead will be refused once spendable_free
+    runs out. `next_free_at` is an ISO-8601 string, or None when a slot is
+    free right now.
+
+    "inspection" is the URL Inspection API budget: `{"daily_free",
+    "minute_free", "daily_limit", "minute_limit"}` (2000/day, 600/minute,
+    per property — the same quota gsc_check_status spends).
+
+    "binding" names whichever budget is exhausted for that property right
+    now — "submission" (the Request-Indexing ceiling, reserve applied),
+    "inspection_daily", or "inspection_minute" — or None when every budget
+    has headroom.
+    """
+    settings = config.load()
+    property_slots = settings["property_slots"]
+    daily_reserve = settings["daily_reserve"]
+    moment = datetime.now(UTC)
+
+    report: list[dict] = []
+    with deps.connection() as conn:
+        for site in store.get_sites(conn):
+            property = site["property"]
+            verdict, submission = _submission_report(
+                conn, property, property_slots, daily_reserve, moment)
+            inspection_verdict = quota.inspection_check(
+                conn, property, wanted=1, now=moment)
+            inspection = {
+                "daily_free": inspection_verdict.daily_free,
+                "minute_free": inspection_verdict.minute_free,
+                "daily_limit": quota.DAILY_INSPECTION_LIMIT,
+                "minute_limit": quota.MINUTE_INSPECTION_LIMIT,
+            }
+            report.append({
+                "property": property,
+                "submission": submission,
+                "inspection": inspection,
+                "binding": _quota_binding(verdict, inspection_verdict),
+            })
+    return report
 
 
 def main() -> None:

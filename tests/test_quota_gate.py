@@ -8,10 +8,18 @@ from gsc_core import quota, store
 PROP_A = "sc-domain:example.com"
 PROP_B = "sc-domain:other.example"
 ACCOUNT = "user@example.com"
+NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=UTC)
 
 
 def _conn(tmp_path):
     return store.connect(tmp_path / "state.db")
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    connection = store.connect(tmp_path / "state.db")
+    yield connection
+    connection.close()
 
 
 def _spend(conn, property, when, account=ACCOUNT):
@@ -171,3 +179,18 @@ def test_quota_verdict_is_frozen():
                                  account_free=None, next_free_at=None)
     with pytest.raises(dataclasses.FrozenInstanceError):
         verdict.allowed = False
+
+
+def test_daily_reserve_lowers_the_effective_ceiling(conn):
+    for _ in range(9):
+        _spend(conn, PROP_A, NOW - timedelta(minutes=5))
+    assert quota.check(conn, ACCOUNT, PROP_A, property_slots=11,
+                       daily_reserve=0, now=NOW).allowed
+    assert not quota.check(conn, ACCOUNT, PROP_A, property_slots=11,
+                           daily_reserve=2, now=NOW).allowed
+
+
+def test_daily_reserve_of_zero_changes_nothing(conn):
+    verdict = quota.check(conn, ACCOUNT, PROP_A, property_slots=11,
+                          daily_reserve=0, now=NOW)
+    assert verdict.property_free == 11
