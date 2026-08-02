@@ -16,9 +16,12 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import threading
+import webbrowser
 from datetime import datetime, timedelta, UTC
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse as _urlparse
 
 import requests
 
@@ -268,3 +271,106 @@ class TokenProvider:
             return datetime.now(UTC) < expires_at - margin
         except (ValueError, TypeError):
             return False
+
+
+_CONSENT_PAGE = b"""<!doctype html>
+<meta charset="utf-8">
+<title>gsc-mcp</title>
+<body style="font-family:system-ui;padding:3rem;max-width:32rem">
+<h1>Connected</h1>
+<p>You can close this tab and return to your terminal.</p>
+</body>"""
+
+
+class ConsentFailed(RuntimeError):
+    """The consent round trip did not produce a usable authorization code."""
+
+
+class LoopbackReceiver:
+    """A one-shot local HTTP server that catches Google's redirect.
+
+    Binds an ephemeral port because Google allows any port on 127.0.0.1 for
+    installed apps, and a fixed port would collide with whatever else the user
+    happens to be running.
+    """
+
+    def __init__(self) -> None:
+        self.state = _b64url(secrets.token_bytes(24))
+        self._code: str | None = None
+        self._error: str | None = None
+        self._received = threading.Event()
+        self._server = HTTPServer(("127.0.0.1", 0), self._handler_class())
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, daemon=True
+        )
+
+    @property
+    def redirect_uri(self) -> str:
+        return f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def __enter__(self) -> "LoopbackReceiver":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+    def wait(self, timeout: float = 300.0) -> str:
+        if not self._received.wait(timeout):
+            raise ConsentFailed("consent timed out; no redirect received")
+        if self._error:
+            raise ConsentFailed(self._error)
+        if not self._code:
+            raise ConsentFailed("redirect carried no authorization code")
+        return self._code
+
+    def _handler_class(self):
+        receiver = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+                query = parse_qs(_urlparse(self.path).query)
+                state = (query.get("state") or [""])[0]
+                error = (query.get("error") or [""])[0]
+                code = (query.get("code") or [""])[0]
+
+                if state != receiver.state:
+                    receiver._error = "redirect state did not match; ignoring"
+                elif error:
+                    receiver._error = f"consent refused: {error}"
+                else:
+                    receiver._code = code
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(_CONSENT_PAGE)))
+                self.end_headers()
+                self.wfile.write(_CONSENT_PAGE)
+                receiver._received.set()
+
+            def log_message(self, *args) -> None:
+                """Silence stdlib's stderr access log."""
+
+        return Handler
+
+
+def run_consent_flow(client_id: str, client_secret: str, *,
+                     open_browser: bool = True, session=None) -> dict:
+    """Full consent round trip. Returns the stamped token payload and saves it."""
+    verifier, challenge = pkce_pair()
+    with LoopbackReceiver() as receiver:
+        # Capture the URI while the socket is still bound — the token exchange
+        # must send the identical redirect_uri, and reading it after __exit__
+        # has called server_close() would be reading a dead socket.
+        redirect_uri = receiver.redirect_uri
+        url = build_auth_url(client_id, redirect_uri, challenge, receiver.state)
+        log.info("opening consent page")
+        if open_browser:
+            webbrowser.open(url)
+        code = receiver.wait()
+
+    token = exchange_code(client_id, client_secret, code, verifier,
+                          redirect_uri, session=session)
+    save_token(token)
+    return token
