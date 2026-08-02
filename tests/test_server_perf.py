@@ -297,3 +297,142 @@ def test_submit_sitemaps_not_configured_returns_a_setup_answer(home, monkeypatch
     out = server.gsc_submit_sitemaps(["https://example.com/sitemap.xml"])
     assert out == {"ok": False, "error": "not_configured",
                    "fix": server._FIX_OAUTH_CLIENT}
+
+
+# ------------------------------- gsc_submit_sitemaps: forgetting a submission
+#
+# Three independent ways this tool could forget a sitemap Google has already
+# accepted, all of them silent -- the row simply never comes back, and
+# because a bare gsc_submit_sitemaps() resubmits only what the store knows
+# about, it is never resubmitted either. One test each.
+
+def _ok(prop, sm):
+    return {"site": prop, "sitemap": sm, "ok": True, "http_status": 200,
+            "note": ""}
+
+
+def test_a_concurrent_submission_is_not_overwritten(home, monkeypatch):
+    """(1) The lost update.
+
+    The tool reads the site rows, then makes N slow network calls, then
+    merges against that PRE-NETWORK snapshot -- and upsert_site replaces the
+    sitemaps column outright. A second submit that commits in between had
+    its sitemap silently erased. The fake below commits exactly that way,
+    from its own connection, while the "network call" is in flight.
+    """
+    def submit(prop, sitemap_url, provider, **kwargs):
+        with store.session() as other, store.tx(other):
+            store.upsert_site(other, prop, "example.com", "siteOwner",
+                              ["https://example.com/concurrent.xml"])
+        return _ok(prop, sitemap_url)
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    server.gsc_submit_sitemaps(["https://example.com/mine.xml"])
+
+    with store.session() as conn:
+        assert store.get_sites(conn)[0]["sitemaps"] == [
+            "https://example.com/concurrent.xml", "https://example.com/mine.xml"]
+
+
+def test_a_property_deleted_mid_flight_still_records_its_submission(home, monkeypatch):
+    """(2) The re-read finding nothing.
+
+    Re-reading inside the transaction is what fixes the lost update, but it
+    introduces a row that can be absent. Re-creating it is the recoverable
+    direction; dropping a sitemap Google accepted is not.
+    """
+    def submit(prop, sitemap_url, provider, **kwargs):
+        with store.session() as other, store.tx(other):
+            other.execute("DELETE FROM sites WHERE property = ?", (prop,))
+        return _ok(prop, sitemap_url)
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    server.gsc_submit_sitemaps(["https://example.com/mine.xml"])
+
+    with store.session() as conn:
+        sites = store.get_sites(conn)
+    assert sites[0]["property"] == "sc-domain:example.com"
+    assert sites[0]["sitemaps"] == ["https://example.com/mine.xml"]
+
+
+def test_a_token_dying_mid_loop_keeps_what_already_succeeded(home, monkeypatch):
+    """(3) The mid-loop AuthRequired.
+
+    The first sitemap really did reach Google. Bailing out without
+    persisting it would leave a live sitemap the store has no record of.
+    """
+    def submit(prop, sitemap_url, provider, **kwargs):
+        if sitemap_url.endswith("second.xml"):
+            raise gauth.AuthRequired("token died mid-loop")
+        return _ok(prop, sitemap_url)
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    out = server.gsc_submit_sitemaps(["https://example.com/first.xml",
+                                      "https://example.com/second.xml"])
+
+    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+    with store.session() as conn:
+        assert store.get_sites(conn)[0]["sitemaps"] == [
+            "https://example.com/first.xml"]
+
+
+def test_a_token_dying_mid_loop_stops_rather_than_carrying_on(home, monkeypatch):
+    """The break is load-bearing: once the token is dead every remaining
+    PUT would fail too, and each is an outward-facing call."""
+    attempted = []
+
+    def submit(prop, sitemap_url, provider, **kwargs):
+        attempted.append(sitemap_url)
+        if sitemap_url.endswith("second.xml"):
+            raise gauth.AuthRequired("token died mid-loop")
+        return _ok(prop, sitemap_url)
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    server.gsc_submit_sitemaps(["https://example.com/first.xml",
+                                "https://example.com/second.xml",
+                                "https://example.com/third.xml"])
+    assert attempted == ["https://example.com/first.xml",
+                         "https://example.com/second.xml"]
+
+
+def test_submit_sitemaps_reports_an_unexpected_failure_as_data(home, monkeypatch):
+    """B3: a failure this tool does not model still keeps the
+    {ok, error, fix} contract, and never leaks the exception message."""
+    def submit(prop, sitemap_url, provider, **kwargs):
+        raise RuntimeError("token=ya29.LEAK")
+
+    monkeypatch.setattr(server.api, "submit_sitemap", submit)
+    out = server.gsc_submit_sitemaps(["https://example.com/mine.xml"])
+    assert out["ok"] is False
+    assert out["error"] == "unexpected"
+    assert out["detail"] == "RuntimeError"
+    assert out["fix"]
+    assert "ya29.LEAK" not in repr(out)
+
+
+def test_the_reread_happens_inside_the_write_transaction(home, monkeypatch):
+    """Re-reading is only half the fix; WHERE it happens is the other half.
+
+    store.tx() issues BEGIN IMMEDIATE, so taking the write lock first is
+    what stops another writer committing between the re-read and the
+    upserts -- re-reading just before opening the transaction reintroduces
+    the same lost update through a narrower window. Concurrency alone
+    cannot pin this (the correct version holds the lock, so a competing
+    writer blocks rather than racing), so this asserts the ordering
+    directly: the snapshot read is in autocommit, the re-read is not.
+    """
+    seen_in_transaction: list[bool] = []
+    real_get_sites = store.get_sites
+
+    def watched(conn):
+        seen_in_transaction.append(bool(conn.in_transaction))
+        return real_get_sites(conn)
+
+    monkeypatch.setattr(server.store, "get_sites", watched)
+    monkeypatch.setattr(server.api, "submit_sitemap",
+                        lambda prop, sm, provider, **k: _ok(prop, sm))
+    server.gsc_submit_sitemaps(["https://example.com/mine.xml"])
+
+    assert seen_in_transaction == [False, True], (
+        "expected the pre-network snapshot in autocommit and the re-read "
+        f"inside the write transaction, got {seen_in_transaction}")
