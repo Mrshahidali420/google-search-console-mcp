@@ -37,11 +37,15 @@ from urllib.parse import quote
 import requests
 
 from . import quota, routing, runlog, store
+from . import gauth
 from .gauth import AuthRequired, TokenProvider
 
 log = runlog.get(__name__)
 
-SITES_URI = "https://www.googleapis.com/webmasters/v3/sites"
+# gauth.py owns this literal (verify_token() needs it too, and gauth cannot
+# import api without a cycle). Importing it here, rather than restating the
+# string a second time, is what keeps the two from ever silently drifting.
+SITES_URI = gauth.SITES_ENDPOINT
 INSPECT_URI = "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect"
 SITEMAPS_URI = "https://www.googleapis.com/webmasters/v3/sites/{site}/sitemaps"
 

@@ -35,11 +35,11 @@ SCOPE = "https://www.googleapis.com/auth/webmasters"
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
-# Deliberately restated rather than imported from api.py: api.py already
-# imports from this module (it takes a TokenProvider), so importing api here
-# would be a circular import. This one string is cheaper to keep in sync by
-# hand than to justify a new shared module built to hold a single constant.
-# If a third module ever needs it too, that is the trigger to promote it.
+# The one owner of this URL. api.py already imports from this module (it
+# takes a TokenProvider), so importing api here would be a circular import —
+# but api.py can and does import THIS constant (as api.SITES_URI = gauth.
+# SITES_ENDPOINT) rather than restating the literal, which would have let
+# the two drift.
 SITES_ENDPOINT = "https://www.googleapis.com/webmasters/v3/sites"
 
 _VERIFIER_BYTES = 64
@@ -357,14 +357,20 @@ def verify_token(token: dict, *, session=None) -> int:
 
     Three distinct failures, three distinct messages, because the fixes
     differ: no refresh token means re-consent and approve fully; a non-200
-    means the grant or the API is wrong; zero properties almost always
-    means the user signed in with the wrong Google account, which is
-    otherwise indistinguishable from success.
+    (or a 200 with a body that is not JSON) means the grant or the API is
+    wrong; zero properties almost always means the user signed in with the
+    wrong Google account, which is otherwise indistinguishable from success.
 
     Never includes the access token in any message it raises — this
-    exception text reaches an MCP client.
+    exception text reaches an MCP client. It also never leaves `token` or
+    `response` alive in a raising frame: both are the same live secret
+    material `_post_token` deletes before it can raise, for the same reason
+    — a --showlocals traceback or a locals-capturing log handler must not
+    be able to dump the access token, the refresh token, or `response`'s own
+    record of the Authorization header it sent.
     """
     if not token.get("refresh_token"):
+        del token
         raise ConsentFailed(
             "Google returned no refresh token; approve every requested "
             "permission on the consent screen and try again")
@@ -374,11 +380,20 @@ def verify_token(token: dict, *, session=None) -> int:
         headers={"Authorization": f"Bearer {token['access_token']}"},
         timeout=30)
     if response.status_code != 200:
+        status = response.status_code
+        del token, response
         raise ConsentFailed(
-            f"Search Console rejected the new token (HTTP "
-            f"{response.status_code})")
-    count = len(response.json().get("siteEntry") or [])
+            f"Search Console rejected the new token (HTTP {status})")
+    try:
+        body = response.json()
+    except ValueError:
+        del token, response
+        raise ConsentFailed(
+            "Search Console returned a response that was not valid JSON"
+        ) from None
+    count = len(body.get("siteEntry") or [])
     if count == 0:
+        del token, response
         raise ConsentFailed(
             "the token works but sees no Search Console properties — you "
             "probably signed in with a different Google account than the "
