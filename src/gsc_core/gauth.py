@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -373,22 +374,44 @@ class LoopbackReceiver:
     def redirect_uri(self) -> str:
         return f"http://127.0.0.1:{self._server.server_address[1]}"
 
-    def __enter__(self) -> "LoopbackReceiver":
+    def start(self) -> None:
+        """Begin serving. Separate from __enter__ so a caller that must
+        outlive one stack frame — an MCP tool returning a consent URL and
+        being called again later — can hold the receiver open across calls."""
         self._thread.start()
-        return self
 
-    def __exit__(self, *exc_info) -> None:
+    def close(self) -> None:
         self._server.shutdown()
         self._server.server_close()
 
-    def wait(self, timeout: float = 300.0) -> str:
-        if not self._received.wait(timeout):
-            raise ConsentFailed("consent timed out; no redirect received")
+    def __enter__(self) -> "LoopbackReceiver":
+        self.start()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def poll(self) -> str | None:
+        """The authorization code, or None if the redirect has not landed.
+
+        Never blocks. Raises ConsentFailed for a redirect that arrived and
+        was bad — a state mismatch or a refused consent — because those are
+        terminal, and a caller polling forever would never learn of them.
+        """
+        if not self._received.is_set():
+            return None
         if self._error:
             raise ConsentFailed(self._error)
         if not self._code:
             raise ConsentFailed("redirect carried no authorization code")
         return self._code
+
+    def wait(self, timeout: float = 300.0) -> str:
+        if not self._received.wait(timeout):
+            raise ConsentFailed("consent timed out; no redirect received")
+        code = self.poll()
+        assert code is not None  # _received is set, so poll returns or raises
+        return code
 
     def _handler_class(self):
         receiver = self
@@ -437,22 +460,78 @@ class LoopbackReceiver:
         return Handler
 
 
+@dataclass
+class PendingConsent:
+    """A consent round trip in flight, held between two tool calls.
+
+    Carries a LIVE socket: whoever creates one owns closing it. The
+    verifier is the PKCE secret and is never logged, never returned to an
+    MCP client, and never placed in the auth URL.
+    """
+    receiver: LoopbackReceiver
+    verifier: str
+    redirect_uri: str
+    auth_url: str
+    state: str
+
+
+def start_consent(client_id: str) -> PendingConsent:
+    """Open the loopback receiver and build the consent URL. Non-blocking.
+
+    The caller must eventually call receiver.close(), whether consent
+    completes, fails, or is abandoned — an ephemeral port held open by a
+    forgotten receiver leaks a thread for the life of the process.
+    """
+    verifier, challenge = pkce_pair()
+    receiver = LoopbackReceiver()
+    receiver.start()
+    try:
+        redirect_uri = receiver.redirect_uri
+        auth_url = build_auth_url(client_id, redirect_uri, challenge,
+                                  receiver.state)
+    except BaseException:
+        # Nothing below has run, so nothing else will close this socket.
+        receiver.close()
+        raise
+    return PendingConsent(receiver=receiver, verifier=verifier,
+                          redirect_uri=redirect_uri, auth_url=auth_url,
+                          state=receiver.state)
+
+
+def finish_consent(pending: PendingConsent, client_secret: str, *,
+                   client_id: str, session=None) -> dict | None:
+    """Complete the round trip if the redirect has landed, else None.
+
+    Does NOT close the receiver on the None path — the caller polls again.
+    DOES close it on every terminal path, success or raise, because the
+    port has no further purpose once a code has been consumed.
+    """
+    code = pending.receiver.poll()
+    if code is None:
+        return None
+    try:
+        token = exchange_code(client_id, client_secret, code,
+                              pending.verifier, pending.redirect_uri,
+                              session=session)
+        save_token(token)
+        return token
+    finally:
+        pending.receiver.close()
+
+
 def run_consent_flow(client_id: str, client_secret: str, *,
                      open_browser: bool = True, session=None) -> dict:
-    """Full consent round trip. Returns the stamped token payload and saves it."""
-    verifier, challenge = pkce_pair()
-    with LoopbackReceiver() as receiver:
-        # Capture the URI while the socket is still bound — the token exchange
-        # must send the identical redirect_uri, and reading it after __exit__
-        # has called server_close() would be reading a dead socket.
-        redirect_uri = receiver.redirect_uri
-        url = build_auth_url(client_id, redirect_uri, challenge, receiver.state)
-        log.info("opening consent page")
+    """Full consent round trip, blocking. Returns the saved token payload."""
+    pending = start_consent(client_id)
+    try:
         if open_browser:
-            webbrowser.open(url)
-        code = receiver.wait()
-
-    token = exchange_code(client_id, client_secret, code, verifier,
-                          redirect_uri, session=session)
-    save_token(token)
+            webbrowser.open(pending.auth_url)
+        pending.receiver.wait()
+    except BaseException:
+        pending.receiver.close()
+        raise
+    token = finish_consent(pending, client_secret, client_id=client_id,
+                           session=session)
+    if token is None:  # pragma: no cover — wait() returned, so poll() will too
+        raise ConsentFailed("consent completed but no code was available")
     return token
