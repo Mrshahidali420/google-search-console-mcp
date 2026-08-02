@@ -66,6 +66,20 @@ class Brand:
     # two the same. Confirmed on real hardware 2026-08-02: Chrome and Edge
     # reported accounts, Brave reported none for a browser in daily use.
     reports_google_account: bool
+    # Does the account this brand writes there necessarily belong to GOOGLE?
+    # A separate question from the one above, and the two are not opposites.
+    # Edge writes an ``account_info`` entry in exactly the same place Chrome
+    # does, but the address in it can be the user's MICROSOFT account: Edge
+    # signs a profile in to a Microsoft identity by default and to a Google
+    # one only if the user goes and does it. Nothing on disk distinguishes
+    # the two, so a caller that PRESENTS the account — "signed in", "matches
+    # the account you authorised" — must be able to say "found one, but this
+    # brand stores both kinds here". Overloading reports_google_account for
+    # this would invert it: Edge is True there and would get no caveat, while
+    # Brave (False) would get one it can almost never trigger, because it
+    # writes no address at all. Defaults False so a brand that writes nothing
+    # and a brand that writes only Google addresses both stay silent.
+    account_may_be_non_google: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,7 +137,10 @@ BRANDS: dict[str, Brand] = {
         linux_config_dir="microsoft-edge",
         # NOT the mac bundle id: that is com.microsoft.edgemac.
         flatpak_id="com.microsoft.Edge",
-        reports_google_account=True),
+        reports_google_account=True,
+        # The one brand where both are true: it records an account, and that
+        # account may be a Microsoft one.
+        account_may_be_non_google=True),
     "vivaldi": Brand(
         key="vivaldi", label="Vivaldi", exe_name="vivaldi.exe",
         extensions_url="vivaldi://extensions",

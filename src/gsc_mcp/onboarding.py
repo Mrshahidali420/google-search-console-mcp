@@ -110,11 +110,24 @@ _ACTION_EXTENSION_NO_DIR = (
     "config directory; make that directory writable (or set GSC_MCP_HOME to "
     "one that is) and call gsc_setup() again"
 )
-#: Edge writes an `account_info` entry that may hold a MICROSOFT account
-#: rather than a Google one, and nothing on disk distinguishes them. So a
-#: profile that scored as "signed in" on a brand that records no Google
-#: account must not be presented as a confirmed Google sign-in.
-_NOTE_UNCONFIRMED_ACCOUNT = (
+#: Two different reasons an account on disk may not be what it looks like,
+#: and they are NOT opposite ends of one flag — see browsers.Brand.
+#:
+#: This one is Edge: an address was found, in the same file and the same key
+#: Chrome uses, but Edge signs profiles in to MICROSOFT identities by default
+#: and stores those addresses in exactly the same place. Nothing on disk
+#: tells them apart, so the profile scoring cannot either — and if the user's
+#: Microsoft address happens to equal their Google one, the score is a false
+#: MATCH, not merely a false "signed in".
+_NOTE_MAY_BE_NON_GOOGLE = (
+    " This profile's Google sign-in could not be confirmed — this browser "
+    "stores Microsoft accounts in the same place as Google ones, so the "
+    "account found here may not be a Google account at all. Check it is the "
+    "one that owns your Search Console properties."
+)
+#: This one is Brave, Vivaldi, Opera and plain Chromium: the brand records no
+#: Google account, so anything found is not evidence of a Google sign-in.
+_NOTE_NOT_DISCOVERABLE = (
     " This profile's Google sign-in could not be confirmed — this browser "
     "does not record a Google account, so check you are signed in to it "
     "with the account that owns your Search Console properties."
@@ -442,6 +455,25 @@ def _extension_action(best: profiles.Candidate, complete: bool) -> str:
     action = (f"{opening} To install it: open {brand.extensions_url}, enable "
               f"Developer mode, choose Load unpacked, and select the folder "
               f"in next.path. Then call gsc_setup() again.")
-    if best.profile.email and not brand.reports_google_account:
-        action += _NOTE_UNCONFIRMED_ACCOUNT
-    return action
+    return action + _account_caveat(best.profile, brand)
+
+
+def _account_caveat(profile: profiles.Profile, brand) -> str:
+    """The caveat this brand's account needs, or nothing.
+
+    Two conditions, checked separately because they are separate facts and
+    only one of them is about Edge. Gating both on
+    `not reports_google_account` was the bug this replaces: it hedged the
+    brands that write no address, and left the one brand that writes a
+    possibly-Microsoft address presented as a confirmed Google sign-in.
+
+    No caveat is needed when no address was found at all — there is nothing
+    being claimed to overstate.
+    """
+    if not profile.email:
+        return ""
+    if brand.account_may_be_non_google:
+        return _NOTE_MAY_BE_NON_GOOGLE
+    if not brand.reports_google_account:
+        return _NOTE_NOT_DISCOVERABLE
+    return ""

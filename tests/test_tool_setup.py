@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import traceback
 from pathlib import Path
 
 import pytest
@@ -72,8 +73,32 @@ def captured_log():
         logger.setLevel(previous)
 
 
-def _brave_candidate(tmp_path, *, email=None, brand_key="brave"):
-    """One Brave profile on disk, ready to be surveyed."""
+def logged_text(records) -> str:
+    """Everything a record could carry a secret in, joined.
+
+    `getMessage()` alone is NOT enough, and the gap is not theoretical: a
+    site changed from `log.debug` to `log.exception` puts the exception —
+    and with it a client secret, an address, or an OSError's filesystem path
+    — into `exc_info`, where the default formatter writes it to the log file
+    and a message-only assertion never sees it. `args` is included for the
+    same reason: an argument the format string does not consume still
+    reaches a locals-capturing handler.
+    """
+    parts: list[str] = []
+    for record in records:
+        parts.append(record.getMessage())
+        parts.append(repr(record.args))
+        if record.exc_info:
+            parts.append("".join(traceback.format_exception(*record.exc_info)))
+        if record.exc_text:
+            parts.append(record.exc_text)
+        if record.stack_info:
+            parts.append(record.stack_info)
+    return "\n".join(parts)
+
+
+def _candidate(tmp_path, *, email=None, brand_key="brave"):
+    """One profile of one browser, on disk, ready to be surveyed."""
     user_data = tmp_path / "user-data"
     profile_dir = user_data / "Default"
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -305,7 +330,7 @@ def test_the_extension_step_names_the_right_extensions_page(
         configured, monkeypatch, signed_in, tmp_path):
     """The known bug this prevents: telling a Brave user to open
     chrome://extensions."""
-    candidate = _brave_candidate(tmp_path)
+    candidate = _candidate(tmp_path)
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
     result = onboarding.setup(open_browser=False)
     assert result["next"]["step"] == "extension"
@@ -320,7 +345,7 @@ def test_an_unreadable_preferences_file_is_never_called_not_installed(
     """Task 8's tri-state, defended in the copy layer: a user whose
     preferences file could not be read must not be told to reinstall an
     extension that is sitting right there."""
-    candidate = _brave_candidate(tmp_path)
+    candidate = _candidate(tmp_path)
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
     monkeypatch.setattr(onboarding.pairing, "look_up_extension",
                         lambda *a, **k: onboarding.pairing.Lookup(None, False))
@@ -333,7 +358,7 @@ def test_a_complete_miss_does_say_it_is_not_installed(
         configured, monkeypatch, signed_in, tmp_path):
     """The other half of the tri-state: a read that succeeded and found
     nothing must state that plainly, not hedge."""
-    candidate = _brave_candidate(tmp_path)
+    candidate = _candidate(tmp_path)
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
     monkeypatch.setattr(onboarding.pairing, "look_up_extension",
                         lambda *a, **k: onboarding.pairing.Lookup(None, True))
@@ -342,21 +367,51 @@ def test_a_complete_miss_does_say_it_is_not_installed(
     assert "could not be checked" not in action
 
 
+def test_an_edge_account_is_hedged_as_possibly_not_google(
+        configured, monkeypatch, signed_in, tmp_path):
+    """The bug this pins: Edge writes an account_info entry that may hold a
+    MICROSOFT address, in the same file and key Chrome uses, and the profile
+    scoring cannot tell the difference — so an Edge profile can score a false
+    "signed in", or a false MATCH when the two addresses coincide.
+
+    Edge's `reports_google_account` is True, so gating the caveat on that
+    flag left the one brand that needs it silent. Covered here because that
+    is exactly where the bug lived.
+    """
+    candidate = _candidate(tmp_path, email="someone@example.com",
+                                 brand_key="edge")
+    monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
+    action = onboarding.setup(open_browser=False)["next"]["action"]
+    assert "could not be confirmed" in action
+    assert "Microsoft accounts in the same place" in action
+
+
+def test_an_edge_profile_with_no_account_is_not_hedged(
+        configured, monkeypatch, signed_in, tmp_path):
+    """Nothing was found, so nothing is being claimed to overstate."""
+    candidate = _candidate(tmp_path, email=None, brand_key="edge")
+    monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
+    action = onboarding.setup(open_browser=False)["next"]["action"]
+    assert "could not be confirmed" not in action
+
+
 def test_an_account_on_a_brand_that_records_no_google_account_is_hedged(
         configured, monkeypatch, signed_in, tmp_path):
-    """Edge writes an account_info entry that may hold a MICROSOFT account,
-    and the profile scoring cannot tell the difference — so a recommended
-    profile must not be presented as a confirmed Google sign-in."""
-    candidate = _brave_candidate(tmp_path, email="someone@example.com",
+    """The other, separate condition: Brave records no Google account, so an
+    address found in one of its profiles is not evidence of a Google
+    sign-in. Distinct from Edge's caveat, and worded differently."""
+    candidate = _candidate(tmp_path, email="someone@example.com",
                                  brand_key="brave")
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
     action = onboarding.setup(open_browser=False)["next"]["action"]
     assert "could not be confirmed" in action
+    assert "does not record a Google account" in action
+    assert "Microsoft" not in action
 
 
 def test_a_google_account_brand_is_not_hedged(
         configured, monkeypatch, signed_in, tmp_path):
-    candidate = _brave_candidate(tmp_path, email="someone@example.com",
+    candidate = _candidate(tmp_path, email="someone@example.com",
                                  brand_key="chrome")
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
     action = onboarding.setup(open_browser=False)["next"]["action"]
@@ -365,7 +420,7 @@ def test_a_google_account_brand_is_not_hedged(
 
 def test_no_email_address_reaches_the_response(
         configured, monkeypatch, signed_in, tmp_path):
-    candidate = _brave_candidate(tmp_path, email="someone@example.com")
+    candidate = _candidate(tmp_path, email="someone@example.com")
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
     result = onboarding.setup(open_browser=False)
     assert "someone@example.com" not in repr(result)
@@ -374,7 +429,7 @@ def test_no_email_address_reaches_the_response(
 
 def test_everything_satisfied_reports_ok(
         configured, monkeypatch, signed_in, tmp_path):
-    candidate = _brave_candidate(tmp_path)
+    candidate = _candidate(tmp_path)
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
     _install_extension(candidate, onboarding.pairing.extension_dir())
     result = onboarding.setup(open_browser=False)
@@ -401,7 +456,7 @@ def test_the_shape_never_claims_ok_with_steps_outstanding():
 def test_the_extension_id_is_never_returned(
         configured, monkeypatch, signed_in, tmp_path):
     """32 characters naming one person's install, of no use to a model."""
-    candidate = _brave_candidate(tmp_path)
+    candidate = _candidate(tmp_path)
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
     _install_extension(candidate, onboarding.pairing.extension_dir())
     assert EXTENSION_ID not in repr(onboarding.setup(open_browser=False))
@@ -409,7 +464,7 @@ def test_the_extension_id_is_never_returned(
 
 def test_an_unwritable_extension_directory_says_so(
         configured, monkeypatch, signed_in, tmp_path):
-    candidate = _brave_candidate(tmp_path)
+    candidate = _candidate(tmp_path)
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
 
     def boom(*a, **k):
@@ -458,6 +513,21 @@ def test_the_log_capture_is_live(captured_log):
     assert any("canary" in record.getMessage() for record in captured_log)
 
 
+def test_the_log_capture_sees_exception_text_too(captured_log):
+    """The second half of the same guard, and the one that was missing.
+
+    A record's exception reaches the log FILE through the default
+    formatter's exc_info handling, not through the message — so a privacy
+    assertion that joins only getMessage() stays green while a secret is
+    written to disk. Proven here rather than assumed.
+    """
+    try:
+        raise RuntimeError("canary-inside-the-exception")
+    except RuntimeError:
+        onboarding.log.exception("something failed")
+    assert "canary-inside-the-exception" in logged_text(captured_log)
+
+
 def test_no_secret_ever_reaches_a_log_line(configured, monkeypatch,
                                            captured_log, tmp_path):
     def boom(*a, **k):
@@ -469,7 +539,7 @@ def test_no_secret_ever_reaches_a_log_line(configured, monkeypatch,
     verifier, state = pending.verifier, pending.state
     onboarding.setup(open_browser=False)
 
-    text = "\n".join(record.getMessage() for record in captured_log)
+    text = logged_text(captured_log)
     assert text  # the failure above must have logged something
     assert CLIENT_SECRET not in text
     assert CLIENT_ID not in text
@@ -480,7 +550,7 @@ def test_no_secret_ever_reaches_a_log_line(configured, monkeypatch,
 def test_no_email_address_reaches_a_log_line(configured, monkeypatch,
                                              signed_in, captured_log,
                                              tmp_path):
-    candidate = _brave_candidate(tmp_path, email="someone@example.com")
+    candidate = _candidate(tmp_path, email="someone@example.com")
     monkeypatch.setattr(onboarding.profiles, "survey", lambda: [candidate])
 
     def boom(*a, **k):
@@ -489,7 +559,7 @@ def test_no_email_address_reaches_a_log_line(configured, monkeypatch,
     monkeypatch.setattr(onboarding.pairing, "extension_dir", boom)
     onboarding.setup(open_browser=False)
 
-    text = "\n".join(record.getMessage() for record in captured_log)
+    text = logged_text(captured_log)
     assert text  # the failure above must have logged something
     assert "someone@example.com" not in text
     assert "@" not in text
