@@ -2,6 +2,7 @@
 
 **An MCP server that gives Claude and other AI agents real control over Google Search Console** — check whether a URL is indexed, find the pages Google is ignoring, request indexing, submit sitemaps, and pull search analytics, all from a conversation.
 
+[![CI](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-green)](LICENSE)
 [![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)](#project-status)
@@ -84,8 +85,7 @@ python -m venv .venv
 
 Stated plainly, because they are the things a reviewer should look at first:
 
-- The POSIX file-permission tests have never executed on any platform — they are skipped on Windows and there is no Linux CI leg yet.
-- No test proves `icacls` actually applied an ACL on Windows; the test only observes the call.
+- No test proves `icacls` actually applied an ACL on Windows — the Windows test only observes that the call was made, so `_harden` could no-op there and the suite would stay green. The POSIX equivalents now execute on Linux and macOS on every push, so this gap is Windows-only.
 - Nothing has authenticated against a real Google account. Every OAuth path is tested against fakes.
 - Google OAuth verification for the sensitive `webmasters` scope has not started.
 
