@@ -11,6 +11,7 @@ the task brief; both are explained where they occur:
   came out above one. With a single url no burst is possible, so no amount of
   `concurrency=4` makes the pass concurrent.
 """
+import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -222,19 +223,28 @@ def test_time_budget_stops_reverification(conn):
 
 
 def test_a_row_the_store_rejects_does_not_lose_the_rest_of_the_batch(conn, monkeypatch):
-    """One bad row must not abort a 1,400-URL pass."""
+    """One bad row must not abort a 1,400-URL pass.
+
+    The rejection is a REAL one -- a NOT NULL violation raised from inside
+    upsert_url's own transaction, mid-write. An earlier version of this test
+    raised before upsert_url was ever entered, which proved only that a
+    try/except catches a ValueError and would have passed against a store
+    that corrupted the batch.
+    """
     real = store.upsert_url
 
-    def flaky(conn_, url, *args, **kwargs):
-        if url.endswith("/a"):
-            raise ValueError("rejected")
-        return real(conn_, url, *args, **kwargs)
+    def flaky(conn_, url, property, *args, **kwargs):
+        # property is NOT NULL, so this fails inside the INSERT itself.
+        return real(conn_, url, None if url.endswith("/a") else property,
+                    *args, **kwargs)
 
     monkeypatch.setattr(store, "upsert_url", flaky)
     urls = ["https://example.com/a", "https://example.com/b"]
     out = run(conn, urls, ScriptedInspect({}))
     assert len(out["rows"]) == 2
     assert [r["url"] for r in store.get_urls(conn, PROP)] == ["https://example.com/b"]
+    # the batch committed and the connection is still usable afterwards
+    assert not conn.in_transaction
 
 
 def test_every_row_in_a_batch_shares_one_checked_at(conn):
@@ -255,24 +265,189 @@ def test_a_raising_inspect_becomes_an_error_row_not_a_lost_batch(conn):
     assert out["rows"][1]["status"] == "indexed"
 
 
-def test_worker_threads_never_touch_the_connection(conn):
-    """sqlite3 refuses cross-thread use, so a db call from a worker raises.
+def test_workers_run_off_thread_and_are_never_handed_the_connection(conn):
+    """The structural rule, asserted rather than trusted.
 
-    This asserts the structural rule rather than trusting it: if a future
-    change moved persistence or quota inside the pool, the concurrent pass
-    would start failing here.
+    A previous version of this test could not fail for its stated reason:
+    _safe_inspect turns ANY exception into an "error" row, so a worker
+    touching the connection would raise sqlite3.ProgrammingError, get
+    swallowed, and look exactly like an ordinary inspection failure while
+    every assertion still passed. So the worker catches the touch itself and
+    the outcome is asserted directly.
     """
-    threads = set()
+    threads: set[int] = set()
+    outcomes: list[str] = []
+    kwargs_seen: list[set[str]] = []
 
     def inspect(url, property, provider, **kwargs):
         threads.add(threading.get_ident())
+        kwargs_seen.append(set(kwargs))
+        try:
+            conn.execute("SELECT 1").fetchone()
+            outcomes.append("touched")
+        except sqlite3.ProgrammingError:
+            outcomes.append("refused")
         return ("indexed", "Submitted and indexed")
 
     urls = [f"https://example.com/p{n}" for n in range(6)]
-    run(conn, urls, inspect, concurrency=4)
+    out = run(conn, urls, inspect, concurrency=4)
+
     # the pass really did run off the calling thread (asserting a *count* of
     # threads would be flaky -- the pool spawns them lazily) ...
     assert threading.get_ident() not in threads
-    # ... and the connection is still usable from the calling thread, which it
-    # would not be had a worker touched it.
+    # ... sqlite3 refuses the connection out there, so the rule has teeth ...
+    assert outcomes == ["refused"] * 6
+    # ... nothing a worker receives is a database handle ...
+    assert all(seen <= {"session", "sleep"} for seen in kwargs_seen)
+    # ... and no row was quietly downgraded to an error on the way, which is
+    # how a swallowed ProgrammingError would have surfaced.
+    assert {row["status"] for row in out["rows"]} == {"indexed"}
     assert len(store.get_urls(conn, PROP)) == 6
+
+
+# --- re-verification honesty (a suspect nobody re-checked is not confirmed) ---
+
+def _burn_minute_budget(conn, leaving: int):
+    """Fill the 60-second window so only `leaving` calls fit."""
+    with store.tx(conn):
+        quota.record_inspections(conn, PROP,
+                                 quota.MINUTE_INSPECTION_LIMIT - leaving,
+                                 when=NOW - timedelta(seconds=10))
+
+
+def test_a_suspect_the_recheck_quota_never_reached_is_flagged_unverified(conn):
+    """The critical case: re-verify quota runs out, _recheck flips nothing,
+    and the loop would otherwise read that as "these unknowns are real".
+
+    Without the flag the caller sees status unknown_to_google, an empty
+    skipped_quota and binding None -- nothing anywhere saying the URL was
+    never actually re-checked. "Google still says unknown" and "we never got
+    to ask" must not arrive looking alike.
+    """
+    _burn_minute_budget(conn, leaving=2)
+    inspect = ScriptedInspect({
+        "https://example.com/a": [("unknown_to_google", "URL is unknown to Google"),
+                                  ("indexed", "would have flipped")],
+    })
+    out = run(conn, ["https://example.com/a", "https://example.com/b"], inspect,
+              concurrency=4)
+
+    # the concurrent pass happened; the re-verification round did not.
+    assert inspect.calls.count("https://example.com/a") == 1
+    row = out["rows"][0]
+    assert row["status"] == "unknown_to_google"      # status is preserved ...
+    assert row["unverified"] is True                 # ... but not trusted
+    assert "not re-verified: re-check quota exhausted" in row["detail"]
+    assert out["quota"][PROP]["unverified"] == 1
+
+
+def test_a_sequentially_confirmed_unknown_is_not_flagged_unverified(conn):
+    """The other half of the distinction: this one really was re-checked."""
+    inspect = ScriptedInspect({
+        "https://example.com/a": [("unknown_to_google", "URL is unknown to Google")],
+    })
+    out = run(conn, ["https://example.com/a", "https://example.com/b"], inspect,
+              concurrency=4)
+    assert inspect.calls.count("https://example.com/a") == 2
+    assert out["rows"][0]["status"] == "unknown_to_google"
+    assert out["rows"][0]["unverified"] is False
+    assert "not re-verified" not in out["rows"][0]["detail"]
+    assert out["quota"][PROP]["unverified"] == 0
+
+
+def test_suspects_dropped_by_the_round_cap_are_flagged_unverified(conn):
+    urls = [f"https://example.com/p{n}" for n in range(4)]
+    inspect = ScriptedInspect({u: [("unknown_to_google", "u")] for u in urls})
+    out = run(conn, urls, inspect, concurrency=4, max_suspects_per_round=2)
+    flagged = [row["url"] for row in out["rows"] if row["unverified"]]
+    assert flagged == urls[2:]
+    assert "round cap reached" in out["rows"][2]["detail"]
+    assert out["quota"][PROP]["unverified"] == 2
+
+
+def test_a_suspect_the_cap_dropped_then_a_later_round_reached_is_not_flagged(conn):
+    """The flag must clear when a later round gets to it.
+
+    A suspect the cap skipped in round 1 and re-checked in round 2 HAS been
+    confirmed sequentially. Leaving round 1's reason on it reports "we never
+    got to ask" about a URL we did ask about -- a false alarm in the opposite
+    direction, and just as much a lie about what the tool actually did.
+    """
+    urls = [f"https://example.com/p{n}" for n in range(4)]
+    inspect = ScriptedInspect({
+        # p0 flips in round 1, which is what keeps the loop alive for round 2.
+        urls[0]: [("unknown_to_google", "u"), ("indexed", "i")],
+        urls[1]: [("unknown_to_google", "u")],
+        urls[2]: [("unknown_to_google", "u")],
+        urls[3]: [("unknown_to_google", "u")],
+    })
+    out = run(conn, urls, inspect, concurrency=4, max_suspects_per_round=2)
+    flags = {row["url"]: row["unverified"] for row in out["rows"]}
+
+    # round 1 re-checked p0 and p1; round 2 re-checked p1 and p2 ...
+    assert inspect.calls.count(urls[2]) == 2
+    assert flags[urls[1]] is False
+    assert flags[urls[2]] is False
+    # ... and only p3 was never reached at all.
+    assert flags[urls[3]] is True
+    assert inspect.calls.count(urls[3]) == 1
+    assert out["quota"][PROP]["unverified"] == 1
+
+
+def test_suspects_left_by_the_time_budget_are_flagged_unverified(conn):
+    ticks = iter([0.0] + [10_000.0] * 50)
+    inspect = ScriptedInspect({
+        "https://example.com/a": [("unknown_to_google", "u"), ("indexed", "i")],
+    })
+    out = run(conn, ["https://example.com/a", "https://example.com/b"], inspect,
+              concurrency=4, time_budget_s=1.0, monotonic=lambda: next(ticks))
+    assert out["rows"][0]["unverified"] is True
+    assert "time budget spent" in out["rows"][0]["detail"]
+
+
+def test_a_single_worker_pass_leaves_nothing_flagged_unverified(conn):
+    """A sequential pass cannot have been degraded by a burst, so its
+    unknowns need no confirmation and must not be reported as doubtful."""
+    inspect = ScriptedInspect({
+        "https://example.com/a": [("unknown_to_google", "u")],
+    })
+    out = run(conn, ["https://example.com/a", "https://example.com/b"], inspect,
+              concurrency=1)
+    assert out["rows"][0]["status"] == "unknown_to_google"
+    assert out["rows"][0]["unverified"] is False
+    assert out["quota"][PROP]["unverified"] == 0
+
+
+# --- timestamps, duplicates ---------------------------------------------------
+
+def test_reverification_records_are_stamped_at_their_call_time(conn):
+    """Stamping a T+120 re-check as if it happened at T makes it leave the
+    60-second window early, so the NEXT batch believes it has budget it does
+    not -- the over-permit direction the whole design is biased against."""
+    ticks = iter([0.0] + [120.0] * 10)
+    inspect = ScriptedInspect({
+        "https://example.com/a": [("unknown_to_google", "u"), ("indexed", "i")],
+    })
+    run(conn, ["https://example.com/a", "https://example.com/b"], inspect,
+        concurrency=4, monotonic=lambda: next(ticks))
+
+    stamps = [row["called_at"] for row in conn.execute(
+        "SELECT called_at FROM inspection_calls ORDER BY id")]
+    assert stamps[:2] == [store.utc_iso(NOW)] * 2
+    assert stamps[2] == store.utc_iso(NOW + timedelta(seconds=120))
+
+
+def test_a_repeated_url_is_inspected_once_and_reserves_one_slot(conn):
+    """Letting both copies through sends two requests against one reserved
+    slot -- under-counting, the direction reserve-then-spend exists to
+    prevent -- and reports both rows as quota-skipped."""
+    inspect = ScriptedInspect({})
+    url = "https://example.com/a"
+    out = run(conn, [url, url], inspect)
+
+    assert inspect.calls == [url]
+    assert quota.inspection_used(conn, PROP, now=NOW)["day"] == 1
+    assert out["checked"] == 1
+    assert out["skipped_quota"] == []
+    # every occurrence still gets a row, and it carries the real result
+    assert [row["status"] for row in out["rows"]] == ["indexed", "indexed"]

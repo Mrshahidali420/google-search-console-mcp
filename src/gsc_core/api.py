@@ -31,7 +31,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from urllib.parse import quote
 
 import requests
@@ -214,6 +214,22 @@ def list_sitemaps(property: str, provider: TokenProvider,
 # than an answer. Removing it does not make check_status faster; it makes it
 # report healthy pages as missing from Google's index, which is the single
 # most expensive lie this tool could tell.
+#
+# Which is exactly why a suspect the loop never managed to re-check must not
+# be returned looking like one it confirmed. Re-verification is itself quota
+# gated, and it can also run out of time or hit the per-round cap; in every
+# one of those cases the row keeps its suspect status but is flagged
+# `unverified` and says why in its detail. "We asked again and Google still
+# says unknown" and "we never got to ask" are different claims, and only one
+# of them is worth acting on.
+#
+# On timestamps: the batch's `now` is a single checked_at shared by every row
+# in the pass, but quota rows are stamped at the moment their calls actually
+# go out — `now` plus the elapsed monotonic. A re-check made 300 seconds in
+# and recorded as if it happened at T would leave the rolling 60-second
+# window 300 seconds early, and the NEXT batch would read budget it does not
+# have. Every other bias in this module and in quota.py runs the other way:
+# over-count, never under-count.
 
 MAX_WORKERS = 15
 MAX_REVERIFY_ROUNDS = 4
@@ -225,45 +241,31 @@ SUSPECT_STATUSES = frozenset({"unknown_to_google", "unknown", "error"})
 
 _NO_PROPERTY_DETAIL = "no Search Console property matches this host"
 
+_WHY_QUOTA = "re-check quota exhausted"
+_WHY_CAP = "round cap reached"
+_WHY_BUDGET = "time budget spent"
+
 
 def check_status(
-    conn: sqlite3.Connection,
-    urls: list[str],
-    provider: TokenProvider,
-    properties: list[str],
-    concurrency: int = 8,
-    time_budget_s: float = 900.0,
-    max_suspects_per_round: int = 200,
-    now: datetime | None = None,
+    conn: sqlite3.Connection, urls: list[str], provider: TokenProvider,
+    properties: list[str], concurrency: int = 8, time_budget_s: float = 900.0,
+    max_suspects_per_round: int = 200, now: datetime | None = None,
     session: requests.Session | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
-    *,
-    _inspect: Callable[..., tuple[str, str]] | None = None,
+    *, _inspect: Callable[..., tuple[str, str]] | None = None,
 ) -> dict:
     """Inspect many URLs, re-verify what a burst may have degraded, persist.
 
-    The sequence is the contract:
+    Route -> gate and RESERVE -> inspect concurrently -> re-verify
+    sequentially -> persist. The order is the contract; the section comment
+    above says why, including how unverified rows and quota timestamps are
+    handled. A URL no property covers costs nothing. A URL repeated in the
+    input is inspected ONCE against one reserved slot, and every occurrence
+    of it gets that one result.
 
-    1. Route. A URL no property covers is reported as "no_property" and costs
-       nothing — no quota, no HTTP, no row.
-    2. Gate and RESERVE, in one transaction, before a single request goes out.
-       A crash mid-batch then over-counts, which costs the user a wait;
-       recording afterwards would under-count and earn a hard rejection from
-       Google, which costs them the rest of the day.
-    3. Inspect concurrently. Worker threads call inspect_url and nothing else
-       — `conn` never crosses a thread boundary, because sqlite3 forbids it
-       and one-connection-per-caller makes sharing wrong regardless.
-    4. Re-verify suspects sequentially (see the note above).
-    5. Persist, every row under its own SAVEPOINT so one unstorable row skips
-       instead of taking the batch with it.
-
-    `now`, `sleep` and `monotonic` are injected so a test can run this in
-    milliseconds. `now` is captured ONCE and used for every quota stamp and
-    every checked_at in the batch: rows checked in one pass share one
-    timestamp, and a long run's quota arithmetic stays pinned to the start,
-    which can only ever over-state how much of the rolling minute window is
-    still occupied — the safe direction.
+    `now`, `sleep` and `monotonic` are injected so a test runs in
+    milliseconds rather than in wall-clock minutes.
     """
     moment = now or datetime.now(UTC)
     started = monotonic()
@@ -271,51 +273,96 @@ def check_status(
     routed = routing.route_all(urls, properties)
 
     reserved = _reserve(conn, _group_by_property(routed), moment)
-    granted = {url: prop for prop, (ok, _, _) in reserved.items() for url in ok}
-    targets = [(url, granted[url]) for url, _ in routed if url in granted]
+    targets = _targets(routed, reserved)
 
     workers = max(1, min(concurrency, MAX_WORKERS, len(targets)))
     results = _inspect_all(targets, provider, inspect, session, sleep, workers)
-    if workers > 1:
-        _reverify(conn, dict(targets), results, provider, inspect, session,
-                  moment=moment, started=started, time_budget_s=time_budget_s,
-                  max_suspects_per_round=max_suspects_per_round,
-                  sleep=sleep, monotonic=monotonic)
+    unverified = _unverified(
+        conn, targets, results, provider, inspect, session, workers=workers,
+        moment=moment, started=started, time_budget_s=time_budget_s,
+        max_suspects_per_round=max_suspects_per_round, sleep=sleep,
+        monotonic=monotonic)
     _persist(conn, targets, results, store.utc_iso(moment))
 
     skipped = _skipped_rows(reserved)
     return {
-        "rows": _rows(routed, results, skipped),
+        "rows": _rows(routed, results, skipped, unverified),
         "checked": len(targets),
         "skipped_quota": list(skipped.values()),
-        "quota": _quota_report(reserved),
+        "quota": _quota_report(reserved, unverified),
     }
+
+
+def _unverified(conn: sqlite3.Connection, targets: list[tuple[str, str]],
+                results: dict[str, tuple[str, str]], provider: TokenProvider,
+                inspect: Callable[..., tuple[str, str]],
+                session: requests.Session | None, *, workers: int,
+                **kwargs) -> dict[str, str]:
+    """Run the re-verification pass; return {url: why} for what it could not
+    confirm.
+
+    A single-worker pass cannot have been degraded by a burst — that is the
+    entire premise of the loop — so it has nothing to re-verify and nothing
+    left doubtful. Returning {} rather than "everything is unverified" is the
+    difference between a sequential run reporting clean results and reporting
+    every unknown as untrustworthy.
+    """
+    if workers <= 1:
+        return {}
+    unreached = _reverify(conn, dict(targets), results, provider, inspect,
+                          session, **kwargs)
+    return {url: why for url, why in unreached.items()
+            if results[url][0] in SUSPECT_STATUSES}
+
+
+def _targets(routed: list[tuple[str, str | None]],
+             reserved: dict[str, tuple[list[str], list[str], object]],
+             ) -> list[tuple[str, str]]:
+    """The (url, property) pairs to inspect, deduplicated, in input order.
+
+    dict.fromkeys is the dedupe: a URL listed twice was reserved once, and
+    letting both copies through would send two requests against one reserved
+    slot — under-counting, which is the direction reserve-then-spend exists
+    to prevent.
+    """
+    granted = {url: property
+               for property, (ok, _, _) in reserved.items() for url in ok}
+    return [(url, granted[url]) for url in dict.fromkeys(url for url, _ in routed)
+            if url in granted]
 
 
 def _group_by_property(
     routed: list[tuple[str, str | None]]
 ) -> dict[str, list[str]]:
-    """Routable URLs bucketed by property, input order preserved.
+    """Routable URLs bucketed by property, deduplicated, input order kept.
 
     Quota is per property, so the gate has to see whole per-property batches;
     checking one URL at a time would let 200 individually-allowed calls walk
-    past a ceiling that only 150 of them fit under.
+    past a ceiling that only 150 of them fit under. Duplicates are dropped
+    here so the reservation matches the number of calls actually made — see
+    _targets(), which dedupes the same way.
     """
     grouped: dict[str, list[str]] = {}
+    seen: set[str] = set()
     for url, property in routed:
-        if property is not None:
+        if property is not None and url not in seen:
+            seen.add(url)
             grouped.setdefault(property, []).append(url)
     return grouped
 
 
 def _reserve(
-    conn: sqlite3.Connection, grouped: dict[str, list[str]], moment: datetime,
+    conn: sqlite3.Connection, grouped: dict[str, list[str]], when: datetime,
 ) -> dict[str, tuple[list[str], list[str], quota.InspectionVerdict]]:
     """Gate each property against its inspection budget and reserve the rest.
 
     Returns {property: (granted, deferred, verdict)}. Everything happens in
     one transaction on the CALLING thread, and it is complete — committed —
     before the caller makes its first HTTP call.
+
+    `when` is the moment the calls will actually go out, used both to age the
+    rolling windows and to stamp the recorded rows. Re-verification rounds
+    pass their own, later, `when` for exactly that reason.
 
     A partially-allowed property takes min(daily_free, minute_free): the
     verdict names only the first binding window, and honouring that one alone
@@ -325,11 +372,11 @@ def _reserve(
     with store.tx(conn):
         for property, wanted in grouped.items():
             verdict = quota.inspection_check(conn, property, wanted=len(wanted),
-                                             now=moment)
+                                             now=when)
             allowed = (len(wanted) if verdict.allowed
                        else min(verdict.daily_free, verdict.minute_free))
             if allowed:
-                quota.record_inspections(conn, property, allowed, when=moment)
+                quota.record_inspections(conn, property, allowed, when=when)
             if allowed < len(wanted):
                 log.warning(
                     "%s: inspection quota allows %d of %d call(s); %d deferred "
@@ -390,54 +437,99 @@ def _inspect_all(targets: list[tuple[str, str]], provider: TokenProvider,
         return {url: future.result() for future, url in futures.items()}
 
 
+def _mark(unreached: dict[str, str], urls: list[str],
+          reason: str) -> dict[str, str]:
+    """Record why these suspects were not re-checked. Returns the dict so a
+    caller can mark-and-return in one line."""
+    for url in urls:
+        unreached[url] = reason
+    return unreached
+
+
+def _cap(suspects: list[str], limit: int,
+         unreached: dict[str, str]) -> list[str]:
+    """Trim a round to `limit` suspects, recording what that dropped."""
+    if len(suspects) <= limit:
+        return suspects
+    log.warning("re-verification capped at %d of %d suspect(s) this round; "
+                "%d left unverified", limit, len(suspects),
+                len(suspects) - limit)
+    _mark(unreached, suspects[limit:], _WHY_CAP)
+    return suspects[:limit]
+
+
+def _reserve_round(conn: sqlite3.Connection, suspects: list[str],
+                   properties: dict[str, str], unreached: dict[str, str],
+                   when: datetime) -> list[str]:
+    """Reserve quota for one re-verification round; return what it granted.
+
+    Re-verification calls are inspections like any other — reserved on this
+    thread, before the round's first request, same as the batch itself. What
+    the budget refuses is marked unreached rather than quietly dropped: a
+    suspect nobody re-checked must never come back looking confirmed.
+    """
+    reserved = _reserve(conn, _group_by_property(
+        [(url, properties[url]) for url in suspects]), when)
+    granted = [url for _, (ok, _, _) in reserved.items() for url in ok]
+    _mark(unreached, [url for url in suspects if url not in set(granted)],
+          _WHY_QUOTA)
+    for url in granted:
+        unreached.pop(url, None)   # this round reached it after all
+    if not granted:
+        log.warning("re-verification quota exhausted; %d suspect result(s) "
+                    "left unconfirmed", len(suspects))
+    return granted
+
+
 def _reverify(conn: sqlite3.Connection, properties: dict[str, str],
               results: dict[str, tuple[str, str]], provider: TokenProvider,
               inspect: Callable[..., tuple[str, str]],
               session: requests.Session | None, *, moment: datetime,
               started: float, time_budget_s: float,
               max_suspects_per_round: int, sleep: Callable[[float], None],
-              monotonic: Callable[[], float]) -> None:
+              monotonic: Callable[[], float]) -> dict[str, str]:
     """Re-check suspect results sequentially, in place, until they settle.
 
     A round cools down first, then walks its suspects one at a time with a
     gap between them — the whole point is to be the opposite of the burst
     that produced the suspect answers, so both waits are load-bearing.
 
-    The loop stops on whichever comes first: nothing suspect left, a round
-    that flipped nothing (those unknowns are real), the time budget, or four
-    rounds. Truncations and abandonments are logged, because a silently
-    shortened pass reads downstream as "everything was verified".
+    Stops on whichever comes first: nothing suspect left, a round that
+    flipped nothing (those unknowns are real), a round the budget refused
+    outright, the time budget, or four rounds.
+
+    Returns {url: reason} for every suspect it could NOT re-check. An empty
+    dict means each suspect still in `results` was confirmed sequentially.
+    That distinction is the whole value of the pass: "Google still says
+    unknown" and "we never got to ask" must not arrive looking alike.
     """
+    unreached: dict[str, str] = {}
     cooldown = REVERIFY_COOLDOWN_S
     for round_number in range(1, MAX_REVERIFY_ROUNDS + 1):
         suspects = [url for url, (status, _) in results.items()
                     if status in SUSPECT_STATUSES]
         if not suspects:
-            return
+            break
         if monotonic() - started > time_budget_s:
             log.warning("time budget of %ss spent after %d re-verification "
                         "round(s); %d row(s) left unverified", time_budget_s,
                         round_number - 1, len(suspects))
-            return
-        if len(suspects) > max_suspects_per_round:
-            log.warning("re-verification capped at %d of %d suspect(s) this "
-                        "round; %d left unverified", max_suspects_per_round,
-                        len(suspects), len(suspects) - max_suspects_per_round)
-            suspects = suspects[:max_suspects_per_round]
+            return _mark(unreached, suspects, _WHY_BUDGET)
 
         sleep(cooldown)
-        # Re-verification calls are inspections like any other: reserved on
-        # this thread, before the round's first request, same as the batch.
-        granted = _reserve(conn, _group_by_property(
-            [(url, properties[url]) for url in suspects]), moment)
-        flipped = _recheck(
-            [url for _, (ok, _, _) in granted.items() for url in ok],
-            properties, results, provider, inspect, session, sleep)
-        if not flipped:
+        # Stamped when the calls actually go out, not at the batch start.
+        granted = _reserve_round(
+            conn, _cap(suspects, max_suspects_per_round, unreached), properties,
+            unreached, moment + timedelta(seconds=max(0.0, monotonic() - started)))
+        if not granted:
+            return unreached
+        if not _recheck(granted, properties, results, provider, inspect,
+                        session, sleep):
             log.info("re-verification round %d flipped nothing; treating %d "
-                     "unknown result(s) as real", round_number, len(suspects))
-            return
+                     "unknown result(s) as real", round_number, len(granted))
+            break
         cooldown *= 2
+    return unreached
 
 
 def _recheck(suspects: list[str], properties: dict[str, str],
@@ -462,18 +554,25 @@ def _recheck(suspects: list[str], properties: dict[str, str],
 def _persist(conn: sqlite3.Connection, targets: list[tuple[str, str]],
              results: dict[str, tuple[str, str]],
              checked_at: str | None) -> None:
-    """Write the settled rows, one SAVEPOINT each inside one transaction.
+    """Write the settled rows in one transaction, skipping any the store rejects.
 
-    store.tx is re-entrant, so the inner block rolls back only its own row.
-    One URL the store refuses therefore costs one row, not the other 1,399.
+    The try/except is what delivers "one bad row costs one row" — not a
+    savepoint. SQLite already rolls back the individual failed statement and
+    leaves the enclosing transaction usable, so wrapping each row in its own
+    store.tx() adds a SAVEPOINT that never has anything to undo; an earlier
+    revision did exactly that and no test could tell it apart from its
+    absence. What the transaction here IS for is committing 1,400 rows once
+    instead of 1,400 times.
+
+    upsert_url opens its own store.tx, which nests inside this one as a
+    savepoint. That is its business, not a guarantee this function leans on.
     """
     with store.tx(conn):
         for url, property in targets:
             status, detail = results[url]
             try:
-                with store.tx(conn):
-                    store.upsert_url(conn, url, property, status, detail,
-                                     checked_at)
+                store.upsert_url(conn, url, property, status, detail,
+                                 checked_at)
             except Exception:  # noqa: BLE001 — one bad row must not end the batch
                 log.warning("could not store the result for %s; skipping it",
                             url, exc_info=True)
@@ -491,36 +590,50 @@ def _skipped_rows(
 
 
 def _rows(routed: list[tuple[str, str | None]],
-          results: dict[str, tuple[str, str]],
-          skipped: dict[str, dict]) -> list[dict]:
+          results: dict[str, tuple[str, str]], skipped: dict[str, dict],
+          unverified: dict[str, str]) -> list[dict]:
     """One row per input URL, in input order — including the ones that never
-    reached the API, so a caller can account for every URL it handed over."""
+    reached the API, so a caller can account for every URL it handed over.
+
+    `unverified` is True only for a suspect status no sequential re-check
+    confirmed, and the reason is appended to the detail. Without it a caller
+    cannot tell a checked "unknown to Google" from one the re-verification
+    pass ran out of budget before reaching — and would act on both.
+    """
     rows: list[dict] = []
     for url, property in routed:
         if property is None:
-            rows.append({"url": url, "status": "no_property",
-                         "detail": _NO_PROPERTY_DETAIL})
+            row = {"url": url, "status": "no_property",
+                   "detail": _NO_PROPERTY_DETAIL}
         elif url in skipped:
             retry = skipped[url]["retry_after_seconds"]
-            rows.append({"url": url, "status": "skipped_quota",
-                         "detail": f"inspection quota exhausted; "
-                                   f"retry in {retry}s"})
+            row = {"url": url, "status": "skipped_quota",
+                   "detail": f"inspection quota exhausted; retry in {retry}s"}
         else:
             status, detail = results[url]
-            rows.append({"url": url, "status": status, "detail": detail})
+            why = unverified.get(url)
+            row = {"url": url, "status": status,
+                   "detail": detail if why is None
+                             else f"{detail} | not re-verified: {why}"}
+        rows.append({**row, "unverified": url in unverified})
     return rows
 
 
 def _quota_report(
-    reserved: dict[str, tuple[list[str], list[str], quota.InspectionVerdict]]
+    reserved: dict[str, tuple[list[str], list[str], quota.InspectionVerdict]],
+    unverified: dict[str, str],
 ) -> dict[str, dict]:
     """Per-property accounting. daily_free/minute_free are the headroom seen
-    AT THE GATE, before this batch reserved any of it — not what is left
-    now."""
+    AT THE GATE, before this batch reserved any of it — not what is left now.
+
+    `unverified` counts rows whose suspect status no re-check confirmed, so a
+    caller reading only this summary still sees that the pass was incomplete.
+    """
     return {
         property: {
             "attempted": len(granted),
             "deferred": len(deferred),
+            "unverified": sum(1 for url in granted if url in unverified),
             "binding": verdict.binding,
             "retry_after_seconds": verdict.retry_after_seconds,
             "daily_free": verdict.daily_free,

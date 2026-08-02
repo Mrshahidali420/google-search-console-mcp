@@ -255,3 +255,57 @@ def test_refresh_with_no_access_token_raises_and_does_not_persist(tmp_path):
     with pytest.raises(RuntimeError, match="no access_token"):
         provider.access_token()
     assert gauth.load_token(target)["access_token"] == "stale"
+
+
+def test_concurrent_access_token_calls_refresh_exactly_once(tmp_path):
+    """api.check_status() calls access_token() from every worker at once.
+
+    Google rotates the refresh token on use, so two threads refreshing
+    concurrently means the loser persists a token Google has already retired
+    and the stored credential is dead. Refresh must be single-flight.
+    """
+    import threading
+
+    target = tmp_path / "token.json"
+    past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    gauth.save_token(
+        {"refresh_token": "r", "access_token": "stale", "expires_at": past},
+        target,
+    )
+
+    class SlowSession(FakeSession):
+        """Holds the token endpoint open long enough that an unsynchronised
+        second caller would reach it. Without this the race window is a few
+        microseconds wide and the test would pass by luck rather than by
+        the lock."""
+
+        def post(self, url, data=None, timeout=None):
+            threading.Event().wait(0.05)
+            return super().post(url, data=data, timeout=timeout)
+
+    session = SlowSession({"access_token": "refreshed", "expires_in": 3599})
+    provider = gauth.TokenProvider("cid", "secret", token_path=target,
+                                   session=session)
+
+    workers = 8
+    ready = threading.Barrier(workers)
+    tokens: list[str] = []
+    failures: list[BaseException] = []
+
+    def worker():
+        try:
+            ready.wait(timeout=5)
+            tokens.append(provider.access_token())
+        except BaseException as exc:  # noqa: BLE001 — reported below
+            failures.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not failures
+    assert len(session.calls) == 1, "the refresh must be single-flight"
+    assert tokens == ["refreshed"] * workers
+    assert gauth.load_token(target)["refresh_token"] == "r"
