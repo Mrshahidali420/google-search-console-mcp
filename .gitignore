@@ -1,0 +1,12 @@
+# Local planning artefacts: absolute paths and usernames from a dev machine.
+# Tracked here, not in .git/info/exclude, so it survives a fresh clone.
+.superpowers/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
