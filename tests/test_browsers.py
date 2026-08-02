@@ -26,6 +26,7 @@ def test_every_brand_carries_the_fields_detection_needs():
         assert brand.win_vendor and len(brand.win_vendor) == 2
         assert brand.mac_bundle_id
         assert brand.linux_binaries
+        assert isinstance(brand.reports_google_account, bool)
 
 
 def test_the_six_expected_brands_are_present():
@@ -76,6 +77,20 @@ def test_every_brand_states_its_own_data_locations():
     win_dirs = [b.win_data_dir for b in browsers.BRANDS.values()]
     assert len(set(mac_dirs)) == len(mac_dirs)
     assert len(set(win_dirs)) == len(win_dirs)
+
+
+def test_every_brand_states_whether_it_records_the_signed_in_account():
+    """A capability claim, stated per brand rather than inherited.
+
+    Only the brands shipping Google Sync write ``account_info``. Getting
+    this wrong is silent: a brand wrongly marked True makes "no account
+    found" read as "signed out" when the truth is "not discoverable", and
+    the ranking layer then buries a browser for a fact about the brand.
+    """
+    expected = {"chrome": True, "edge": True, "brave": False,
+                "vivaldi": False, "opera": False, "chromium": False}
+    assert {k: b.reports_google_account
+            for k, b in browsers.BRANDS.items()} == expected
 
 
 def test_flatpak_ids_are_reverse_dns_and_unique():

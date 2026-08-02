@@ -208,3 +208,176 @@ def _read_json(path: Path) -> object | None:
     except (ValueError, RecursionError) as exc:
         log.debug("state file unparsable (%s)", type(exc).__name__)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: ranking, and the one recommendation
+# ---------------------------------------------------------------------------
+#
+# The scores below are ordered so that each rule can only ever be broken by
+# a STRICTLY stronger one; the arithmetic is checked by _assert_bands below
+# rather than left to the reader to verify.
+#
+# Three account states, not two:
+#
+#   MATCHED       the profile is signed in as the account that completed
+#                 OAuth. Proof, and the whole point of the layer.
+#   UNKNOWABLE    the brand does not record accounts at all
+#                 (``reports_google_account`` is False), and none was found.
+#                 Nothing is known either way.
+#   SIGNED_IN     signed in as some other account.
+#   (signed out)  the brand does record accounts and none was found. Zero.
+#
+# UNKNOWABLE outranks SIGNED_IN deliberately. Brave ships no Google Sync, so
+# its ``account_info`` is empty even for a user signed into Google in that
+# browser: treating that as "signed out" would rank the browser this
+# toolkit actually drives below every Chrome profile on a fact about the
+# BRAND rather than about the profile. It stays far below MATCHED, because
+# a profile that provably belongs to the right account is still the better
+# answer whenever one exists.
+_SCORE_ACCOUNT_MATCHED = 100
+_SCORE_ACCOUNT_UNKNOWABLE = 20
+_SCORE_ACCOUNT_SIGNED_IN = 10
+_SCORE_DEFAULT_PROFILE = 1
+_BRAND_BONUS_TOP = 5
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One browser+profile pair, with why it scored what it scored.
+
+    ``reasons`` is the honest half of the answer: a user asking "why this
+    one?" gets sentences, not a number. "We could not tell whether anyone
+    is signed in" is one of the legitimate answers and is stated as such.
+
+    Only the address the caller already supplied can appear in ``reasons``
+    — an unrelated account found on disk is described, never quoted.
+    """
+
+    installed: browsers.Installed
+    profile: Profile
+    score: int
+    reasons: list[str]
+
+
+def survey() -> list[Candidate]:
+    """Every profile of every installed browser, unscored.
+
+    Never raises. Detection failing, or one browser's profiles being
+    unreadable, costs that browser alone — exactly as in the layers below.
+    """
+    try:
+        installs = browsers.detect()
+    except Exception as exc:  # noqa: BLE001 — survey is best-effort
+        log.debug("survey found no browsers (%s)", type(exc).__name__)
+        return []
+
+    found: list[Candidate] = []
+    for installed in installs:
+        try:
+            profiles_of = list_profiles(installed)
+        except Exception as exc:  # noqa: BLE001 — one browser of six
+            log.debug("survey skipped a browser (%s)", type(exc).__name__)
+            continue
+        for profile in profiles_of:
+            found.append(Candidate(installed=installed, profile=profile,
+                                   score=0, reasons=[]))
+    return found
+
+
+def recommend(candidates: list[Candidate] | None = None, *,
+              account_email: str | None = None) -> Candidate | None:
+    """The single profile to offer the user, or None when there is none.
+
+    ``None`` for ``candidates`` means "look at this machine". An empty list
+    is a supported answer, not an error: a machine with no Chromium browser
+    installed has nothing to recommend.
+    """
+    pool = survey() if candidates is None else candidates
+    scored = [_score(candidate, account_email) for candidate in pool]
+    if not scored:
+        return None
+    return min(scored, key=_rank_key)
+
+
+def _rank_key(candidate: Candidate) -> tuple:
+    """Highest score first, then brand order, then profile order.
+
+    Every component is derived from the candidate itself, so two identical
+    inputs always produce the same winner. A recommendation that changes
+    between two identical calls is a bug a user reports as flakiness.
+    """
+    return (-candidate.score,
+            _brand_index(candidate.installed.brand),
+            _profile_sort_key(candidate.profile.directory))
+
+
+def _brand_index(brand: browsers.Brand) -> int:
+    """Position in BRANDS order; unknown brands sort last, not first."""
+    keys = list(browsers.BRANDS)
+    return keys.index(brand.key) if brand.key in keys else len(keys)
+
+
+def _score(candidate: Candidate, account_email: str | None) -> Candidate:
+    """A copy of the candidate carrying its score and its explanation."""
+    brand = candidate.installed.brand
+    profile = candidate.profile
+    score, reasons = _score_account(profile, brand, account_email)
+
+    bonus = _BRAND_BONUS_TOP - _brand_index(brand)
+    if bonus > 0:
+        score += bonus
+        reasons.append(f"{brand.label} is preferred over the other browsers "
+                       "installed here")
+
+    if profile.directory == _DEFAULT_DIR:
+        score += _SCORE_DEFAULT_PROFILE
+        reasons.append("it is the browser's default profile")
+
+    return Candidate(installed=candidate.installed, profile=profile,
+                     score=score, reasons=reasons)
+
+
+def _score_account(profile: Profile, brand: browsers.Brand,
+                   account_email: str | None) -> tuple[int, list[str]]:
+    """The account half of the score, and the sentences behind it."""
+    if _is_match(profile.email, account_email):
+        return (_SCORE_ACCOUNT_MATCHED,
+                [f"it is signed in as {account_email}, the account you "
+                 "authorised"])
+    if profile.email:
+        return (_SCORE_ACCOUNT_SIGNED_IN,
+                ["it is signed in to a Google account, though not the one "
+                 "you authorised"])
+    if not brand.reports_google_account:
+        return (_SCORE_ACCOUNT_UNKNOWABLE,
+                [f"{brand.label} does not record which account is signed in, "
+                 "so this could not be checked"])
+    return (0, ["no Google account is signed in to this profile"])
+
+
+def _is_match(profile_email: str | None, account_email: str | None) -> bool:
+    """Addresses compare case-insensitively; neither is logged.
+
+    Google treats the local part case-insensitively and the browser stores
+    whatever case the user typed, so a case-sensitive compare would miss
+    the user's own account and recommend the wrong profile.
+    """
+    if not profile_email or not account_email:
+        return False
+    return profile_email.strip().casefold() == account_email.strip().casefold()
+
+
+def _assert_bands() -> None:
+    """The bands cannot overlap, whatever the tiebreak bonuses add.
+
+    Checked at import rather than trusted, because the failure mode is
+    silent: a later "+2 for X" that lets an unknowable account outrank a
+    proven one produces a plausible-looking wrong recommendation.
+    """
+    tiebreaks = _BRAND_BONUS_TOP + _SCORE_DEFAULT_PROFILE
+    assert _SCORE_ACCOUNT_UNKNOWABLE + tiebreaks < _SCORE_ACCOUNT_MATCHED
+    assert _SCORE_ACCOUNT_SIGNED_IN + tiebreaks < _SCORE_ACCOUNT_UNKNOWABLE
+
+
+_assert_bands()

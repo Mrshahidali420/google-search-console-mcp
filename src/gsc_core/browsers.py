@@ -56,6 +56,16 @@ class Brand:
     linux_binaries: tuple[str, ...]
     linux_config_dir: str
     flatpak_id: str | None            # None where the brand ships no flatpak
+    # Does this brand write the signed-in Google account into its profile
+    # preferences at all? Only the brands that ship Google Sync do. Brave,
+    # Vivaldi, Opera and plain Chromium strip or never build it, so their
+    # ``account_info`` stays empty even for a user who is signed into Google
+    # in that browser. This is a fact about the BRAND, not about a profile:
+    # for a brand that is False, "no account found" means "not discoverable
+    # from disk", NOT "nobody is signed in", and Layer 3 must not score the
+    # two the same. Confirmed on real hardware 2026-08-02: Chrome and Edge
+    # reported accounts, Brave reported none for a browser in daily use.
+    reports_google_account: bool
 
 
 @dataclass(frozen=True)
@@ -87,7 +97,8 @@ BRANDS: dict[str, Brand] = {
         mac_data_dir="Google/Chrome",
         linux_binaries=("google-chrome", "google-chrome-stable"),
         linux_config_dir="google-chrome",
-        flatpak_id="com.google.Chrome"),
+        flatpak_id="com.google.Chrome",
+        reports_google_account=True),
     "brave": Brand(
         key="brave", label="Brave", exe_name="brave.exe",
         extensions_url="brave://extensions",
@@ -97,7 +108,9 @@ BRANDS: dict[str, Brand] = {
         mac_data_dir="BraveSoftware/Brave-Browser",
         linux_binaries=("brave-browser", "brave"),
         linux_config_dir="BraveSoftware/Brave-Browser",
-        flatpak_id="com.brave.Browser"),
+        flatpak_id="com.brave.Browser",
+        # No Google Sync: account_info stays empty even when signed in.
+        reports_google_account=False),
     "edge": Brand(
         key="edge", label="Microsoft Edge", exe_name="msedge.exe",
         extensions_url="edge://extensions",
@@ -109,7 +122,8 @@ BRANDS: dict[str, Brand] = {
         linux_binaries=("microsoft-edge", "microsoft-edge-stable"),
         linux_config_dir="microsoft-edge",
         # NOT the mac bundle id: that is com.microsoft.edgemac.
-        flatpak_id="com.microsoft.Edge"),
+        flatpak_id="com.microsoft.Edge",
+        reports_google_account=True),
     "vivaldi": Brand(
         key="vivaldi", label="Vivaldi", exe_name="vivaldi.exe",
         extensions_url="vivaldi://extensions",
@@ -120,7 +134,9 @@ BRANDS: dict[str, Brand] = {
         mac_data_dir="Vivaldi",
         linux_binaries=("vivaldi", "vivaldi-stable"),
         linux_config_dir="vivaldi",
-        flatpak_id="com.vivaldi.Vivaldi"),
+        flatpak_id="com.vivaldi.Vivaldi",
+        # Vivaldi syncs through its own service, not Google's.
+        reports_google_account=False),
     "opera": Brand(
         key="opera", label="Opera", exe_name="opera.exe",
         extensions_url="opera://extensions",
@@ -131,7 +147,9 @@ BRANDS: dict[str, Brand] = {
         mac_data_dir="com.operasoftware.Opera",
         linux_binaries=("opera",), linux_config_dir="opera",
         # NOT the mac bundle id: that is com.operasoftware.Opera.
-        flatpak_id="com.opera.Opera"),
+        flatpak_id="com.opera.Opera",
+        # Opera syncs through its own account system, not Google's.
+        reports_google_account=False),
     "chromium": Brand(
         key="chromium", label="Chromium", exe_name="chrome.exe",
         # Chromium registers no chromium:// scheme — chrome://extensions is
@@ -145,7 +163,10 @@ BRANDS: dict[str, Brand] = {
         mac_data_dir="Chromium",
         linux_binaries=("chromium", "chromium-browser"),
         linux_config_dir="chromium",
-        flatpak_id="org.chromium.Chromium"),
+        flatpak_id="org.chromium.Chromium",
+        # Distro Chromium builds ship without Google API keys, so sync is
+        # unavailable and nothing is ever written to account_info.
+        reports_google_account=False),
 }
 
 # chrome.exe is claimed by two brands. Where an executable name is shared,
