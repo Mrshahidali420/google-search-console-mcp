@@ -41,6 +41,14 @@ def test_domain_property_does_not_cover_a_lookalike_suffix():
     assert routing.resolve_property("https://notexample.com/a", [DOMAIN]) is None
 
 
+def test_domain_property_matches_regardless_of_its_own_case():
+    """Search Console does not guarantee the case of the domain half of an
+    sc-domain: property string, so step 3 matching must not be case-sensitive."""
+    assert routing.resolve_property(
+        "https://example.com/a", ["sc-domain:EXAMPLE.com"]
+    ) == "sc-domain:EXAMPLE.com"
+
+
 def test_unmatched_host_returns_none():
     assert routing.resolve_property("https://elsewhere.test/a", [DOMAIN, PREFIX]) is None
 
@@ -59,6 +67,24 @@ def test_exact_host_beats_a_domain_property():
     prefix = "https://sub.example.com/"
     assert routing.resolve_property("https://sub.example.com/a",
                                     [DOMAIN, prefix]) == prefix
+
+
+def test_bare_host_suffix_matches_a_deeper_subdomain():
+    """Step 4: a URL-prefix property's host can cover a deeper subdomain,
+    the same way an sc-domain: property does at step 3. No sc-domain
+    property is present, so this can only resolve at step 4."""
+    prefix = "https://example.com/"
+    assert routing.resolve_property("https://blog.example.com/a", [prefix]) == prefix
+
+
+def test_most_specific_bare_host_suffix_wins_regardless_of_order():
+    """Step 4's tie-break: when two URL-prefix properties both cover the
+    host as a suffix, the longer (more specific) one wins, independent of
+    the order the properties arrive in."""
+    broad, narrow = "https://example.com/", "https://shop.example.com/"
+    url = "https://cart.shop.example.com/x"
+    assert routing.resolve_property(url, [broad, narrow]) == narrow
+    assert routing.resolve_property(url, [narrow, broad]) == narrow
 
 
 def test_route_all_preserves_input_order_and_flags_misses():

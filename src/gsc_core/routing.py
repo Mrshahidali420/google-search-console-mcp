@@ -53,7 +53,11 @@ def resolve_property(url: str, properties: list[str]) -> str | None:
 
     prefix_hosts = {prop: host_of(prop) for prop in properties
                     if not prop.startswith("sc-domain:")}
-    domain_props = [prop for prop in properties if prop.startswith("sc-domain:")]
+    # The domain half of an sc-domain: property is API-supplied and its case
+    # is not guaranteed — lower() it here, once, so every comparison below
+    # is case-insensitive without each call site having to remember to do it.
+    domain_hosts = {prop: prop.removeprefix("sc-domain:").lower()
+                    for prop in properties if prop.startswith("sc-domain:")}
 
     # Step 1: exact host match.
     for prop, prop_host in prefix_hosts.items():
@@ -66,10 +70,10 @@ def resolve_property(url: str, properties: list[str]) -> str | None:
             return prop
 
     # Step 3: sc-domain: property covering the host or any subdomain of it.
-    domain_matches = [prop for prop in domain_props
-                       if _is_covered(host, prop.removeprefix("sc-domain:"))]
+    domain_matches = [prop for prop, domain in domain_hosts.items()
+                       if _is_covered(host, domain)]
     if domain_matches:
-        return max(domain_matches, key=lambda prop: len(prop.removeprefix("sc-domain:")))
+        return max(domain_matches, key=lambda prop: len(domain_hosts[prop]))
 
     # Step 4: bare host suffix — the loosest match, so it runs last.
     suffix_matches = [prop for prop, prop_host in prefix_hosts.items()
