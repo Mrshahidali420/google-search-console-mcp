@@ -198,7 +198,8 @@ def _decode_token_response(response) -> dict:
     if error in _REAUTH_ERRORS:
         raise AuthRequired(
             f"Google rejected the stored credentials ({error}). "
-            "Run gsc_setup() to authorise again."
+            "Authorise again: run gsc_doctor for what is missing, then "
+            "re-run the consent flow."
         )
     detail = body.get("error_description", "")
     raise RuntimeError(
@@ -234,6 +235,26 @@ class TokenProvider:
 
     API modules take one of these rather than a raw string so that a 401
     partway through a long run refreshes once instead of ending the run.
+
+    Refresh is SINGLE-FLIGHT. api.check_status() calls access_token() from
+    every worker thread at once, so without this several workers hitting 401
+    together would each invalidate and each refresh. Google rotates the
+    refresh token on use: concurrent refreshes race to write the token file
+    and the losers persist a refresh token Google has already retired,
+    leaving the stored credential dead and the user re-authorising. The lock
+    turns that into one refresh that the rest wait on and reuse.
+
+    Because the lock is PER-INSTANCE, the guarantee only holds while one
+    instance covers everything that might refresh concurrently. That is
+    what deps.provider() is for: it hands every tool call the same
+    provider rather than a fresh one, since concurrent tool calls are
+    exactly where the rotated-token race lives.
+
+    The lock is per-instance and per-process — it does not coordinate with a
+    second gsc-mcp process sharing the token file. That is a narrower race
+    (save_token() is already atomic via os.replace) and closing it needs a
+    file lock, which is a different change from the one concurrency inside
+    this process requires.
     """
 
     def __init__(self, client_id: str, client_secret: str, *,
@@ -242,15 +263,34 @@ class TokenProvider:
         self._client_secret = client_secret
         self._path = token_path or paths.token_path()
         self._session = session
+        self._refresh_lock = threading.Lock()
 
-    def access_token(self) -> str:
+    def _load(self) -> dict:
         stored = load_token(self._path)
         if not stored or "refresh_token" not in stored:
-            raise AuthRequired("no stored credentials; run gsc_setup()")
+            raise AuthRequired(
+                "No stored credentials. Run gsc_doctor to see what the setup "
+                "is missing, then complete the consent flow to sign in.")
+        return stored
 
+    def access_token(self) -> str:
+        stored = self._load()
         if self._is_fresh(stored):
             return stored["access_token"]
 
+        with self._refresh_lock:
+            # Re-read and re-check UNDER the lock. Whoever held it before us
+            # has already written a fresh token, and refreshing again would
+            # spend a refresh token Google rotated out from under us. This
+            # second check is what makes the flight single rather than merely
+            # serialised.
+            stored = self._load()
+            if self._is_fresh(stored):
+                return stored["access_token"]
+            return self._refresh(stored)
+
+    def _refresh(self, stored: dict) -> str:
+        """Exchange the refresh token. Callers hold _refresh_lock."""
         refreshed = _with_expiry(_post_token(self._session, {
             "client_id": self._client_id,
             "client_secret": self._client_secret,
@@ -264,13 +304,19 @@ class TokenProvider:
 
     def invalidate(self) -> None:
         """Back-date expires_at after a 401, forcing the next call to
-        refresh. It does not drop the token; the refresh token is kept."""
-        stored = load_token(self._path)
-        if not stored:
-            return
-        cleared = {k: v for k, v in stored.items() if k != "expires_at"}
-        cleared["expires_at"] = datetime.now(UTC).isoformat()
-        save_token(cleared, self._path)
+        refresh. It does not drop the token; the refresh token is kept.
+
+        Takes the same lock as access_token(): this is a read-modify-write of
+        the token file, and running it against a refresh in flight would
+        write back a stale body over the new credential.
+        """
+        with self._refresh_lock:
+            stored = load_token(self._path)
+            if not stored:
+                return
+            cleared = {k: v for k, v in stored.items() if k != "expires_at"}
+            cleared["expires_at"] = datetime.now(UTC).isoformat()
+            save_token(cleared, self._path)
 
     @staticmethod
     def _is_fresh(stored: dict) -> bool:

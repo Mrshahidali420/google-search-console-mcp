@@ -8,10 +8,18 @@ from gsc_core import quota, store
 PROP_A = "sc-domain:example.com"
 PROP_B = "sc-domain:other.example"
 ACCOUNT = "user@example.com"
+NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=UTC)
 
 
 def _conn(tmp_path):
     return store.connect(tmp_path / "state.db")
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    connection = store.connect(tmp_path / "state.db")
+    yield connection
+    connection.close()
 
 
 def _spend(conn, property, when, account=ACCOUNT):
@@ -171,3 +179,33 @@ def test_quota_verdict_is_frozen():
                                  account_free=None, next_free_at=None)
     with pytest.raises(dataclasses.FrozenInstanceError):
         verdict.allowed = False
+
+
+def test_daily_reserve_lowers_the_effective_ceiling(conn):
+    for _ in range(9):
+        _spend(conn, PROP_A, NOW - timedelta(minutes=5))
+    assert quota.check(conn, ACCOUNT, PROP_A, property_slots=11,
+                       daily_reserve=0, now=NOW).allowed
+    assert not quota.check(conn, ACCOUNT, PROP_A, property_slots=11,
+                           daily_reserve=2, now=NOW).allowed
+
+
+def test_daily_reserve_of_zero_changes_nothing(conn):
+    """An explicit daily_reserve=0 must be indistinguishable from omitting
+    the argument entirely -- not merely "still allowed at full capacity",
+    which a fresh, unspent property reports regardless of whether the
+    reserve is honoured, ignored, or even computed at all. Spending first
+    forces the comparison through the real free() subtraction, and
+    checking both calls against each other (rather than against a
+    hardcoded 11) also catches a wrong default for the daily_reserve
+    parameter itself, which neither call's own number alone would reveal.
+    """
+    for _ in range(4):
+        _spend(conn, PROP_A, NOW - timedelta(minutes=5))
+
+    with_explicit_zero = quota.check(conn, ACCOUNT, PROP_A, property_slots=11,
+                                     daily_reserve=0, now=NOW)
+    with_default = quota.check(conn, ACCOUNT, PROP_A, property_slots=11, now=NOW)
+
+    assert with_explicit_zero.property_free == with_default.property_free == 7
+    assert with_explicit_zero.next_free_at == with_default.next_free_at

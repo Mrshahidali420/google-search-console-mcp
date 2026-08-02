@@ -19,7 +19,7 @@ from . import paths, runlog
 
 log = runlog.get(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS quota_slots (
 );
 CREATE INDEX IF NOT EXISTS idx_slots_property ON quota_slots (property, used_at);
 CREATE INDEX IF NOT EXISTS idx_slots_account  ON quota_slots (account, used_at);
+
+CREATE TABLE IF NOT EXISTS inspection_calls (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    property  TEXT NOT NULL,
+    called_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inspection_property ON inspection_calls (property, called_at);
 """
 
 
@@ -98,9 +105,26 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
 
-    # Stamp the version only when the file is new. Overwriting on every open
-    # would let a v1 database silently claim to be v2, so no future migration
-    # could ever detect what it is actually looking at.
+    # Advance the stamp only when it is behind SCHEMA_VERSION; never touch it
+    # otherwise. _SCHEMA above is all CREATE ... IF NOT EXISTS, so applying it
+    # is what actually gives an old database the new tables -- that already
+    # happened via executescript() before we get here, with no bespoke
+    # migration required. This block only updates the version label that
+    # describes what just happened:
+    #   - no stamp yet -> this is a brand-new database, stamp SCHEMA_VERSION.
+    #   - stamp is not a parseable integer -> leave it alone. Refusing to
+    #     open the database over a corrupt meta row would be a worse outcome
+    #     than an inaccurate label; this matches the original behaviour,
+    #     which never parsed the value at all.
+    #   - stamp < SCHEMA_VERSION -> an older gsc-mcp wrote this database, and
+    #     the additive schema now brings it up to date, so the stamp follows.
+    #   - stamp >= SCHEMA_VERSION -> leave it alone. Unconditionally
+    #     overwriting on every open would let a v1 database silently claim to
+    #     be v2 with no migration having run (the defect Plan 1 fixed).
+    #     Pulling a stamp DOWN would be the same mistake in the other
+    #     direction: a database written by a newer gsc-mcp must stay
+    #     detectable as newer, so a later health check can refuse to operate
+    #     on it instead of being told it is safely current.
     existing = conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()
@@ -109,6 +133,16 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+    else:
+        try:
+            stamped = int(existing["value"])
+        except ValueError:
+            stamped = None
+        if stamped is not None and stamped < SCHEMA_VERSION:
+            conn.execute(
+                "UPDATE meta SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
     return conn
 
 
