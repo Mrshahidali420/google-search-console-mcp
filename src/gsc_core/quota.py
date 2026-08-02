@@ -110,7 +110,18 @@ def next_free(conn: sqlite3.Connection, property: str, *,
 
 @dataclass(frozen=True)
 class QuotaVerdict:
-    """Whether a submission may proceed, and which limit is holding it back."""
+    """Whether a submission may proceed, and which limit is holding it back.
+
+    property_free and next_free_at are computed against check()'s
+    RESERVE-ADJUSTED ceiling (property_slots - daily_reserve) whenever the
+    caller passed a nonzero daily_reserve — they are NOT the same quantity
+    quota.free() / quota.next_free() report, which stay pinned to the raw
+    property_slots ceiling on purpose (see check()'s docstring). A caller
+    holding a QuotaVerdict is holding "free/next-free to actually SPEND",
+    already reserve-adjusted; it does not agree with a bare free()/
+    next_free() call on the same property once daily_reserve is nonzero,
+    and that is by design, not a bug to reconcile.
+    """
     allowed: bool
     binding: str | None
     property_free: int

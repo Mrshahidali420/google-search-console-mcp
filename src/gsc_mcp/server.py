@@ -300,6 +300,37 @@ def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
     """
     try:
         active_provider = deps.provider()
+        # deps.provider() only CONSTRUCTS a TokenProvider — it never raises
+        # AuthRequired itself; that only happens lazily, inside whichever
+        # API call first needs a real access token (gauth.py's
+        # TokenProvider._load()). Probing it here, before doing anything
+        # else, is deliberate and load-bearing for two reasons:
+        #
+        # 1. The empty-store sync below calls api.list_properties(), which
+        #    WOULD raise AuthRequired naturally from inside this try — but
+        #    only on that one path. A populated store skips the sync
+        #    entirely, so relying on that call alone leaves a signed-out
+        #    user with a synced store no chance to hit this except clause.
+        # 2. api.check_status() never raises AuthRequired at all: a 401 on
+        #    any one URL is caught inside _safe_inspect() and turned into a
+        #    plain "error" status row, by design (one bad row must not abort
+        #    the batch — see api.py's module docstring). A fully signed-out
+        #    caller would therefore get back a normal-shaped result full of
+        #    fabricated per-URL "error" rows instead of the structured
+        #    auth_required answer this tool promises above.
+        #
+        # One explicit probe up front answers both cases the same way,
+        # before either the sync or the batch spends anything.
+        active_provider.access_token()
+
+        effective_concurrency = concurrency
+        if effective_concurrency is None:
+            effective_concurrency = config.load()["inspect_concurrency"]
+
+        with deps.connection() as conn:
+            properties = _synced_property_urls(conn, active_provider)
+            return api.check_status(conn, urls, active_provider, properties,
+                                    concurrency=effective_concurrency)
     except deps.NotConfigured:
         log.info("gsc_check_status: no OAuth client configured; "
                  "reporting not_configured")
@@ -307,15 +338,6 @@ def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
     except gauth.AuthRequired:
         log.info("gsc_check_status: no usable token; reporting auth_required")
         return _auth_required()
-
-    effective_concurrency = concurrency
-    if effective_concurrency is None:
-        effective_concurrency = config.load()["inspect_concurrency"]
-
-    with deps.connection() as conn:
-        properties = _synced_property_urls(conn, active_provider)
-        return api.check_status(conn, urls, active_provider, properties,
-                                concurrency=effective_concurrency)
 
 
 def _submission_report(
@@ -372,13 +394,17 @@ def gsc_quota() -> list[dict]:
 
     "submission" is the Request-Indexing slot budget: `{"free",
     "spendable_free", "used", "slots", "daily_reserve", "next_free_at"}`.
-    `free` is the RAW free-slot count and ignores daily_reserve;
-    `spendable_free` is `free` minus `daily_reserve` — the count actually
-    safe to submit against right now. ACT ON spendable_free, NOT free:
-    daily_reserve exists to hold slots back from every tool, and a caller
-    that submits up to `free` instead will be refused once spendable_free
-    runs out. `next_free_at` is an ISO-8601 string, or None when a slot is
-    free right now.
+    `free` is the RAW free-slot count and ignores daily_reserve.
+    `spendable_free` is computed against the RESERVE-ADJUSTED ceiling —
+    max(0, (slots - daily_reserve) - used) — NOT simply `free` minus
+    `daily_reserve`: that arithmetic breaks at the clamp (slots=11,
+    daily_reserve=2, used=10 gives free=1, but spendable_free is 0, not
+    -1). ACT ON spendable_free, NOT free: daily_reserve exists to hold
+    slots back from every tool, and a caller that submits up to `free`
+    instead will be refused once spendable_free runs out. `next_free_at`
+    is an ISO-8601 string, or None when a slot is free right now — it is
+    already computed against the reserve-adjusted ceiling too, so it can
+    report a wait even while `free` (the raw count) is nonzero.
 
     "inspection" is the URL Inspection API budget: `{"daily_free",
     "minute_free", "daily_limit", "minute_limit"}` (2000/day, 600/minute,
