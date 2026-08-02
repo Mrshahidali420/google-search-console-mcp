@@ -1,3 +1,4 @@
+import dataclasses
 from datetime import datetime, timedelta, UTC
 
 import pytest
@@ -130,18 +131,43 @@ def test_account_bound_verdict_carries_a_real_wait_time(tmp_path):
     ) + timedelta(minutes=quota.SLOT_WINDOW_MINUTES)
 
 
-def test_a_blocked_verdict_always_has_a_wait_time(tmp_path):
+def test_account_wait_time_counts_open_submissions(tmp_path):
+    """An account filled entirely by in-flight submissions must still report
+    when its next slot frees — the account mirror of the property-side case.
+    """
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    oldest = now - timedelta(minutes=100)
+    _open_submission(conn, PROP_A, oldest)
+    _open_submission(conn, PROP_B, now - timedelta(minutes=99))
+
+    verdict = quota.check(conn, ACCOUNT, PROP_A, property_slots=100,
+                          account_slots=2, now=now)
+    assert verdict.binding == "account"
+    assert verdict.next_free_at == datetime.fromisoformat(
+        store.utc_iso(oldest)
+    ) + timedelta(minutes=quota.SLOT_WINDOW_MINUTES)
+
+
+def test_a_blocked_verdict_never_reports_no_wait_time(monkeypatch, tmp_path):
+    """A slot can free between check()'s two reads, leaving the wait-time
+    query with nothing to return. The verdict must still carry a time —
+    'blocked' plus next_free_at=None reads as 'go ahead' to a caller.
+    """
     conn = _conn(tmp_path)
     now = datetime.now(UTC)
     for _ in range(quota.DEFAULT_PROPERTY_SLOTS):
         _spend(conn, PROP_A, now - timedelta(minutes=5))
+
+    monkeypatch.setattr(quota, "next_free", lambda *a, **k: None)
     verdict = quota.check(conn, ACCOUNT, PROP_A, now=now)
+
     assert verdict.allowed is False
-    assert verdict.next_free_at is not None
+    assert verdict.next_free_at == now
 
 
-def test_quota_verdict_is_frozen(tmp_path):
-    conn = _conn(tmp_path)
-    verdict = quota.check(conn, ACCOUNT, PROP_A)
-    with pytest.raises(Exception):
-        verdict.allowed = True
+def test_quota_verdict_is_frozen():
+    verdict = quota.QuotaVerdict(allowed=True, binding=None, property_free=11,
+                                 account_free=None, next_free_at=None)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        verdict.allowed = False
