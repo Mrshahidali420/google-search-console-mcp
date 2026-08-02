@@ -73,25 +73,43 @@ def gsc_list_sites() -> list[dict] | dict:
     Returns `[{"property", "host", "permission"}, ...]` sorted by
     property. On a missing, expired, or rejected token, returns
     `{"ok": False, "error": "auth_required", "fix": ...}` instead of
-    raising — the caller can surface `fix` directly rather than parsing an
-    exception.
+    raising; if no OAuth client is configured at all, returns
+    `{"ok": False, "error": "not_configured", "fix": ...}` instead — in
+    either case the caller can surface `fix` directly rather than parsing
+    an exception.
 
     Does not fetch sitemaps, index status, or search analytics; see
-    gsc_doctor, gsc_check_status, and gsc_performance for those.
+    gsc_doctor, gsc_check_status, and gsc_performance for those. A
+    property already known to the store keeps whatever sitemaps a prior
+    gsc_submit_sitemaps() call recorded against it — this call never
+    fetches or clears that list, so a routine refresh cannot erase it.
     """
     try:
         properties = api.list_properties(deps.provider())
+    except deps.NotConfigured:
+        log.info("gsc_list_sites: no OAuth client configured; "
+                 "reporting not_configured")
+        return {"ok": False, "error": "not_configured", "fix": _FIX_OAUTH_CLIENT}
     except gauth.AuthRequired:
         log.info("gsc_list_sites: no usable token; reporting auth_required")
         return _auth_required()
 
     sites: list[dict] = []
     with deps.connection() as conn:
+        # Read what each property already has BEFORE upserting: the
+        # upsert below always writes what we pass as sitemaps, so a prior
+        # gsc_submit_sitemaps() result has to be looked up and carried
+        # forward explicitly here or it is overwritten with [] on every
+        # refresh — see the docstring above and gsc_submit_sitemaps (Task 9),
+        # which relies on this list surviving a routine gsc_list_sites call.
+        known_sitemaps = {site["property"]: site["sitemaps"]
+                          for site in store.get_sites(conn)}
         for entry in properties:
             site_url = entry.get("siteUrl", "")
             permission = entry.get("permissionLevel")
             host = _host_of_property(site_url)
-            store.upsert_site(conn, site_url, host, permission, [])
+            sitemaps = known_sitemaps.get(site_url, [])
+            store.upsert_site(conn, site_url, host, permission, sitemaps)
             sites.append({"property": site_url, "host": host,
                           "permission": permission})
 
@@ -156,9 +174,20 @@ def _check_store() -> dict:
 
 
 def _check_properties() -> dict:
+    """The `properties` check's own network call also fails whenever the
+    `oauth_client` check does — no client means no provider means no call —
+    and that specific cause gets its own branch so the fix pointed at is
+    "configure a client", not the generic "check your properties/scope"
+    text, which would send a user with no client at all down the wrong
+    path entirely.
+    """
     name = "properties"
     try:
         properties = api.list_properties(deps.provider())
+    except deps.NotConfigured as exc:
+        log.warning("doctor: %s check raised %s", name, type(exc).__name__)
+        return {"name": name, "ok": False, "detail": type(exc).__name__,
+                "fix": _FIX_OAUTH_CLIENT}
     except Exception as exc:  # noqa: BLE001 — see gsc_doctor docstring
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,

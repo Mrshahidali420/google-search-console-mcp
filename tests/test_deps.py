@@ -4,8 +4,15 @@ from gsc_mcp import deps
 
 
 def test_oauth_client_prefers_environment_variables(monkeypatch):
+    # Both env and embedded are set to DIFFERENT non-empty values, so the
+    # assertion below can only pass if the environment actually wins the
+    # precedence, not merely because the embedded side happens to be
+    # empty (which it is everywhere before D1 populates it — the gap this
+    # test exists to pin starts to matter exactly when that changes).
     monkeypatch.setenv(deps.CLIENT_ID_ENV, "env-id")
     monkeypatch.setenv(deps.CLIENT_SECRET_ENV, "env-secret")
+    monkeypatch.setattr(deps, "EMBEDDED_CLIENT_ID", "embedded-id")
+    monkeypatch.setattr(deps, "EMBEDDED_CLIENT_SECRET", "embedded-secret")
     assert deps.oauth_client() == ("env-id", "env-secret")
 
 
