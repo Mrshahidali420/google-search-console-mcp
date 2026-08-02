@@ -39,7 +39,14 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.31",
+    # <2.0: mcp 2.0.0 removed FastMCP outright, renaming it to MCPServer
+    # under mcp.server.mcpserver with a different construction API. Pinned
+    # below that break until this server is ported to the new shape.
+    "mcp>=1.2,<2.0",
 ]
+
+[project.scripts]
+gsc-mcp = "gsc_mcp.server:main"
 
 [project.urls]
 Homepage = "https://github.com/Mrshahidali420/google-search-console-mcp"
@@ -52,7 +59,7 @@ Issues = "https://github.com/Mrshahidali420/google-search-console-mcp/issues"
 dev = ["pytest>=9.1", "pytest-cov>=5.0"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/gsc_core"]
+packages = ["src/gsc_core", "src/gsc_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
