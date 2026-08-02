@@ -51,20 +51,19 @@ def test_validate_accepts_defaults():
 
 def test_validate_rejects_negative_slots():
     broken = {**config.DEFAULTS, "property_slots": -1}
-    problems = config.validate(broken)
-    assert any("property_slots" in problem for problem in problems)
+    assert "property_slots must be a positive integer" in config.validate(broken)
 
 
 def test_validate_rejects_reserve_above_slots():
     broken = {**config.DEFAULTS, "daily_reserve": 99}
-    problems = config.validate(broken)
-    assert any("daily_reserve" in problem for problem in problems)
+    assert ("daily_reserve (99) must be below property_slots (11)"
+            in config.validate(broken))
 
 
 def test_validate_rejects_malformed_delay_range():
     broken = {**config.DEFAULTS, "submit_delay_range": [180, 130]}
-    problems = config.validate(broken)
-    assert any("submit_delay_range" in problem for problem in problems)
+    assert ("submit_delay_range must be [low, high] seconds with low <= high"
+            in config.validate(broken))
 
 
 def test_save_then_load_round_trip(tmp_path):
