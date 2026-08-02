@@ -158,6 +158,20 @@ a real Google account; see Known gaps.
 | `gsc_core/quota.py` | Per-property rolling slot accounting |
 | `gsc_core/gauth.py` | OAuth 2.0 with PKCE S256, hardened token storage, refresh |
 | `gsc_core/config.py` | User-tunable settings with validation |
+| `gsc_core/browsers.py` | Which Chromium browsers are installed, and where they keep their state |
+| `gsc_core/profiles.py` | Which profiles each browser has, and which Google account is signed into each |
+
+## Privacy
+
+To tell you which browser profile to use, this tool reads the profile list and the signed-in account address out of the browser's own files on your machine — `Local State` and each profile's `Preferences` / `Secure Preferences`.
+
+That read is entirely local. The address is used in memory to show you which profile is signed into which account, and:
+
+- it is never transmitted anywhere,
+- it is never written to disk by this tool,
+- it is never written to the log, at any level — failures reading these files are logged by exception type name only, precisely so that neither an address nor a path containing your Windows username can end up in a log file you might attach to a bug report.
+
+Nothing in the tool opens these files for writing.
 
 ## Known gaps
 
