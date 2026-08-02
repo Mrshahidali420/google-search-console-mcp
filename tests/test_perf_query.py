@@ -315,3 +315,71 @@ def test_hourly_24_hour_window_spans_two_calendar_dates():
     dates_seen = {r["hour"][:10] for r in out}
     assert len(out) == 24
     assert dates_seen == {"2026-01-01", "2026-01-02"}
+
+
+def test_the_default_retry_budget_is_four_attempts():
+    """Same gap as api.inspect_url's default: every existing exhaustion test
+    either passes max_retries or queues exactly four responses, so the
+    signature default itself was unguarded. post_query's policy is documented
+    as mirroring inspect_url's exactly, and the attempt count is part of that
+    policy -- so it is pinned here with the argument omitted, the way perf's
+    own callers call it."""
+    session = FakeSession(*[FakeResponse(503) for _ in range(10)])
+    with pytest.raises(perf.PerfError, match="retries exhausted"):
+        perf.post_query("sc-domain:example.com", {}, FakeProvider(),
+                        session=session, sleep=lambda _: None)
+    assert len(session.calls) == 4
+
+
+# ----------------------------------------- validation before any network call
+#
+# validate_query ran in query() only. totals() and portfolio() took the same
+# data_state and search_type arguments and sent them straight to Google, which
+# answers HTTP 400 -- a spent call, and for portfolio one per property.
+
+def test_totals_rejects_a_bad_data_state_without_calling_google():
+    session = FakeSession()
+    with pytest.raises(ValueError, match="data_state"):
+        perf.totals("example.com", PROPS, FakeProvider(), session=session,
+                    data_state="hourly_all", **WINDOW)
+    assert session.calls == []
+
+
+def test_totals_rejects_a_bad_search_type_without_calling_google():
+    session = FakeSession()
+    with pytest.raises(ValueError, match="type"):
+        perf.totals("example.com", PROPS, FakeProvider(), session=session,
+                    search_type="carousel", **WINDOW)
+    assert session.calls == []
+
+
+def test_totals_validates_before_routing():
+    """An unroutable site AND a bad data_state: the ValueError must win.
+    Ordering matters -- routing raises PerfError, so a validate-after-route
+    version reports 'no property' for a request that is also malformed, and
+    the caller fixes the wrong thing."""
+    with pytest.raises(ValueError):
+        perf.totals("elsewhere.test", PROPS, FakeProvider(),
+                    session=FakeSession(), data_state="nonsense", **WINDOW)
+
+
+def test_portfolio_rejects_a_bad_data_state_without_calling_google():
+    session = FakeSession()
+    with pytest.raises(ValueError, match="data_state"):
+        perf.portfolio(PROPS, FakeProvider(), session=session, concurrency=1,
+                       data_state="hourly_all", **WINDOW)
+    assert session.calls == []
+
+
+def test_portfolio_raises_rather_than_zeroing_every_row():
+    """one() catches ValueError so one bad property cannot sink the run --
+    which is exactly why validation must happen OUTSIDE it. Inside, a
+    caller's typo comes back as N zeroed rows that all say the same thing,
+    and the caller sees 'these properties have no traffic' instead of 'you
+    passed a bad argument'."""
+    session = FakeSession(*[FakeResponse(200, rows_payload(row()))
+                            for _ in range(len(PROPS))])
+    with pytest.raises(ValueError):
+        perf.portfolio(PROPS, FakeProvider(), session=session, concurrency=1,
+                       search_type="carousel", **WINDOW)
+    assert session.calls == []

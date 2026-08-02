@@ -233,3 +233,18 @@ def test_list_sitemaps_returns_the_sitemap_array():
     session = FakeSession(FakeResponse(200, {"sitemap": [{"path": "https://example.com/s.xml"}]}))
     assert api.list_sitemaps("sc-domain:example.com", FakeProvider(),
                              session=session) == [{"path": "https://example.com/s.xml"}]
+
+
+def test_the_default_retry_budget_is_four_attempts():
+    """The existing exhaustion tests pass max_retries=4 explicitly, so the
+    DEFAULT was pinned by nothing: changing the signature to 1 or to 40 left
+    them green. Real callers -- check_status among them -- never pass it, so
+    the default is the number that actually ships. Omitting it here is the
+    point of the test."""
+    session = FakeSession(*[FakeResponse(503) for _ in range(10)])
+    status, detail = api.inspect_url("https://example.com/a",
+                                     "sc-domain:example.com", FakeProvider(),
+                                     session=session, sleep=lambda _: None)
+    assert status == "error"
+    assert "retries exhausted" in detail
+    assert len(session.calls) == 4

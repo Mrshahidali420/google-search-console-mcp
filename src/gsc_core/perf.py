@@ -425,7 +425,14 @@ def totals(site: str, properties: list[str], provider: TokenProvider,
 
     Queried with no dimensions, so Google returns at most one row; `limit=1`
     keeps that explicit rather than relying on the API to only ever send one.
+
+    Validated up front for the same reason query() is: a bad data_state or
+    search_type should cost a ValueError, not a network call that comes back
+    HTTP 400. `dimensions=None` is passed to the validator rather than
+    skipping it — this call genuinely sends no dimensions, and None is the
+    case the validator is written to accept.
     """
+    validate_query(None, data_state, search_type)
     property = routing.resolve_property(site, properties)
     if property is None:
         raise PerfError(f"{site!r} matches no Search Console property")
@@ -509,7 +516,15 @@ def portfolio(properties: list[str], provider: TokenProvider,
     A property the token cannot read, or one that has since been deleted,
     must never sink the run: PerfError and ValueError are caught per
     property and turned into a zeroed row instead of propagating.
+
+    Validation happens HERE, not inside one(): one() catches ValueError to
+    stop a single bad property sinking the run, so validating in there would
+    turn a caller's typo into N zeroed rows each carrying the same message —
+    after N network calls had already been spent discovering it. Validating
+    once, outside the closure, lets the ValueError propagate to the caller
+    who made the mistake, before any request goes out.
     """
+    validate_query(None, data_state, search_type)
     window_start, window_end = _resolve_window(days, start_date, end_date)
 
     def one(property: str) -> dict:
