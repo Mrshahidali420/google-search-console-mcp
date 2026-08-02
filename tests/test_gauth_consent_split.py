@@ -178,6 +178,11 @@ def test_finish_consent_saves_the_token_and_closes_the_receiver_on_success(
     saved = {}
     monkeypatch.setattr(gauth, "save_token",
                         lambda token, path=None: saved.update(token))
+    # This test's own FakeSession only fakes .post (the token exchange);
+    # verify_token's own behaviour is covered separately in
+    # tests/test_gauth_validation.py, so bypass it here rather than teach
+    # this session to also fake .get.
+    monkeypatch.setattr(gauth, "verify_token", lambda token, session=None: 1)
 
     pending = gauth.start_consent("client-id-123")
     _redirect(pending.receiver, state=pending.state, code="auth-code-xyz")

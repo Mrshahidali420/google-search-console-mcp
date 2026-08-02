@@ -99,6 +99,11 @@ def test_consent_flow_sends_one_redirect_uri_to_both_calls(monkeypatch):
     monkeypatch.setattr(gauth.webbrowser, "open", fake_open)
     monkeypatch.setattr(gauth, "exchange_code", fake_exchange)
     monkeypatch.setattr(gauth, "save_token", lambda data, path=None: None)
+    # This test is about redirect_uri consistency, not verification — no
+    # session is passed here, so a real verify_token call would hit the
+    # network. verify_token's own behaviour is covered separately in
+    # tests/test_gauth_validation.py.
+    monkeypatch.setattr(gauth, "verify_token", lambda token, session=None: 1)
 
     token = gauth.run_consent_flow("cid", "secret")
 

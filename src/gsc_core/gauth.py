@@ -35,6 +35,13 @@ SCOPE = "https://www.googleapis.com/auth/webmasters"
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
+# Deliberately restated rather than imported from api.py: api.py already
+# imports from this module (it takes a TokenProvider), so importing api here
+# would be a circular import. This one string is cheaper to keep in sync by
+# hand than to justify a new shared module built to hold a single constant.
+# If a third module ever needs it too, that is the trigger to promote it.
+SITES_ENDPOINT = "https://www.googleapis.com/webmasters/v3/sites"
+
 _VERIFIER_BYTES = 64
 
 
@@ -344,6 +351,41 @@ class ConsentFailed(RuntimeError):
     """The consent round trip did not produce a usable authorization code."""
 
 
+def verify_token(token: dict, *, session=None) -> int:
+    """Prove a fresh token actually reaches Search Console. Returns the
+    number of properties it can see.
+
+    Three distinct failures, three distinct messages, because the fixes
+    differ: no refresh token means re-consent and approve fully; a non-200
+    means the grant or the API is wrong; zero properties almost always
+    means the user signed in with the wrong Google account, which is
+    otherwise indistinguishable from success.
+
+    Never includes the access token in any message it raises — this
+    exception text reaches an MCP client.
+    """
+    if not token.get("refresh_token"):
+        raise ConsentFailed(
+            "Google returned no refresh token; approve every requested "
+            "permission on the consent screen and try again")
+    http = session or requests
+    response = http.get(
+        SITES_ENDPOINT,
+        headers={"Authorization": f"Bearer {token['access_token']}"},
+        timeout=30)
+    if response.status_code != 200:
+        raise ConsentFailed(
+            f"Search Console rejected the new token (HTTP "
+            f"{response.status_code})")
+    count = len(response.json().get("siteEntry") or [])
+    if count == 0:
+        raise ConsentFailed(
+            "the token works but sees no Search Console properties — you "
+            "probably signed in with a different Google account than the "
+            "one that owns your sites")
+    return count
+
+
 class _LoopbackServer(HTTPServer):
     """An ephemeral port never needs SO_REUSEADDR, and allowing it would let
     another local process race to bind the same 127.0.0.1:port for the
@@ -531,7 +573,8 @@ def start_consent(client_id: str) -> PendingConsent:
 
 
 def finish_consent(pending: PendingConsent, client_secret: str, *,
-                   client_id: str, session=None) -> dict | None:
+                   client_id: str, session=None,
+                   verify: bool = True) -> dict | None:
     """Complete the round trip if the redirect has landed, else None.
 
     Does NOT close the receiver on the None path — the caller polls again.
@@ -552,6 +595,10 @@ def finish_consent(pending: PendingConsent, client_secret: str, *,
         token = exchange_code(client_id, client_secret, code,
                               pending.verifier, pending.redirect_uri,
                               session=session)
+        if verify:
+            # Before save_token, deliberately: a grant that cannot reach
+            # the API must not replace one that can.
+            verify_token(token, session=session)
         save_token(token)
         return token
     finally:
