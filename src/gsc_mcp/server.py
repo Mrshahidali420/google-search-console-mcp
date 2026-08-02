@@ -32,7 +32,7 @@ runlog.init()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliberate
 
-from . import deps  # noqa: E402 — import order is deliberate
+from . import deps, tools_browsers  # noqa: E402 — import order is deliberate
 
 log = runlog.get(__name__)
 
@@ -845,6 +845,45 @@ def _submit_sitemaps(sitemaps: list[str] | None) -> dict | list[dict]:
             return _auth_required()
 
         return results
+
+
+@mcp.tool()
+def gsc_detect_browsers() -> dict:
+    """List the Chromium browser profiles on this machine and recommend one.
+
+    Local-only: reads the browsers' own state files, makes no network call,
+    spends no quota, and needs no token — safe to call before signing in.
+    Answers "which browser profile should I drive?", nothing else; it opens
+    no browser and changes no setting.
+
+    PRIVACY: no email address is returned, in either direction. Not the
+    account signed in to a profile, not the account that authorised this
+    server, and not a profile display name that is itself an address. No
+    filesystem path is returned either — a profile path carries the
+    operator's account name. What identifies a profile here is its browser
+    and its profile directory.
+
+    Returns `{"ok": True, "profiles": [...], "recommended": <one of them or
+    None>, "reasons": [...]}`. Each profile is `{"browser", "browser_key",
+    "profile", "display_name", "signed_in", "account_discoverable",
+    "matches_authorised_account", "recommended"}`.
+
+    `signed_in` says a Google account was found in that profile's files.
+    `account_discoverable` is a fact about the BRAND: Brave, Vivaldi, Opera
+    and plain Chromium record no Google account at all, so `signed_in:
+    false` there means "not discoverable", NOT "nobody is signed in".
+    `matches_authorised_account` is true, false, or NULL — null means the
+    question could not be asked (nothing has authorised yet, or the brand
+    records nothing), and must not be read as "no". `reasons` explains the
+    recommendation in plain sentences.
+
+    A machine with no Chromium browser installed returns `ok: true` with an
+    empty `profiles` list, `recommended: null`, and a `note` saying what to
+    install; that is an ordinary state, not a failure. Only an unexpected
+    fault returns `{"ok": False, "error": "unexpected", "detail":
+    <exception type>, "fix": ...}`.
+    """
+    return tools_browsers.detect_browsers()
 
 
 def main() -> None:
