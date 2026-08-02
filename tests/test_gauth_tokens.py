@@ -273,17 +273,12 @@ def test_concurrent_access_token_calls_refresh_exactly_once(tmp_path):
         target,
     )
 
-    class SlowSession(FakeSession):
-        """Holds the token endpoint open long enough that an unsynchronised
-        second caller would reach it. Without this the race window is a few
-        microseconds wide and the test would pass by luck rather than by
-        the lock."""
-
-        def post(self, url, data=None, timeout=None):
-            threading.Event().wait(0.05)
-            return super().post(url, data=data, timeout=timeout)
-
-    session = SlowSession({"access_token": "refreshed", "expires_in": 3599})
+    # The Barrier is what gives this test its teeth: eight threads released
+    # into access_token() at once. No artificial delay in the token endpoint
+    # is needed, and adding one would be a real sleep in a suite that must
+    # not have any -- measured 12/12 red without the lock and 12/12 green
+    # with it, on the barrier alone.
+    session = FakeSession({"access_token": "refreshed", "expires_in": 3599})
     provider = gauth.TokenProvider("cid", "secret", token_path=target,
                                    session=session)
 

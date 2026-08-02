@@ -341,6 +341,48 @@ def test_a_suspect_the_recheck_quota_never_reached_is_flagged_unverified(conn):
     assert out["quota"][PROP]["unverified"] == 1
 
 
+def test_an_exhausted_recheck_budget_stops_instead_of_idling(conn):
+    """A round the budget refused outright is not "flipped nothing" -- it is
+    "could not look". Nothing was inspected, so nothing changed, so the next
+    three rounds would cool down and hit the same wall: 20 seconds of real
+    production wall clock spent to learn nothing, instead of 5.
+    """
+    _burn_minute_budget(conn, leaving=2)
+    slept: list[float] = []
+    inspect = ScriptedInspect({
+        "https://example.com/a": [("unknown_to_google", "u")],
+    })
+    run(conn, ["https://example.com/a", "https://example.com/b"], inspect,
+        concurrency=4, sleep=slept.append)
+    assert slept == [api.REVERIFY_COOLDOWN_S]
+
+
+def test_a_suspect_already_rechecked_is_not_re_flagged_by_a_later_round(conn):
+    """Round N confirms it; round N+1 is refused quota. It stays confirmed.
+
+    A later round's refusal cannot un-ask a question an earlier round already
+    answered. Re-flagging it is the mirror image of the bug this whole
+    mechanism exists to prevent -- a false alarm about our own work rather
+    than false confidence, but still an untrue account of what ran.
+    """
+    _burn_minute_budget(conn, leaving=4)   # 2 for the pass, 2 for round 1
+    inspect = ScriptedInspect({
+        "https://example.com/a": [("unknown_to_google", "u")],
+        # b flipping in round 1 is what keeps the loop alive for round 2.
+        "https://example.com/b": [("unknown_to_google", "u"), ("indexed", "i")],
+    })
+    out = run(conn, ["https://example.com/a", "https://example.com/b"], inspect,
+              concurrency=4)
+
+    # a was re-checked once (round 1) and round 2 was refused quota ...
+    assert inspect.calls.count("https://example.com/a") == 2
+    assert out["rows"][0]["status"] == "unknown_to_google"
+    # ... so it is a confirmed unknown, not an unreached one.
+    assert out["rows"][0]["unverified"] is False
+    assert "not re-verified" not in out["rows"][0]["detail"]
+    assert out["quota"][PROP]["unverified"] == 0
+
+
 def test_a_sequentially_confirmed_unknown_is_not_flagged_unverified(conn):
     """The other half of the distinction: this one really was re-checked."""
     inspect = ScriptedInspect({

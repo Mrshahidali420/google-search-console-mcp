@@ -467,14 +467,16 @@ def _reserve_round(conn: sqlite3.Connection, suspects: list[str],
     thread, before the round's first request, same as the batch itself. What
     the budget refuses is marked unreached rather than quietly dropped: a
     suspect nobody re-checked must never come back looking confirmed.
+
+    An empty return stops the loop rather than continuing it. Nothing was
+    looked at, so nothing changed, so the remaining rounds would each cool
+    down and hit the same wall — four cooldowns spent to learn nothing.
     """
     reserved = _reserve(conn, _group_by_property(
         [(url, properties[url]) for url in suspects]), when)
     granted = [url for _, (ok, _, _) in reserved.items() for url in ok]
     _mark(unreached, [url for url in suspects if url not in set(granted)],
           _WHY_QUOTA)
-    for url in granted:
-        unreached.pop(url, None)   # this round reached it after all
     if not granted:
         log.warning("re-verification quota exhausted; %d suspect result(s) "
                     "left unconfirmed", len(suspects))
@@ -491,19 +493,17 @@ def _reverify(conn: sqlite3.Connection, properties: dict[str, str],
     """Re-check suspect results sequentially, in place, until they settle.
 
     A round cools down first, then walks its suspects one at a time with a
-    gap between them — the whole point is to be the opposite of the burst
-    that produced the suspect answers, so both waits are load-bearing.
+    gap between them — the point is to be the opposite of the burst that
+    produced the suspect answers, so both waits are load-bearing. Stops on
+    whichever comes first: nothing suspect left, a round that flipped
+    nothing, a round the budget refused outright, the time budget, or four
+    rounds.
 
-    Stops on whichever comes first: nothing suspect left, a round that
-    flipped nothing (those unknowns are real), a round the budget refused
-    outright, the time budget, or four rounds.
-
-    Returns {url: reason} for every suspect it could NOT re-check. An empty
-    dict means each suspect still in `results` was confirmed sequentially.
-    That distinction is the whole value of the pass: "Google still says
-    unknown" and "we never got to ask" must not arrive looking alike.
+    Returns {url: reason} for every suspect it could NOT re-check; empty
+    means every remaining suspect was confirmed sequentially.
     """
     unreached: dict[str, str] = {}
+    rechecked: set[str] = set()
     cooldown = REVERIFY_COOLDOWN_S
     for round_number in range(1, MAX_REVERIFY_ROUNDS + 1):
         suspects = [url for url, (status, _) in results.items()
@@ -514,7 +514,8 @@ def _reverify(conn: sqlite3.Connection, properties: dict[str, str],
             log.warning("time budget of %ss spent after %d re-verification "
                         "round(s); %d row(s) left unverified", time_budget_s,
                         round_number - 1, len(suspects))
-            return _mark(unreached, suspects, _WHY_BUDGET)
+            _mark(unreached, suspects, _WHY_BUDGET)
+            break
 
         sleep(cooldown)
         # Stamped when the calls actually go out, not at the batch start.
@@ -522,14 +523,26 @@ def _reverify(conn: sqlite3.Connection, properties: dict[str, str],
             conn, _cap(suspects, max_suspects_per_round, unreached), properties,
             unreached, moment + timedelta(seconds=max(0.0, monotonic() - started)))
         if not granted:
-            return unreached
+            break   # nothing looked at, nothing changed; see _reserve_round
+        rechecked.update(granted)
         if not _recheck(granted, properties, results, provider, inspect,
                         session, sleep):
             log.info("re-verification round %d flipped nothing; treating %d "
                      "unknown result(s) as real", round_number, len(granted))
             break
         cooldown *= 2
-    return unreached
+    return _settle(unreached, rechecked)
+
+
+def _settle(unreached: dict[str, str], rechecked: set[str]) -> dict[str, str]:
+    """Drop every mark against a URL some round did manage to re-check.
+
+    A later round's cap, refusal or expired budget cannot un-ask a question
+    an earlier round already answered. Reporting such a URL as unverified is
+    a false alarm about our own work — the mirror image of reporting an
+    unreached suspect as confirmed, and just as untrue an account of what ran.
+    """
+    return {url: why for url, why in unreached.items() if url not in rechecked}
 
 
 def _recheck(suspects: list[str], properties: dict[str, str],
