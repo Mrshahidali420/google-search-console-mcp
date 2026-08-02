@@ -91,7 +91,7 @@ def test_urls_beyond_the_daily_budget_are_skipped_not_attempted(conn):
     out = run(conn, ["https://example.com/a", "https://example.com/b"], inspect)
     assert len(inspect.calls) == 1
     assert len(out["skipped_quota"]) == 1
-    assert out["skipped_quota"][0]["binding"] == "daily"
+    assert out["skipped_quota"][0]["binding_at_gate"] == "daily"
     assert out["skipped_quota"][0]["retry_after_seconds"] > 0
 
 
@@ -105,7 +105,7 @@ def test_the_smaller_of_the_two_windows_is_what_limits_a_partial_batch(conn):
         quota.record_inspections(conn, PROP, 570, when=NOW - timedelta(seconds=10))
     urls = [f"https://example.com/p{n}" for n in range(60)]
     out = run(conn, urls, ScriptedInspect({}))
-    assert out["quota"][PROP]["binding"] == "daily"     # ...but 30 is the cap
+    assert out["quota"][PROP]["binding_at_gate"] == "daily"  # ...but 30 is the cap
     assert out["checked"] == 30
     assert len(out["skipped_quota"]) == 30
 
@@ -570,3 +570,19 @@ def test_pruning_does_not_change_what_the_gate_allows(conn):
 
     assert out["quota"][PROP]["daily_free_at_gate"] == quota.DAILY_INSPECTION_LIMIT
     assert _call_rows(conn) == 8   # seven day-old rows kept, plus this call's
+
+
+def test_the_quota_report_names_its_binding_as_gate_time_too(conn):
+    """B1's argument, applied to the neighbouring field. gsc_quota's
+    `binding` covers the submission budget as well and is measured now;
+    this one is inspection-only and measured at the gate."""
+    _record_at(conn, NOW, count=quota.DAILY_INSPECTION_LIMIT)
+    out = run(conn, ["https://example.com/a"], ScriptedInspect({}))
+
+    entry = out["quota"][PROP]
+    assert entry["binding_at_gate"] == "daily"
+    assert "binding" not in entry
+
+    skipped = out["skipped_quota"][0]
+    assert skipped["binding_at_gate"] == "daily"
+    assert "binding" not in skipped

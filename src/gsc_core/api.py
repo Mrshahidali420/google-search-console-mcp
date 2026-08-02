@@ -635,7 +635,8 @@ def _skipped_rows(
     reserved: dict[str, tuple[list[str], list[str], quota.InspectionVerdict]]
 ) -> dict[str, dict]:
     return {
-        url: {"url": url, "property": property, "binding": verdict.binding,
+        url: {"url": url, "property": property,
+              "binding_at_gate": verdict.binding,
               "retry_after_seconds": verdict.retry_after_seconds}
         for property, (_, deferred, verdict) in reserved.items()
         for url in deferred
@@ -687,6 +688,14 @@ def _quota_report(
     caller to compare them, or to treat this one as current headroom and
     launch a second batch against budget that is already gone.
 
+    `binding_at_gate` carries the suffix for the same reason and no other.
+    gsc_quota's `binding` covers submission AND inspection budgets and is
+    read now; this one is inspection-only and read at the gate. The two
+    value sets do not overlap ("submission" cannot appear here), so nothing
+    silently mis-compares today — but a name that means two things is the
+    defect this rename exists to remove, and applying it to one field and
+    not its neighbour would ship half of it.
+
     `unverified` counts rows whose suspect status no re-check confirmed, so a
     caller reading only this summary still sees that the pass was incomplete.
     """
@@ -695,7 +704,7 @@ def _quota_report(
             "attempted": len(granted),
             "deferred": len(deferred),
             "unverified": sum(1 for url in granted if url in unverified),
-            "binding": verdict.binding,
+            "binding_at_gate": verdict.binding,
             "retry_after_seconds": verdict.retry_after_seconds,
             "daily_free_at_gate": verdict.daily_free,
             "minute_free_at_gate": verdict.minute_free,
