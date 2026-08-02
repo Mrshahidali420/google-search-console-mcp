@@ -28,6 +28,61 @@ LOW_ID = "a" * 32
 HIGH_ID = "p" * 32
 
 
+class _Captured(list):
+    """Log records from one module's logger, captured directly.
+
+    Not caplog: runlog gives the package logger its own handlers and sets
+    propagate = False, so whether pytest's capture sees anything depends on
+    which OTHER test file called runlog.init() first. A privacy assertion
+    that quietly runs against an empty buffer is worse than none.
+    """
+
+    def __init__(self, logger):
+        super().__init__()
+        self._logger = logger
+        self._handler = logging.Handler(level=logging.DEBUG)
+        self._handler.emit = self.append
+        self._level = logger.level
+
+    def __enter__(self):
+        self._logger.setLevel(logging.DEBUG)
+        self._logger.addHandler(self._handler)
+        return self
+
+    def __exit__(self, *exc):
+        self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._level)
+        return False
+
+    def assert_says_nothing_identifying(self, *secrets):
+        """Every line is prose plus a bare exception TYPE NAME.
+
+        The positive assertion is load-bearing: without it the negative
+        ones below pass over an empty buffer. The shape check is the
+        general rule rather than three examples of it — an exception
+        rendered whole would pass a "no address" assertion today and carry
+        a filesystem path the first time the failure mode changes.
+        """
+        assert self, "the failure should have been logged at all"
+        blob = "\n".join(record.getMessage() for record in self)
+        assert "@" not in blob
+        for secret in secrets:
+            assert str(secret) not in blob
+        for record in self:
+            assert re.fullmatch(r"[a-z ]+ \(\w+\)", record.getMessage()), \
+                record.getMessage()
+
+
+# An exception message shaped like the ones this code really meets: an
+# OSError's message is a filesystem path, and on a real machine that path
+# holds the operator's Windows account name and often their address.
+LEAKY = r"C:\Users\a-real-person\leak@example.com\Secure Preferences"
+
+
+def _raise_leaky(*args, **kwargs):
+    raise OSError(LEAKY)
+
+
 def _profile_with_extensions(tmp_path, settings, filename="Secure Preferences"):
     root = tmp_path / "User Data"
     pdir = root / "Default"
@@ -364,46 +419,188 @@ def test_the_user_data_dir_is_used_when_the_profile_carries_no_path(
     assert pairing.find_extension_id(installed, profile) == VALID_ID
 
 
-def test_nothing_is_logged_that_could_identify_anyone(tmp_path, monkeypatch):
-    """The preferences file this reads is the one holding the operator's
-    address, and its path holds their account name. Failures are logged by
-    exception type name only.
+# ---------------------------------------------------------------------------
+# Not installed, versus could not be checked
+# ---------------------------------------------------------------------------
 
-    Captured with a handler attached straight to this module's logger
-    rather than through caplog. runlog gives the package logger its own
-    handlers and sets propagate = False, so whether pytest's capture sees
-    anything here depends on which OTHER test file ran init() first — and a
-    privacy assertion that quietly runs against an empty buffer is worse
-    than no privacy assertion at all.
+def _unreadable(path):
+    """Make a path that exists and cannot be read as a file.
+
+    A directory in a file's place raises PermissionError on Windows and
+    IsADirectoryError on POSIX — both OSError, neither FileNotFoundError,
+    and no privilege needed to arrange. It stands in for the real causes:
+    EACCES, a cloud-sync placeholder, antivirus holding the file open.
     """
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def test_the_extension_being_present_reads_as_true(tmp_path, monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    ours = pairing.extension_dir()
+    installed, profile = _profile_with_extensions(
+        tmp_path, {VALID_ID: {"path": str(ours)}})
+    assert pairing.has_extension(installed, profile) is True
+
+
+def test_preferences_that_were_read_and_lack_it_read_as_false(tmp_path,
+                                                              monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed, profile = _profile_with_extensions(
+        tmp_path, {OTHER_ID: {"path": str(tmp_path / "elsewhere")}})
+    assert pairing.has_extension(installed, profile) is False
+
+
+def test_a_profile_that_has_never_been_launched_reads_as_false(tmp_path,
+                                                               monkeypatch):
+    """Absent is not unreadable. A browser that has recorded no extensions
+    at all is a complete answer of "no", and reporting "could not check"
+    there would make the honest None meaningless by crying wolf on every
+    fresh profile."""
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed = browsers.Installed(brand=browsers.BRANDS["chrome"],
+                                   exe_path="/nonexistent",
+                                   user_data_dir=str(tmp_path / "User Data"))
+    profile = profiles.Profile(directory="Default", name="Personal",
+                               email=None, path=str(tmp_path / "never-run"))
+    assert pairing.has_extension(installed, profile) is False
+
+
+def test_preferences_that_could_not_be_read_read_as_none_not_false(
+        tmp_path, monkeypatch):
+    """The finding this exists for: a user with the extension correctly
+    installed, whose preferences file this process cannot open, must not be
+    told the extension is missing."""
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed, profile = _profile_with_extensions(
+        tmp_path, {VALID_ID: {"path": str(pairing.extension_dir())}})
+    for filename in ("Secure Preferences", "Preferences"):
+        target = tmp_path / "User Data" / "Default" / filename
+        if target.exists():
+            target.unlink()
+        _unreadable(target)
+    assert pairing.has_extension(installed, profile) is None
+
+
+def test_a_truncated_preferences_file_reads_as_none_not_false(tmp_path,
+                                                              monkeypatch):
+    """Caught mid-write. Nothing is known about this profile, which is not
+    the same as knowing the extension is absent."""
     monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
     installed, profile = _profile_with_extensions(tmp_path, {})
     (tmp_path / "User Data" / "Default" / "Secure Preferences").write_text(
         "{not json", encoding="utf-8")
+    assert pairing.has_extension(installed, profile) is None
 
-    records = []
-    handler = logging.Handler(level=logging.DEBUG)
-    handler.emit = records.append
-    previous = pairing.log.level
-    pairing.log.setLevel(logging.DEBUG)
-    pairing.log.addHandler(handler)
-    try:
+
+def test_one_unreadable_file_does_not_spoil_a_hit_in_the_other(tmp_path,
+                                                               monkeypatch):
+    """Found is found. The unreadable sibling costs nothing once the answer
+    is positive, so a locked Secure Preferences must not downgrade a real
+    hit in Preferences to "could not check"."""
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    ours = pairing.extension_dir()
+    installed, profile = _profile_with_extensions(
+        tmp_path, {VALID_ID: {"path": str(ours)}}, filename="Preferences")
+    _unreadable(tmp_path / "User Data" / "Default" / "Secure Preferences")
+    assert pairing.has_extension(installed, profile) is True
+
+
+def test_one_unreadable_file_does_spoil_a_miss_in_the_other(tmp_path,
+                                                            monkeypatch):
+    """The other half of the same rule. A miss is only trustworthy when
+    every file that exists was read."""
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed, profile = _profile_with_extensions(
+        tmp_path, {OTHER_ID: {"path": str(tmp_path / "elsewhere")}},
+        filename="Preferences")
+    _unreadable(tmp_path / "User Data" / "Default" / "Secure Preferences")
+    assert pairing.has_extension(installed, profile) is None
+
+
+def test_an_unresolvable_extraction_reads_as_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed, profile = _profile_with_extensions(tmp_path, {})
+    monkeypatch.setattr(pairing, "extension_dir", _raise_leaky)
+    assert pairing.has_extension(installed, profile) is None
+
+
+def test_secure_preferences_wins_when_both_files_name_a_different_id(
+        tmp_path, monkeypatch):
+    """Chromium moves extension settings into the signed file on the
+    platforms that support it, so that copy is the authoritative one. With
+    every other fixture writing only ONE of the two files, nothing else
+    here would notice the precedence being reversed."""
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    ours = pairing.extension_dir()
+    installed, profile = _profile_with_extensions(
+        tmp_path, {VALID_ID: {"path": str(ours)}})
+    (tmp_path / "User Data" / "Default" / "Preferences").write_text(
+        json.dumps({"extensions": {"settings": {
+            OTHER_ID: {"path": str(ours)}}}}), encoding="utf-8")
+    assert pairing.find_extension_id(installed, profile) == VALID_ID
+
+
+# ---------------------------------------------------------------------------
+# Every log site in this module, one test each
+# ---------------------------------------------------------------------------
+#
+# An OSError's message is a filesystem path holding the operator's Windows
+# account name, and the file it names holds their address. So the rule is
+# not "do not log the exception we happen to raise in this test" — it is
+# that NO log site here may render an exception, and every site is pinned
+# individually. Five sites, five tests.
+
+def test_an_unreadable_manifest_is_logged_by_type_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    extracted = pairing.extension_dir()
+    (extracted / "manifest.json").write_text("{not json", encoding="utf-8")
+    with _Captured(pairing.log) as records:
+        pairing.extension_dir()
+    records.assert_says_nothing_identifying(tmp_path)
+
+
+def test_an_unavailable_extraction_is_logged_by_type_only(tmp_path,
+                                                          monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed, profile = _profile_with_extensions(tmp_path, {})
+    monkeypatch.setattr(pairing, "extension_dir", _raise_leaky)
+    with _Captured(pairing.log) as records:
+        assert pairing.find_extension_id(installed, profile) is None
+    records.assert_says_nothing_identifying(tmp_path, "a-real-person")
+
+
+def test_an_unusable_profile_directory_is_logged_by_type_only(tmp_path,
+                                                              monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed, _ = _profile_with_extensions(tmp_path, {})
+    # directory is a str everywhere in the real stack; a None here is what
+    # a hand-built Profile or a future field rename produces, and the join
+    # raises TypeError rather than returning something wrong.
+    broken = profiles.Profile(directory=None, name="Personal", email=None,
+                              path="")
+    with _Captured(pairing.log) as records:
+        assert pairing.find_extension_id(installed, broken) is None
+    records.assert_says_nothing_identifying(tmp_path)
+
+
+def test_an_unreadable_preferences_file_is_logged_by_type_only(tmp_path,
+                                                               monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed, profile = _profile_with_extensions(tmp_path, {})
+    target = tmp_path / "User Data" / "Default" / "Secure Preferences"
+    target.unlink()
+    _unreadable(target)
+    with _Captured(pairing.log) as records:
         pairing.find_extension_id(installed, profile)
-    finally:
-        pairing.log.removeHandler(handler)
-        pairing.log.setLevel(previous)
+    records.assert_says_nothing_identifying(tmp_path, "User Data")
 
-    # Load-bearing: it proves capture is live, so the assertions below are
-    # not passing over an empty list.
-    assert records, "the corrupt file should have been logged at all"
-    blob = "\n".join(record.getMessage() for record in records)
-    assert "@" not in blob
-    assert "User Data" not in blob
-    assert str(tmp_path) not in blob
-    # And the general rule rather than three examples of it: every line is
-    # prose plus a bare exception TYPE NAME in parentheses. An exception
-    # rendered whole would pass the three assertions above today and carry
-    # a path the first time the failure mode changes.
-    for record in records:
-        assert re.fullmatch(r"[a-z ]+ \(\w+\)", record.getMessage()), \
-            record.getMessage()
+
+def test_an_unparsable_preferences_file_is_logged_by_type_only(tmp_path,
+                                                               monkeypatch):
+    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+    installed, profile = _profile_with_extensions(tmp_path, {})
+    (tmp_path / "User Data" / "Default" / "Secure Preferences").write_text(
+        "{not json", encoding="utf-8")
+    with _Captured(pairing.log) as records:
+        pairing.find_extension_id(installed, profile)
+    records.assert_says_nothing_identifying(tmp_path, "User Data")

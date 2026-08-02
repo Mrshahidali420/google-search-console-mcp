@@ -152,11 +152,12 @@ def _entry(candidate: profiles.Candidate, best: profiles.Candidate | None,
         "account_discoverable": brand.reports_google_account,
         "matches_authorised_account": _matches(profile, brand, account_email),
         # True, False, or None — and None is not a polite False here either.
-        # None means the check could not be PERFORMED (the extension could
-        # not be extracted, so there is no directory to match against);
-        # False means it was performed and the extension is not installed in
-        # this profile. Collapsing the two would tell a user to reinstall an
-        # extension that is sitting right there.
+        # None means the check could not be PERFORMED: either the extension
+        # could not be extracted, so there is no directory to match against,
+        # or this profile's preferences could not be read. False means it
+        # WAS performed — every preferences file consulted was read, and our
+        # extension was not among the entries. Collapsing the two would tell
+        # a user to reinstall an extension that is sitting right there.
         "has_extension": _has_extension(candidate, ext_dir),
         "recommended": (best is not None
                         and candidate.profile is best.profile
@@ -183,6 +184,11 @@ def _extension_dir() -> Path | None:
 def _has_extension(candidate: profiles.Candidate, ext_dir: Path | None):
     """Is our bridge extension installed in this profile? True/False/None.
 
+    The tri-state is pairing.has_extension's, passed through rather than
+    re-derived: an unreadable preferences file must arrive here as None,
+    and computing it from find_extension_id's str-or-None would flatten
+    that back into False at the last step.
+
     The ID itself is deliberately NOT returned. It is 32 characters that
     name one person's install, it is of no use to a model choosing a
     profile, and this result goes into a transcript nobody here controls.
@@ -190,12 +196,11 @@ def _has_extension(candidate: profiles.Candidate, ext_dir: Path | None):
     if ext_dir is None:
         return None
     try:
-        found = pairing.find_extension_id(candidate.installed,
-                                          candidate.profile, ext_dir=ext_dir)
+        return pairing.has_extension(candidate.installed, candidate.profile,
+                                     ext_dir=ext_dir)
     except Exception as exc:  # noqa: BLE001 — one profile of many
         log.debug("extension check failed (%s)", type(exc).__name__)
         return None
-    return found is not None
 
 
 def _matches(profile: profiles.Profile, brand, account_email: str | None):

@@ -37,7 +37,16 @@ Two consequences fall out of that, and both are deliberate:
 ROBUSTNESS. These files belong to Chromium, which rewrites them whenever it
 pleases. Absent, locked, truncated mid-write, valid JSON with the key
 missing — every one of those is an ordinary state, not an error worth
-propagating, and each yields None. ``find_extension_id`` never raises.
+propagating. Nothing here raises.
+
+But they are not all the same ordinary state, and that is why there are two
+entry points. ``find_extension_id`` answers "which ID", and its return type
+can only conflate "not installed" with "could not check". ``has_extension``
+answers the question a user is actually asking, and keeps those apart:
+False means the preferences were read and our extension was not among
+them; None means the read did not happen — EACCES, a cloud-synced profile
+directory, antivirus holding the file open. Telling a user with a working
+install to install it again is the one wrong answer worth code to avoid.
 
 PRIVACY. A preferences file here is the same file that holds the operator's
 signed-in address, and its path contains their account name on every
@@ -51,6 +60,7 @@ import json
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
 
@@ -146,6 +156,56 @@ def _replace(source: Path, target: Path) -> None:
 # Discovery
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class Lookup:
+    """What one profile had to say, and whether it managed to say it.
+
+    ``complete`` is the difference between "we looked and it is not there"
+    and "we could not look". Collapsing the two tells a user with the
+    extension correctly installed that it is missing, which is the one
+    wrong answer this whole module exists to avoid.
+    """
+
+    extension_id: str | None
+    complete: bool
+
+
+def look_up_extension(installed: browsers.Installed,
+                      profile: profiles.Profile,
+                      *, ext_dir: Path | str | None = None) -> Lookup:
+    """Search one profile for our extension. Never raises.
+
+    ``complete`` is False when the answer rests on something we could not
+    read: the extraction directory could not be resolved, the profile
+    directory could not be worked out, or a preferences file existed and
+    could not be read or parsed. A preferences file that is simply ABSENT
+    does not spoil it — a profile that has never recorded any extension is
+    a complete answer of "no".
+
+    A hit always reports ``complete=True``: an ID that was found is found,
+    whatever the other file did.
+    """
+    try:
+        wanted = _key(Path(ext_dir) if ext_dir is not None else extension_dir())
+    except Exception as exc:  # noqa: BLE001 — no directory, nothing to match
+        log.debug("extension directory unavailable (%s)", type(exc).__name__)
+        return Lookup(None, False)
+
+    try:
+        root = _profile_dir(installed, profile)
+    except Exception as exc:  # noqa: BLE001 — one profile of many
+        log.debug("profile directory unusable (%s)", type(exc).__name__)
+        return Lookup(None, False)
+
+    complete = True
+    for filename in _PREFERENCE_FILES:
+        found, readable = _match_in(root / filename, root, wanted)
+        if found is not None:
+            return Lookup(found, True)
+        complete = complete and readable
+    return Lookup(None, complete)
+
+
 def find_extension_id(installed: browsers.Installed,
                       profile: profiles.Profile,
                       *, ext_dir: Path | str | None = None) -> str | None:
@@ -155,30 +215,36 @@ def find_extension_id(installed: browsers.Installed,
     thing to the caller: not paired here, pair again. It covers the
     extension not being installed, the profile never having been launched,
     the preferences file being unreadable, and the extraction directory
-    having moved since the last pairing — none of which are distinguishable
-    from outside, and none of which need to be.
+    having moved since the last pairing.
+
+    A caller that has to TELL the user which of those happened wants
+    ``has_extension`` instead — "not installed" and "could not check" lead
+    to different next steps, and only this function's return type is
+    obliged to conflate them.
 
     ``ext_dir`` overrides the directory to match against; it exists so a
     caller resolving the extraction once for a whole survey does not pay
     for it per profile.
     """
-    try:
-        wanted = _key(Path(ext_dir) if ext_dir is not None else extension_dir())
-    except Exception as exc:  # noqa: BLE001 — no directory, nothing to match
-        log.debug("extension directory unavailable (%s)", type(exc).__name__)
-        return None
+    return look_up_extension(installed, profile, ext_dir=ext_dir).extension_id
 
-    try:
-        root = _profile_dir(installed, profile)
-    except Exception as exc:  # noqa: BLE001 — one profile of many
-        log.debug("profile directory unusable (%s)", type(exc).__name__)
-        return None
 
-    for filename in _PREFERENCE_FILES:
-        found = _match_in(root / filename, root, wanted)
-        if found is not None:
-            return found
-    return None
+def has_extension(installed: browsers.Installed, profile: profiles.Profile,
+                  *, ext_dir: Path | str | None = None) -> bool | None:
+    """Is our extension installed in this profile? True, False, or None.
+
+    None is not a polite False. It means the question could not be
+    answered — an unreadable preferences file, most often EACCES, a
+    cloud-synced profile directory, or antivirus holding the file open.
+    Reporting False there would tell a user whose extension is correctly
+    installed to install it again.
+
+    Never raises.
+    """
+    result = look_up_extension(installed, profile, ext_dir=ext_dir)
+    if result.extension_id is not None:
+        return True
+    return False if result.complete else None
 
 
 def _profile_dir(installed: browsers.Installed,
@@ -195,22 +261,25 @@ def _profile_dir(installed: browsers.Installed,
     return Path(installed.user_data_dir) / profile.directory
 
 
-def _match_in(prefs_path: Path, root: Path, wanted: str) -> str | None:
-    """The first ID in this file whose recorded path is ours.
+def _match_in(prefs_path: Path, root: Path,
+              wanted: str) -> tuple[str | None, bool]:
+    """The first ID in this file whose recorded path is ours, and whether
+    the file could be read at all.
 
     Iteration is sorted so that a preferences file listing two entries
     pointing at the same directory — which happens when a browser has been
     told to load the same unpacked extension twice — always yields the same
     answer, rather than one that depends on dict insertion order.
     """
-    settings = _extension_settings(_read_json(prefs_path))
+    prefs, readable = _read_json(prefs_path)
+    settings = _extension_settings(prefs)
     for ext_id in sorted(settings):
         if not EXTENSION_ID_RE.match(ext_id):
             continue
         recorded = _recorded_path(settings[ext_id], root)
         if recorded is not None and recorded == wanted:
-            return ext_id
-    return None
+            return ext_id, readable
+    return None, readable
 
 
 def _extension_settings(prefs: object) -> dict[str, object]:
@@ -270,19 +339,27 @@ def _key(path: Path) -> str:
 # Guarded reads
 # ---------------------------------------------------------------------------
 
-def _read_json(path: Path) -> object | None:
-    """Parse a browser state file, or return None for any reason at all.
+def _read_json(path: Path) -> tuple[object | None, bool]:
+    """Parse a browser state file; also say whether that succeeded.
+
+    The flag distinguishes the two kinds of nothing. A file that is not
+    there is a complete answer — the browser has recorded no extensions —
+    and reports True. A file that exists and cannot be read or parsed is
+    an incomplete answer and reports False, so the caller can say "could
+    not check" rather than "not installed".
 
     Logged by exception TYPE NAME: an OSError's message carries the path,
     and that path carries the operator's account name.
     """
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
+    except FileNotFoundError:
+        return None, True
     except OSError as exc:
         log.debug("preferences unreadable (%s)", type(exc).__name__)
-        return None
+        return None, False
     try:
-        return json.loads(text)
+        return json.loads(text), True
     except (ValueError, RecursionError) as exc:
         log.debug("preferences unparsable (%s)", type(exc).__name__)
-        return None
+        return None, False

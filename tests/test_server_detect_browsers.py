@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import pytest
 
@@ -418,6 +419,91 @@ def test_the_extension_id_itself_is_never_returned(survey, tmp_path):
     result = tools_browsers.detect_browsers()
     assert result["profiles"][0]["has_extension"] is True
     assert ext_id not in _blob(result)
+
+
+def _captured_tool_log():
+    """Records from this module's own logger, captured directly.
+
+    caplog reaches this logger only depending on which other test file
+    called runlog.init() first — see tests/test_pairing.py. The two
+    extension log sites below are pinned with a handler of their own so
+    that cannot make a privacy assertion vacuous.
+    """
+    import logging
+
+    class _Records(list):
+        def __enter__(self):
+            self.handler = logging.Handler(level=logging.DEBUG)
+            self.handler.emit = self.append
+            self.level = tools_browsers.log.level
+            tools_browsers.log.setLevel(logging.DEBUG)
+            tools_browsers.log.addHandler(self.handler)
+            return self
+
+        def __exit__(self, *exc):
+            tools_browsers.log.removeHandler(self.handler)
+            tools_browsers.log.setLevel(self.level)
+            return False
+
+    return _Records()
+
+
+def _assert_type_name_only(records):
+    assert records, "the failure should have been logged at all"
+    for record in records:
+        message = record.getMessage()
+        assert "@" not in message
+        assert "a-real-person" not in message
+        assert re.fullmatch(r"[a-z ]+ \(\w+\)", message), message
+
+
+def test_an_unavailable_extraction_is_logged_by_type_only(survey, monkeypatch):
+    """An OSError here carries the config directory's path, which holds the
+    operator's Windows account name."""
+    def boom(*args, **kwargs):
+        raise OSError(r"C:\Users\a-real-person\leak@example.com\extension")
+
+    monkeypatch.setattr(tools_browsers.pairing, "extension_dir", boom)
+    survey([_candidate("chrome", "Default", None)])
+    with _captured_tool_log() as records:
+        tools_browsers.detect_browsers()
+    _assert_type_name_only(records)
+
+
+def test_a_failed_extension_check_is_logged_by_type_only(survey, monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError(r"C:\Users\a-real-person\leak@example.com\Preferences")
+
+    monkeypatch.setattr(tools_browsers.pairing, "has_extension", boom)
+    survey([_candidate("chrome", "Default", None)])
+    with _captured_tool_log() as records:
+        result = tools_browsers.detect_browsers()
+    assert result["profiles"][0]["has_extension"] is None
+    _assert_type_name_only(records)
+
+
+def test_a_profile_whose_preferences_cannot_be_read_reports_none(survey,
+                                                                 tmp_path):
+    """The end-to-end version of the tri-state. A user whose preferences
+    file this process cannot open must not be told to reinstall an
+    extension that is sitting right there — so the None has to survive the
+    trip from pairing through to the tool result, not be flattened into
+    False at the last step."""
+    root = tmp_path / "User Data"
+    pdir = root / "Default"
+    pdir.mkdir(parents=True)
+    for filename in ("Secure Preferences", "Preferences"):
+        (pdir / filename).mkdir()      # exists, and is not readable as a file
+
+    blocked = profiles.Profile(directory="Default", name="Personal",
+                               email=None, path=str(pdir))
+    survey([profiles.Candidate(installed=_installed("chrome"), profile=blocked,
+                               score=0, reasons=[]),
+            _candidate("brave", "Profile 2", None)])
+
+    by_key = {entry["browser_key"]: entry["has_extension"]
+              for entry in tools_browsers.detect_browsers()["profiles"]}
+    assert by_key == {"chrome": None, "brave": False}
 
 
 def test_has_extension_stays_none_when_the_check_cannot_be_performed(
