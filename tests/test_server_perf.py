@@ -123,6 +123,31 @@ def test_performance_signed_out_portfolio_path_also_refuses(home, monkeypatch):
     assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
 
 
+def test_performance_signed_out_query_dimension_path_also_refuses(home, monkeypatch):
+    """Same guarantee on the third dispatch branch (site + dim -> perf.query),
+    left untested by the first two signed-out tests."""
+    monkeypatch.setattr(server.deps, "provider", lambda: _SignedOutProvider())
+    out = server.gsc_performance(site="example.com", dim="query")
+    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+
+
+def test_performance_signed_out_multi_property_portfolio_forces_the_thread_pool(
+    home, monkeypatch,
+):
+    """With a single property, perf.portfolio's workers=1 path runs `one()`
+    inline in a list comprehension and never touches ThreadPoolExecutor --
+    too easy a case to prove AuthRequired survives the threaded path. A
+    second property pushes workers to 2, forcing the real pool.map() code
+    path that a future change could accidentally wrap in a broader except
+    clause."""
+    with store.session() as conn, store.tx(conn):
+        store.upsert_site(conn, "sc-domain:example.net", "example.net",
+                          "siteOwner", [])
+    monkeypatch.setattr(server.deps, "provider", lambda: _SignedOutProvider())
+    out = server.gsc_performance()
+    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+
+
 def test_performance_not_configured_returns_a_setup_answer(home, monkeypatch):
     def boom():
         raise server.deps.NotConfigured("no client")
@@ -188,6 +213,27 @@ def test_submit_sitemaps_does_not_duplicate_an_already_recorded_sitemap(home, mo
     with store.session() as conn:
         assert store.get_sites(conn)[0]["sitemaps"] == \
             ["https://example.com/sitemap.xml"]
+
+
+def test_submit_sitemaps_adds_a_second_sitemap_without_losing_the_first(
+    home, monkeypatch,
+):
+    """The dedup test above resubmits the SAME url, which a `merged = []`
+    regression would pass too (one url in, one url out). This submits a
+    DIFFERENT sitemap for the same property and checks the FIRST one is
+    still there afterwards -- the actual "existing sitemaps must not be
+    lost" guarantee gsc_list_sites' carry-forward fix depends on."""
+    with store.session() as conn, store.tx(conn):
+        store.upsert_site(conn, "sc-domain:example.com", "example.com", "siteOwner",
+                          ["https://example.com/old.xml"])
+    monkeypatch.setattr(server.api, "submit_sitemap",
+                        lambda prop, sm, provider, **k: {"site": prop, "sitemap": sm,
+                                                         "ok": True, "http_status": 200,
+                                                         "note": ""})
+    server.gsc_submit_sitemaps(["https://example.com/new.xml"])
+    with store.session() as conn:
+        assert store.get_sites(conn)[0]["sitemaps"] == [
+            "https://example.com/old.xml", "https://example.com/new.xml"]
 
 
 def test_submit_sitemaps_keeps_a_second_property_sitemap_unmerged(home, monkeypatch):
