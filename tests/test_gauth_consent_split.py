@@ -26,11 +26,22 @@ class FakeSession:
 
 
 def _redirect(receiver, **params):
-    """Drive the live loopback server the way Google's redirect would."""
+    """Drive the live loopback server the way Google's redirect would.
+
+    The handler writes the HTTP response body and only sets `_received`
+    afterward, in its `finally`. `wfile` is unbuffered, so `urlopen(...
+    ).read()` can return to this caller before that flag is set -- a caller
+    that immediately calls `poll()` would then race the handler and can
+    observe `None` even though the redirect has already been written and
+    read. Waiting on the event here (briefly -- the handler sets it
+    microseconds after the write completes) makes every caller of this
+    helper see the post-redirect state deterministically.
+    """
     import urllib.request
     from urllib.parse import urlencode
     url = f"{receiver.redirect_uri}/?{urlencode(params)}"
     urllib.request.urlopen(url, timeout=5).read()
+    receiver._received.wait(2)
 
 
 def test_poll_returns_none_before_the_redirect_arrives():
@@ -107,10 +118,38 @@ def test_close_before_start_returns_instead_of_hanging():
 
 
 def test_close_is_idempotent():
+    """A second close() must be a genuine no-op, not just harmless.
+
+    Without the _closed guard this still neither raises nor hangs -- a
+    started server's shutdown()/server_close() tolerate a repeat call -- so
+    asserting only "no exception" cannot fail and proves nothing. Spying on
+    the underlying calls proves the guard actually short-circuits the
+    second close() rather than merely surviving it.
+    """
     receiver = gauth.LoopbackReceiver()
     receiver.start()
+
+    shutdown_calls = []
+    server_close_calls = []
+    real_shutdown = receiver._server.shutdown
+    real_server_close = receiver._server.server_close
+
+    def spy_shutdown():
+        shutdown_calls.append(1)
+        real_shutdown()
+
+    def spy_server_close():
+        server_close_calls.append(1)
+        real_server_close()
+
+    receiver._server.shutdown = spy_shutdown
+    receiver._server.server_close = spy_server_close
+
     receiver.close()
-    receiver.close()  # must not raise or hang the second time
+    receiver.close()
+
+    assert shutdown_calls == [1], "shutdown() must run exactly once"
+    assert server_close_calls == [1], "server_close() must run exactly once"
 
 
 def test_finish_consent_closes_the_receiver_when_poll_raises():

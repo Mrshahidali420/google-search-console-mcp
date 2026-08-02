@@ -371,6 +371,16 @@ class LoopbackReceiver:
         )
         self._started = False
         self._closed = False
+        # Guards _started/_closed together with the calls that act on them.
+        # Without it, start() setting _started True after _thread.start()
+        # races a concurrent close(): close() can read _started as False,
+        # skip shutdown(), and call server_close() on a socket the serving
+        # thread is still selecting on — the thread never exits, and a
+        # second close() can return early while the first is still
+        # mid-shutdown(). start()/close() are public API held across
+        # separate tool calls, so a second caller racing the first is a
+        # real scenario, not a hypothetical one.
+        self._lifecycle_lock = threading.Lock()
 
     @property
     def redirect_uri(self) -> str:
@@ -380,8 +390,14 @@ class LoopbackReceiver:
         """Begin serving. Separate from __enter__ so a caller that must
         outlive one stack frame — an MCP tool returning a consent URL and
         being called again later — can hold the receiver open across calls."""
-        self._thread.start()
-        self._started = True
+        with self._lifecycle_lock:
+            # _started is set only after _thread.start() returns, so a
+            # RuntimeError out of start() (already started, interpreter
+            # shutting down) leaves _started False and close() still knows
+            # not to call shutdown() — hoisting the flag above the call
+            # would silently rely on shutdown() having something to do.
+            self._thread.start()
+            self._started = True
 
     def close(self) -> None:
         """Idempotent, and safe to call on a receiver that never started.
@@ -392,12 +408,13 @@ class LoopbackReceiver:
         shutdown() would hang forever — a caller holding a PendingConsent it
         never finished must be able to close it unconditionally.
         """
-        if self._closed:
-            return
-        self._closed = True
-        if self._started:
-            self._server.shutdown()
-        self._server.server_close()
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._started:
+                self._server.shutdown()
+            self._server.server_close()
 
     def __enter__(self) -> "LoopbackReceiver":
         self.start()
