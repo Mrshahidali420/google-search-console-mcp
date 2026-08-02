@@ -152,3 +152,73 @@ def test_doctor_continues_after_a_failing_check(home, monkeypatch):
     monkeypatch.setattr(server.deps, "provider", boom)
     out = server.gsc_doctor()
     assert len(out["checks"]) == 5
+
+
+# --- failures the tool does not model still keep the contract (A1 + B3) ------
+
+def test_list_sites_reports_a_refused_call_as_data_not_an_empty_list(home,
+                                                                    monkeypatch):
+    """A1's real damage: list_properties used to swallow a non-200 and return
+    [], which reads as 'this account owns no properties'. It must now surface
+    as a structured failure, and must not have written that emptiness to the
+    store either."""
+    from gsc_core import api
+
+    def boom(*a, **k):
+        raise api.ApiError("sites.list returned HTTP 403", status=403)
+
+    monkeypatch.setattr(server.api, "list_properties", boom)
+    monkeypatch.setattr(server.deps, "provider", lambda: object())
+    out = server.gsc_list_sites()
+    assert out["ok"] is False
+    assert out["error"] == "api_error"
+    assert out["status"] == 403
+    assert "scope" in out["fix"]
+    with store.session() as conn:
+        assert store.get_sites(conn) == []
+
+
+def test_a_403_and_a_500_get_different_fixes(home, monkeypatch):
+    """403 is a scope or permission problem the user can act on; a 500 is
+    not. One shared fix string would send them to the wrong place."""
+    from gsc_core import api
+
+    monkeypatch.setattr(server.deps, "provider", lambda: object())
+    fixes = {}
+    for status in (403, 500):
+        monkeypatch.setattr(
+            server.api, "list_properties",
+            lambda *a, s=status, **k: (_ for _ in ()).throw(
+                api.ApiError(f"HTTP {s}", status=s)))
+        fixes[status] = server.gsc_list_sites()["fix"]
+    assert fixes[403] != fixes[500]
+
+
+def test_list_sites_reports_an_unexpected_failure_as_data(home, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("token=ya29.LEAK")
+
+    monkeypatch.setattr(server.api, "list_properties", boom)
+    monkeypatch.setattr(server.deps, "provider", lambda: object())
+    out = server.gsc_list_sites()
+    assert out["ok"] is False
+    assert out["error"] == "unexpected"
+    assert out["detail"] == "RuntimeError"
+    assert out["fix"]
+    assert "ya29.LEAK" not in repr(out)
+
+
+def test_a_database_failure_after_a_good_fetch_is_still_reported(home,
+                                                                monkeypatch):
+    """The store write lives inside the try too. It did not always: a failure
+    there escaped as an exception while the network part was contract-safe."""
+    monkeypatch.setattr(server.api, "list_properties", lambda *a, **k: [
+        {"siteUrl": "sc-domain:example.com", "permissionLevel": "siteOwner"}])
+    monkeypatch.setattr(server.deps, "provider", lambda: object())
+
+    def no_write(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(server.store, "upsert_site", no_write)
+    out = server.gsc_list_sites()
+    assert out["error"] == "unexpected"

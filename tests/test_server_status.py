@@ -25,7 +25,7 @@ class _SignedOutProvider:
     surfaces from access_token(), never from provider() itself."""
 
     def access_token(self) -> str:
-        raise gauth.AuthRequired("no stored credentials; run gsc_setup()")
+        raise gauth.AuthRequired("No stored credentials.")
 
 
 @pytest.fixture()
@@ -279,3 +279,59 @@ def test_quota_reports_the_real_inspection_free_counts(home):
     inspection = server.gsc_quota()[0]["inspection"]
     assert inspection["daily_free"] == quota.DAILY_INSPECTION_LIMIT
     assert inspection["minute_free"] == quota.MINUTE_INSPECTION_LIMIT
+
+
+# --- failures neither tool models still keep the contract (B3) ---------------
+
+def test_check_status_reports_a_refused_call_as_data(home, monkeypatch):
+    from gsc_core import api
+
+    def boom(*a, **k):
+        raise api.ApiError("sites.list returned HTTP 403", status=403)
+
+    monkeypatch.setattr(server.deps, "provider", lambda: _AuthedProvider())
+    monkeypatch.setattr(server.api, "check_status", boom)
+    out = server.gsc_check_status(["https://example.com/a"])
+    assert out["ok"] is False
+    assert out["error"] == "api_error"
+    assert out["status"] == 403
+
+
+def test_a_failing_token_endpoint_reports_as_data_not_an_exception(home,
+                                                                  monkeypatch):
+    """The eager probe raises a PLAIN RuntimeError -- not AuthRequired --
+    when the stored token is expired and Google's token endpoint is itself
+    failing (gauth._post_token's non-reauth branch). Neither of the modelled
+    excepts catches that, so without the catch-all it left the tool as a bare
+    exception and the caller lost the structured fix."""
+    class _EndpointDown:
+        def access_token(self) -> str:
+            raise RuntimeError("token endpoint returned 503: unavailable")
+
+    monkeypatch.setattr(server.deps, "provider", lambda: _EndpointDown())
+    out = server.gsc_check_status(["https://example.com/a"])
+    assert out["ok"] is False
+    assert out["error"] == "unexpected"
+    assert out["detail"] == "RuntimeError"
+    assert out["fix"]
+
+
+def test_check_status_never_leaks_the_exception_message(home, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("Bearer ya29.LEAK")
+
+    monkeypatch.setattr(server.deps, "provider", lambda: _AuthedProvider())
+    monkeypatch.setattr(server.api, "check_status", boom)
+    assert "ya29.LEAK" not in repr(server.gsc_check_status(["https://example.com/a"]))
+
+
+def test_quota_reports_an_unexpected_failure_as_data(home, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("token=ya29.LEAK")
+
+    monkeypatch.setattr(server.quota, "inspection_check", boom)
+    out = server.gsc_quota()
+    assert out["ok"] is False
+    assert out["error"] == "unexpected"
+    assert out["detail"] == "RuntimeError"
+    assert "ya29.LEAK" not in repr(out)

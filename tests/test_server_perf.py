@@ -25,7 +25,7 @@ class _SignedOutProvider:
     docstring)."""
 
     def access_token(self) -> str:
-        raise gauth.AuthRequired("no stored credentials; run gsc_setup()")
+        raise gauth.AuthRequired("No stored credentials.")
 
 
 @pytest.fixture()
@@ -436,3 +436,20 @@ def test_the_reread_happens_inside_the_write_transaction(home, monkeypatch):
     assert seen_in_transaction == [False, True], (
         "expected the pre-network snapshot in autocommit and the re-read "
         f"inside the write transaction, got {seen_in_transaction}")
+
+
+def test_performance_reports_an_unexpected_failure_as_data(home, monkeypatch):
+    """B3: gsc_performance modelled PerfError and AuthRequired only. Anything
+    else escaped the {ok, error, fix} contract -- and its structured answers
+    carry the resolved window, which the catch-all must preserve too."""
+    def boom(*a, **k):
+        raise RuntimeError("token=ya29.LEAK")
+
+    monkeypatch.setattr(server.perf, "totals", boom)
+    out = server.gsc_performance(site="example.com")
+    assert out["ok"] is False
+    assert out["error"] == "unexpected"
+    assert out["detail"] == "RuntimeError"
+    assert out["fix"]
+    assert "start" in out and "end" in out
+    assert "ya29.LEAK" not in repr(out)
