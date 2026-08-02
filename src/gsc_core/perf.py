@@ -1,10 +1,11 @@
-"""Search Analytics reporting — pure logic: date windows, request/response
-shaping, and aggregation.
+"""Search Analytics reporting: date windows, request/response shaping,
+aggregation (Task 5) plus the network layer built on top of it (Task 6).
 
-No network, no database, no I/O of any kind. Task 6 calls into this module
-to build a searchAnalytics.query request body and to normalise/aggregate
-whatever comes back; everything here is deterministic (clocks are injected
-as plain arguments) so it is testable without touching Google.
+The Task 5 half is pure logic — no network, no database, no I/O of any
+kind — and stays that way; everything below the pagination/portfolio
+section is what actually calls Google, with `session` and `sleep`
+injected the same way `api.py` injects them, so it is testable without
+touching the network or a clock either.
 
 Why `dataState` defaults to "all", against Google's own default
 -----------------------------------------------------------------
@@ -37,7 +38,18 @@ reintroduce the exact bug this module exists to avoid — don't.
 """
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
+from urllib.parse import quote
+
+import requests
+
+from . import routing, runlog
+from .gauth import TokenProvider
+
+log = runlog.get(__name__)
 
 MAX_ROW_LIMIT = 25000
 DEFAULT_DAYS = 28
@@ -57,6 +69,17 @@ FINAL_LAG_DAYS = 3
 HOURLY_DATA_STATE = "hourly_all"
 HOUR_DIMENSION = "HOUR"
 HOURLY_WINDOW_DAYS = 10  # Google only retains hourly data this far back.
+
+QUERY_URI = "https://www.googleapis.com/webmasters/v3/sites/{site}/searchAnalytics/query"
+
+# Transient failures are worth a backoff-and-retry; anything else means
+# retrying will just get the same answer again. Kept as perf.py's own
+# constant rather than importing api.py's private one, so the two retry
+# policies can be compared side by side without a cross-module dependency.
+_TRANSIENT_STATUSES = frozenset({429, 500, 502, 503})
+_ERROR_DETAIL_LIMIT = 200
+
+_session = requests.Session()
 
 
 class PerfError(RuntimeError):
@@ -239,3 +262,254 @@ def filter_hourly_rows(rows: list[dict], hours: int,
 
     kept.sort(key=lambda pair: pair[0] or datetime.min.replace(tzinfo=UTC))
     return [row for _, row in kept]
+
+
+# --- network layer -----------------------------------------------------------
+#
+# Everything below actually calls Google. `properties: list[str]` replaces
+# the private original's own property discovery: the caller supplies the
+# list and `routing.resolve_property` does the matching, so there is no
+# process-global properties cache and no lock guarding it here — the
+# caller already has the list, so nothing needs to be memoized across
+# calls.
+
+
+def post_query(property: str, body: dict, provider: TokenProvider,
+               session: requests.Session | None = None, max_retries: int = 4,
+               sleep: Callable[[float], None] = time.sleep) -> dict:
+    """POST one searchAnalytics.query request, retrying past transient failures.
+
+    Mirrors api.inspect_url's retry policy exactly — same branches, same
+    backoff formulas — so the two clients cannot silently drift apart:
+
+    - bearer re-read from `provider` on every attempt.
+    - 401 -> invalidate the token and retry on the next loop iteration,
+      without spending a backoff sleep.
+    - 429/500/502/503 -> exponential backoff (2 ** attempt * 2 seconds) and
+      retry.
+    - a transport exception -> backs off with 2 ** attempt seconds and
+      retries, raising on the final attempt.
+    - any other status -> raise immediately, no retry.
+
+    The one difference from inspect_url: this raises PerfError rather than
+    returning an error tuple. A paginated caller has no sane "error row" to
+    substitute mid-loop, so a hard failure is the only sound response.
+    """
+    client = session or _session
+    uri = QUERY_URI.format(site=quote(property, safe=""))
+
+    for attempt in range(max_retries):
+        try:
+            resp = client.post(
+                uri,
+                headers={"Authorization": f"Bearer {provider.access_token()}"},
+                json=body,
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            if attempt == max_retries - 1:
+                raise PerfError(f"request failed: {exc}") from exc
+            sleep(2 ** attempt)
+            continue
+
+        if resp.status_code == 200:
+            return resp.json()
+
+        if resp.status_code == 401:
+            provider.invalidate()
+            continue
+
+        if resp.status_code in _TRANSIENT_STATUSES:
+            sleep(2 ** attempt * 2)
+            continue
+
+        raise PerfError(f"HTTP {resp.status_code}: {resp.text[:_ERROR_DETAIL_LIMIT]}")
+
+    raise PerfError("retries exhausted (rate limited?)")
+
+
+def _paginate(property: str, start_date: str, end_date: str, provider: TokenProvider,
+             dimensions: list[str] | None = None, data_state: str = DEFAULT_DATA_STATE,
+             search_type: str = "web", limit: int = DEFAULT_ROW_LIMIT,
+             filters: list[dict] | None = None,
+             session: requests.Session | None = None) -> list[dict]:
+    """The pagination loop against an ALREADY-RESOLVED property.
+
+    Preserve this contract exactly: `page_size = min(MAX_ROW_LIMIT, limit -
+    len(rows))` when `limit` is truthy, else `MAX_ROW_LIMIT`; break when
+    `page_size <= 0`; break when a page comes back shorter than requested.
+
+    That last break is load-bearing, not an optimisation: it is what tells
+    the loop Google has no more rows. Weakening it to "stop when the page
+    is empty" breaks on the first empty page instead of the first short
+    one — harmless against the real API, which never returns a partial
+    page followed by more, but it turns a fake session that runs out of
+    queued responses into an infinite loop instead of a failing test.
+    """
+    rows: list[dict] = []
+    start_row = 0
+    while True:
+        page_size = min(MAX_ROW_LIMIT, limit - len(rows)) if limit else MAX_ROW_LIMIT
+        if page_size <= 0:
+            break
+
+        body = build_body(start_date, end_date, dimensions=dimensions,
+                          data_state=data_state, search_type=search_type,
+                          row_limit=page_size, start_row=start_row, filters=filters)
+        payload = post_query(property, body, provider, session=session)
+        page = payload.get("rows", [])
+        rows.extend(normalize_row(row, dimensions) for row in page)
+
+        if len(page) < page_size:
+            break
+        start_row += page_size
+    return rows
+
+
+def _resolve_window(days: int, start_date: str | None,
+                    end_date: str | None) -> tuple[str, str]:
+    """An explicit (start_date, end_date) pair is used as-is; otherwise the
+    window comes from date_range(days). date_range's own `today` is not
+    threaded through here — query/totals/portfolio have no injected clock
+    in their interface, only hourly() does."""
+    if start_date and end_date:
+        return start_date, end_date
+    return date_range(days=days, end=end_date)
+
+
+def query(site: str, properties: list[str], provider: TokenProvider,
+         days: int = DEFAULT_DAYS, dimensions: list[str] | None = None,
+         start_date: str | None = None, end_date: str | None = None,
+         data_state: str = DEFAULT_DATA_STATE, search_type: str = "web",
+         limit: int = DEFAULT_ROW_LIMIT, filters: list[dict] | None = None,
+         session: requests.Session | None = None) -> list[dict]:
+    """Paginated Search Analytics rows for `site`, normalised with dimension
+    names. `limit=0` means every row Google will give.
+
+    Validation happens before routing and before any request goes out —
+    a caller mistake (bad dimension, bad data_state) should never spend a
+    network call to discover it.
+    """
+    validate_query(dimensions, data_state, search_type)
+    property = routing.resolve_property(site, properties)
+    if property is None:
+        raise PerfError(f"{site!r} matches no Search Console property")
+
+    window_start, window_end = _resolve_window(days, start_date, end_date)
+    return _paginate(property, window_start, window_end, provider,
+                     dimensions=dimensions, data_state=data_state,
+                     search_type=search_type, limit=limit, filters=filters,
+                     session=session)
+
+
+def totals(site: str, properties: list[str], provider: TokenProvider,
+          days: int = DEFAULT_DAYS, start_date: str | None = None,
+          end_date: str | None = None, data_state: str = DEFAULT_DATA_STATE,
+          search_type: str = "web", filters: list[dict] | None = None,
+          session: requests.Session | None = None) -> dict:
+    """Site-wide aggregate metrics for the window, plus site/start/end.
+
+    Queried with no dimensions, so Google returns at most one row; `limit=1`
+    keeps that explicit rather than relying on the API to only ever send one.
+    """
+    property = routing.resolve_property(site, properties)
+    if property is None:
+        raise PerfError(f"{site!r} matches no Search Console property")
+
+    window_start, window_end = _resolve_window(days, start_date, end_date)
+    rows = _paginate(property, window_start, window_end, provider,
+                     dimensions=None, data_state=data_state,
+                     search_type=search_type, limit=1, filters=filters,
+                     session=session)
+    return {"site": property, "start": window_start, "end": window_end,
+           **aggregate_rows(rows)}
+
+
+def hourly(site: str, properties: list[str], provider: TokenProvider,
+          hours: int = 24, search_type: str = "web",
+          session: requests.Session | None = None,
+          today: date | None = None) -> list[dict]:
+    """Trailing `hours` of hourly Search Analytics data for `site`.
+
+    `today` anchors the request's calendar span so it is testable without
+    depending on the real clock; production calls leave it unset and get
+    the real date. Requesting more than HOURLY_WINDOW_DAYS is rejected
+    outright — Google does not retain hourly data that far back, so
+    sending it would just come back empty with no signal why.
+
+    dimensions/dataState are hardcoded to HOUR/hourly_all rather than going
+    through validate_query, which deliberately rejects that combination
+    everywhere else (see validate_query's docstring) — hourly() is the one
+    call site allowed to use it.
+    """
+    if hours <= 0:
+        raise ValueError(f"hours must be positive, got {hours}")
+    if hours > HOURLY_WINDOW_DAYS * 24:
+        raise ValueError(
+            f"hours={hours} exceeds the {HOURLY_WINDOW_DAYS * 24}-hour "
+            f"window Google retains hourly data for")
+
+    property = routing.resolve_property(site, properties)
+    if property is None:
+        raise PerfError(f"{site!r} matches no Search Console property")
+
+    now = (datetime.combine(today, datetime.min.time(), tzinfo=UTC) if today
+          else datetime.now(UTC))
+    end_date = now.date()
+    span_days = min(HOURLY_WINDOW_DAYS, -(-hours // 24) + 1)
+    start_date = end_date - timedelta(days=span_days - 1)
+
+    body = build_body(start_date.isoformat(), end_date.isoformat(),
+                      dimensions=[HOUR_DIMENSION], data_state=HOURLY_DATA_STATE,
+                      search_type=search_type, row_limit=MAX_ROW_LIMIT)
+    payload = post_query(property, body, provider, session=session)
+    rows = [normalize_row(row, ["hour"]) for row in payload.get("rows", [])]
+    return filter_hourly_rows(rows, hours, now=now)
+
+
+def _zero_row(property: str, start_date: str, end_date: str, exc: Exception) -> dict:
+    """A failed property's placeholder — same shape as a real totals() row,
+    zeroed out, carrying why it failed rather than raising and sinking the
+    whole portfolio run."""
+    return {"site": property, "start": start_date, "end": end_date,
+           "clicks": 0, "impressions": 0, "ctr": 0.0, "position": 0.0,
+           "error": str(exc)}
+
+
+def portfolio(properties: list[str], provider: TokenProvider,
+             days: int = DEFAULT_DAYS, start_date: str | None = None,
+             end_date: str | None = None, data_state: str = DEFAULT_DATA_STATE,
+             search_type: str = "web", concurrency: int = 4,
+             session: requests.Session | None = None) -> list[dict]:
+    """One totals-shaped row per property, sorted busiest (clicks, then
+    impressions) first.
+
+    Each property is already a resolved property string, not a site to
+    route — there is nothing to look up, so this calls _paginate() directly
+    rather than going through query()/totals()'s routing.resolve_property.
+    A property the token cannot read, or one that has since been deleted,
+    must never sink the run: PerfError and ValueError are caught per
+    property and turned into a zeroed row instead of propagating.
+    """
+    window_start, window_end = _resolve_window(days, start_date, end_date)
+
+    def one(property: str) -> dict:
+        try:
+            rows = _paginate(property, window_start, window_end, provider,
+                             dimensions=None, data_state=data_state,
+                             search_type=search_type, limit=1, session=session)
+            return {"site": property, "start": window_start, "end": window_end,
+                   **aggregate_rows(rows)}
+        except (PerfError, ValueError) as exc:
+            log.warning("portfolio: %s failed: %s", property, exc)
+            return _zero_row(property, window_start, window_end, exc)
+
+    workers = max(1, min(concurrency, len(properties)))
+    if workers <= 1:
+        results = [one(property) for property in properties]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(one, properties))
+
+    return sorted(results, key=lambda row: (row["clicks"], row["impressions"]),
+                 reverse=True)
