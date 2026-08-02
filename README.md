@@ -85,8 +85,7 @@ python -m venv .venv
 
 Stated plainly, because they are the things a reviewer should look at first:
 
-- The POSIX file-permission tests have never executed on any platform — they are skipped on Windows and there is no Linux CI leg yet.
-- No test proves `icacls` actually applied an ACL on Windows; the test only observes the call.
+- No test proves `icacls` actually applied an ACL on Windows — the Windows test only observes that the call was made, so `_harden` could no-op there and the suite would stay green. The POSIX equivalents now execute on Linux and macOS on every push, so this gap is Windows-only.
 - Nothing has authenticated against a real Google account. Every OAuth path is tested against fakes.
 - Google OAuth verification for the sensitive `webmasters` scope has not started.
 

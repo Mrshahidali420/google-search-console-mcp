@@ -6,8 +6,7 @@ Contributions are welcome from anyone — open an issue, open a pull request, or
 
 The [Known gaps](README.md#known-gaps) section of the README is the honest list of what is weakest right now. In particular:
 
-- **A Linux CI leg.** Two file-permission tests are skipped on Windows and have therefore never run anywhere. Getting them to execute is the single highest-value contribution available today.
-- **A Windows CI leg with an ACL read-back.** The current test observes that `icacls` was called; it cannot tell a real ACL from a no-op.
+- **A Windows ACL read-back test.** This is the highest-value contribution available today. `_harden` shells out to `icacls` on Windows, but the only test watches for the call — it cannot tell a real ACL from a complete no-op. A test that writes a token, reads the resulting ACL back, and asserts that no account beyond the owner has read access would close the last permission gap. CI already runs Windows jobs, so it would be enforced from the day it lands.
 - **Documentation.** If something in the README confused you, that is a bug in the README.
 
 ## Setup
