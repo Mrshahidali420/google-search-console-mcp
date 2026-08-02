@@ -23,9 +23,28 @@ def test_load_ignores_a_corrupt_file(tmp_path):
 
 
 def test_defaults_carry_no_client_data():
+    """The one constraint that decides whether this repo is safe to publish.
+
+    A denylist of previously-seen strings only catches what already leaked, so
+    this matches the *shapes* client data takes: addresses, absolute paths from
+    a developer machine, and long opaque resource identifiers.
+    """
+    import re
+
     serialized = json.dumps(config.DEFAULTS)
-    assert "gmail.com" not in serialized
-    assert "C:\\\\Users" not in serialized
+    forbidden = {
+        "email address": r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}",
+        "Windows path": r"[A-Za-z]:\\\\",
+        "POSIX home path": r"/(?:home|Users)/\w+",
+        "long opaque id": r"[A-Za-z0-9_-]{30,}",
+    }
+    for label, pattern in forbidden.items():
+        assert not re.search(pattern, serialized), (
+            f"DEFAULTS appears to contain a {label}: {serialized}"
+        )
+
+    # Sites come from the Search Console API, never from config — a sites key
+    # would mean per-client data had been reintroduced here.
     assert "sites" not in config.DEFAULTS
 
 
