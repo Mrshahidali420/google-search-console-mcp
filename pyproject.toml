@@ -5,13 +5,46 @@ build-backend = "hatchling.build"
 [project]
 name = "gsc-mcp"
 version = "0.1.0"
-description = "Google Search Console MCP server: index status, discovery, submission, and analytics for AI agents"
+description = "Google Search Console MCP server: index status, discovery, request indexing, sitemap submission, and search analytics for Claude and other AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
+authors = [{ name = "Shahid Ali" }]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "google-search-console",
+    "search-console",
+    "gsc",
+    "seo",
+    "indexing",
+    "url-inspection",
+    "sitemap",
+    "search-analytics",
+    "claude",
+    "ai-agents",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "requests>=2.31",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Mrshahidali420/google-search-console-mcp"
+Repository = "https://github.com/Mrshahidali420/google-search-console-mcp"
+Issues = "https://github.com/Mrshahidali420/google-search-console-mcp/issues"
 
 [project.optional-dependencies]
 # pytest 9.1 is the floor, not 8.x: the runlog tests rely on caplog attaching
