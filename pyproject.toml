@@ -56,3 +56,4 @@ packages = ["src/gsc_core"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
