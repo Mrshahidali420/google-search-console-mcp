@@ -21,6 +21,10 @@ from gsc_mcp import tools_browsers
 
 ACCOUNT = "authorised@example.com"
 OTHER = "someone-else@example.net"
+# A profile LABEL that is itself an address — Chrome does this. It is a
+# third leak route, distinct from the two addresses above, and the privacy
+# assertions below check all three rather than only the obvious one.
+LABELLED = "labelled@example.org"
 
 
 def _installed(brand_key):
@@ -48,7 +52,16 @@ def survey(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_stored_account(monkeypatch):
-    """No token on disk unless a test says otherwise."""
+    """No token on disk unless a test says otherwise.
+
+    The four tests exercising the REAL _authorised_email() drop this stub
+    with `monkeypatch.undo()`. That reverts every setattr on the shared
+    per-test monkeypatch — including the `survey` fixture's, if it has
+    already run — so each of those tests re-installs its own survey
+    afterwards and none of them calls the `survey` callable first. Keep it
+    that way, or undo() will silently restore the real browser detection
+    and the test will start reading the machine it runs on.
+    """
     monkeypatch.setattr(tools_browsers, "_authorised_email", lambda: None)
 
 
@@ -59,6 +72,20 @@ def _signed_in_account(monkeypatch, address):
 def _blob(result) -> str:
     """Everything the transcript would carry, as one searchable string."""
     return json.dumps(result, default=str)
+
+
+def _every_leak_route():
+    """One survey carrying all three routes an address can escape by.
+
+    A privacy test built on a profile email alone passes while a display
+    name or a redacted reason leaks, so the fixture the log and stdout
+    assertions run against carries every route at once: an address on a
+    profile, the authorised address (which recommend() writes into its own
+    reason string), and a display name that is an address.
+    """
+    return [_candidate("chrome", "Default", ACCOUNT, name=LABELLED),
+            _candidate("chrome", "Profile 2", OTHER),
+            _candidate("brave", "Default", None)]
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +135,101 @@ def test_no_filesystem_path_is_returned(survey):
     assert "a-real-person" not in _blob(tools_browsers.detect_browsers())
 
 
+def test_no_address_reaches_a_log_line(survey, monkeypatch, caplog):
+    """The layers below both carry this assertion; the one layer whose
+    output actually leaves the process must not be the exception.
+
+    Paired with the failure test below, which proves capture is live —
+    without it a negative assertion over an empty caplog passes vacuously.
+    """
+    _signed_in_account(monkeypatch, ACCOUNT)
+    survey(_every_leak_route())
+    with caplog.at_level("DEBUG"):
+        tools_browsers.detect_browsers()
+    for address in (ACCOUNT, OTHER, LABELLED):
+        assert address not in caplog.text
+    for domain in ("example.com", "example.net", "example.org"):
+        assert domain not in caplog.text
+
+
+def test_a_logged_failure_carries_the_type_name_and_nothing_else(monkeypatch,
+                                                                 caplog):
+    """An OSError's message is a filesystem path holding the operator's
+    account name. Only the exception TYPE may be logged.
+
+    The positive assertion is load-bearing: it proves caplog really is
+    capturing this logger despite runlog setting propagate = False, which
+    is what stops the negative assertions here and above from passing on an
+    empty buffer.
+    """
+    def boom():
+        raise OSError(rf"C:\Users\a-real-person\{OTHER}\State")
+
+    monkeypatch.setattr(profiles, "survey", boom)
+    with caplog.at_level("DEBUG"):
+        tools_browsers.detect_browsers()
+    assert "OSError" in caplog.text
+    assert "a-real-person" not in caplog.text
+    assert OTHER not in caplog.text
+
+
+def test_nothing_is_written_to_stdout(survey, monkeypatch, capsys):
+    """MCP frames JSON-RPC on stdout; one stray byte corrupts the session,
+    and the failure surfaces to a client as an unrelated parse error."""
+    _signed_in_account(monkeypatch, ACCOUNT)
+    survey(_every_leak_route())
+    tools_browsers.detect_browsers()
+    assert capsys.readouterr().out == ""
+
+
+def test_nothing_is_written_to_stdout_on_the_failure_path(monkeypatch, capsys):
+    def boom():
+        raise OSError("state unreadable")
+
+    monkeypatch.setattr(profiles, "survey", boom)
+    tools_browsers.detect_browsers()
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Per-browser context: every entry has to stand on its own
+# ---------------------------------------------------------------------------
+
+def test_each_entry_carries_its_brands_extensions_url(survey, monkeypatch):
+    """A static per-brand constant with no privacy cost, and the exact
+    string Task 8 needs to tell a user where to install the pairing
+    extension. It ships now for the same reason has_extension does: adding
+    it later mutates a shape Tasks 9 and 10 already consume.
+
+    Pinned per brand, because the failure worth catching is not a missing
+    key — it is chrome://extensions handed to a Brave user, which simply
+    does not open.
+    """
+    _signed_in_account(monkeypatch, ACCOUNT)
+    survey([_candidate("chrome", "Default", None),
+            _candidate("brave", "Default", None),
+            _candidate("vivaldi", "Default", None)])
+    listed = {entry["browser_key"]: entry["extensions_url"]
+              for entry in tools_browsers.detect_browsers()["profiles"]}
+    assert listed == {"chrome": "chrome://extensions",
+                      "brave": "brave://extensions",
+                      "vivaldi": "vivaldi://extensions"}
+
+
+def test_the_extensions_url_comes_from_the_brand_not_a_local_table(survey,
+                                                                   monkeypatch):
+    """Deriving the URL here rather than reading Brand.extensions_url is
+    the re-derive-at-the-call-site defect browsers.py exists to prevent —
+    Chromium is the case that catches it, since it registers no
+    chromium:// scheme and genuinely uses chrome://extensions.
+    """
+    _signed_in_account(monkeypatch, ACCOUNT)
+    survey([_candidate("chromium", "Default", None)])
+    entry = tools_browsers.detect_browsers()["profiles"][0]
+    assert entry["extensions_url"] == browsers.BRANDS["chromium"].extensions_url
+    assert entry["extensions_url"] == "chrome://extensions"
+
+
 # ---------------------------------------------------------------------------
 # The recommendation comes from profiles.recommend, and only from there
 # ---------------------------------------------------------------------------
@@ -150,11 +272,25 @@ def test_profile_order_is_the_surveys_order_not_a_resort(survey, monkeypatch):
                       ("brave", "Default")]
 
 
-def test_two_identical_calls_return_identical_results(survey, monkeypatch):
+def test_two_calls_over_freshly_built_candidates_agree(monkeypatch):
+    """Rebuilt objects every call, not the same list twice.
+
+    Comparing one survey against itself restates dict construction and
+    kills nothing. Building fresh Candidates each call is what exercises
+    the real risk in `recommended`: it is decided by object IDENTITY
+    against what recommend() returned, so an implementation that cached a
+    winner, or compared against a survey it did not just take, flips the
+    flag on the second call while the first still looks right.
+    """
     _signed_in_account(monkeypatch, ACCOUNT)
-    survey([_candidate("chrome", "Profile 1", None),
-            _candidate("chrome", "Profile 2", None)])
-    assert tools_browsers.detect_browsers() == tools_browsers.detect_browsers()
+    monkeypatch.setattr(profiles, "survey",
+                        lambda: [_candidate("chrome", "Profile 1", None),
+                                 _candidate("chrome", "Profile 2", ACCOUNT),
+                                 _candidate("brave", "Default", None)])
+    first = tools_browsers.detect_browsers()
+    second = tools_browsers.detect_browsers()
+    assert first == second
+    assert [entry["recommended"] for entry in first["profiles"]].count(True) == 1
 
 
 # ---------------------------------------------------------------------------

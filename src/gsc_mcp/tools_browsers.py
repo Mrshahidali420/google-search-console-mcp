@@ -34,9 +34,10 @@ So NO ADDRESS IS RETURNED, in either direction:
     account name on every supported OS, and brand + profile directory is
     what identifies a profile to a human anyway.
 
-What the transcript does contain: a brand label, a profile directory name,
-a display name, three booleans about the account, a `has_extension`
-placeholder, and prose reasons with no identifier in them. `matches_authorised_account` is what makes that
+What the transcript does contain: a brand label, a brand key, the brand's
+static extensions URL, a profile directory name, a display name, three
+booleans about the account, a `has_extension` placeholder, and prose
+reasons with no identifier in them. `matches_authorised_account` is what makes that
 sufficient — it is the useful half of knowing the address, without the
 address.
 
@@ -122,6 +123,16 @@ def _entry(candidate: profiles.Candidate, best: profiles.Candidate | None,
     return {
         "browser": brand.label,
         "browser_key": brand.key,
+        # Read off the Brand, never rebuilt from the key: Chromium registers
+        # no chromium:// scheme and genuinely uses chrome://extensions, so a
+        # derived f"{key}://extensions" produces a URL that does not open.
+        # Static, per-brand, no privacy cost — and the string Task 8 needs to
+        # tell a user where to install the pairing extension. It ships now for
+        # the same reason has_extension does: the entries below are a flat
+        # list with no browser object above them, so each one has to carry
+        # its own brand context, and adding it later would mutate a shape
+        # Tasks 9 and 10 already consume.
+        "extensions_url": brand.extensions_url,
         "profile": profile.directory,
         "display_name": _safe_name(profile),
         # "an account was found on disk", not "somebody is logged in": for a

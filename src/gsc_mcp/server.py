@@ -864,9 +864,18 @@ def gsc_detect_browsers() -> dict:
     and its profile directory.
 
     Returns `{"ok": True, "profiles": [...], "recommended": <one of them or
-    None>, "reasons": [...]}`. Each profile is `{"browser", "browser_key",
+    None>, "reasons": [...]}`. `profiles` is a FLAT list across every
+    browser, ranked-flag included, not grouped by browser — the question is
+    which single profile to use, so each entry carries its own brand
+    context (`browser`, `browser_key`, `extensions_url`) and stands alone.
+    Each profile is `{"browser", "browser_key", "extensions_url",
     "profile", "display_name", "signed_in", "account_discoverable",
     "matches_authorised_account", "has_extension", "recommended"}`.
+
+    `extensions_url` is where that browser's extensions page lives
+    (`chrome://extensions`, `brave://extensions`, ...). Use the value given;
+    do not build one from the browser key, since Chromium registers no
+    chromium:// scheme and uses chrome://extensions.
 
     `has_extension` is ALWAYS null for now — whether the pairing extension
     is installed in a profile is not checked yet. Read null as "not
