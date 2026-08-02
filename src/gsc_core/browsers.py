@@ -33,15 +33,29 @@ log = runlog.get("browsers")
 
 @dataclass(frozen=True)
 class Brand:
+    """One browser, stating its own paths rather than deriving them.
+
+    ``win_vendor`` describes where a brand is *installed*; it deliberately
+    does NOT describe where the brand keeps its *data*. Those two layouts
+    disagree for half the table — Vivaldi installs to
+    ``Vivaldi\\Application`` but stores data in ``Vivaldi\\User Data``, and
+    Opera stores under Roaming rather than Local. Deriving one from the
+    other is the same "re-derive it at the call site" mistake this module
+    exists to prevent, so every path is stated per brand and sourced.
+    """
+
     key: str
     label: str
     exe_name: str
     extensions_url: str
     win_vendor: tuple[str, str]       # (Vendor, Product) under ProgramFiles
+    win_data_dir: tuple[str, str]     # (environment variable, subpath)
     mac_bundle_id: str
     mac_app_name: str
+    mac_data_dir: str                 # subpath under Application Support
     linux_binaries: tuple[str, ...]
     linux_config_dir: str
+    flatpak_id: str | None            # None where the brand ships no flatpak
 
 
 @dataclass(frozen=True)
@@ -51,48 +65,87 @@ class Installed:
     user_data_dir: str
 
 
+# Sources for the path and id values below (checked 2026-08-02):
+#   Chrome, Chromium — all three platforms, plus the fact that Chromium on
+#     Windows is %LOCALAPPDATA%\Chromium\User Data with no "Application"
+#     segment: Chromium's own docs/user_data_dir.md.
+#   Brave — brave/brave-browser issue tracker, macOS profile path.
+#   Edge — learn.microsoft.com Edge policy docs (UserDataDir).
+#   Vivaldi — help.vivaldi.com, profile locations for all three platforms.
+#   Opera — forums.opera.com; Opera is the outlier that stores under
+#     Roaming (%APPDATA%) rather than Local, and has no "User Data" segment.
+#   flatpak_id — every id below was confirmed against Flathub's appstream
+#     API (flathub.org/api/v2/appstream/<id>) returning a live, non-EOL app
+#     whose name matches the brand.
 BRANDS: dict[str, Brand] = {
     "chrome": Brand(
         key="chrome", label="Google Chrome", exe_name="chrome.exe",
         extensions_url="chrome://extensions",
         win_vendor=("Google", "Chrome"),
+        win_data_dir=("LOCALAPPDATA", "Google/Chrome/User Data"),
         mac_bundle_id="com.google.Chrome", mac_app_name="Google Chrome",
+        mac_data_dir="Google/Chrome",
         linux_binaries=("google-chrome", "google-chrome-stable"),
-        linux_config_dir="google-chrome"),
+        linux_config_dir="google-chrome",
+        flatpak_id="com.google.Chrome"),
     "brave": Brand(
         key="brave", label="Brave", exe_name="brave.exe",
         extensions_url="brave://extensions",
         win_vendor=("BraveSoftware", "Brave-Browser"),
+        win_data_dir=("LOCALAPPDATA", "BraveSoftware/Brave-Browser/User Data"),
         mac_bundle_id="com.brave.Browser", mac_app_name="Brave Browser",
+        mac_data_dir="BraveSoftware/Brave-Browser",
         linux_binaries=("brave-browser", "brave"),
-        linux_config_dir="BraveSoftware/Brave-Browser"),
+        linux_config_dir="BraveSoftware/Brave-Browser",
+        flatpak_id="com.brave.Browser"),
     "edge": Brand(
         key="edge", label="Microsoft Edge", exe_name="msedge.exe",
         extensions_url="edge://extensions",
         win_vendor=("Microsoft", "Edge"),
+        win_data_dir=("LOCALAPPDATA", "Microsoft/Edge/User Data"),
         mac_bundle_id="com.microsoft.edgemac", mac_app_name="Microsoft Edge",
+        # One segment on macOS, unlike the two-segment Windows layout.
+        mac_data_dir="Microsoft Edge",
         linux_binaries=("microsoft-edge", "microsoft-edge-stable"),
-        linux_config_dir="microsoft-edge"),
+        linux_config_dir="microsoft-edge",
+        # NOT the mac bundle id: that is com.microsoft.edgemac.
+        flatpak_id="com.microsoft.Edge"),
     "vivaldi": Brand(
         key="vivaldi", label="Vivaldi", exe_name="vivaldi.exe",
         extensions_url="vivaldi://extensions",
         win_vendor=("Vivaldi", "Application"),
+        # Installs under Vivaldi\Application, stores under Vivaldi\User Data.
+        win_data_dir=("LOCALAPPDATA", "Vivaldi/User Data"),
         mac_bundle_id="com.vivaldi.Vivaldi", mac_app_name="Vivaldi",
+        mac_data_dir="Vivaldi",
         linux_binaries=("vivaldi", "vivaldi-stable"),
-        linux_config_dir="vivaldi"),
+        linux_config_dir="vivaldi",
+        flatpak_id="com.vivaldi.Vivaldi"),
     "opera": Brand(
         key="opera", label="Opera", exe_name="opera.exe",
         extensions_url="opera://extensions",
         win_vendor=("Programs", "Opera"),
+        # The one brand under Roaming, and with no "User Data" segment.
+        win_data_dir=("APPDATA", "Opera Software/Opera Stable"),
         mac_bundle_id="com.operasoftware.Opera", mac_app_name="Opera",
-        linux_binaries=("opera",), linux_config_dir="opera"),
+        mac_data_dir="com.operasoftware.Opera",
+        linux_binaries=("opera",), linux_config_dir="opera",
+        # NOT the mac bundle id: that is com.operasoftware.Opera.
+        flatpak_id="com.opera.Opera"),
     "chromium": Brand(
         key="chromium", label="Chromium", exe_name="chrome.exe",
+        # Chromium registers no chromium:// scheme — chrome://extensions is
+        # genuinely its own page. Do not "fix" this into a distinct-looking
+        # chromium://extensions: that URL simply fails to open.
         extensions_url="chrome://extensions",
         win_vendor=("Chromium", "Application"),
+        # No vendor segment and no "Application" segment, unlike Chrome.
+        win_data_dir=("LOCALAPPDATA", "Chromium/User Data"),
         mac_bundle_id="org.chromium.Chromium", mac_app_name="Chromium",
+        mac_data_dir="Chromium",
         linux_binaries=("chromium", "chromium-browser"),
-        linux_config_dir="chromium"),
+        linux_config_dir="chromium",
+        flatpak_id="org.chromium.Chromium"),
 }
 
 # chrome.exe is claimed by two brands. Where an executable name is shared,
@@ -138,14 +191,18 @@ def user_data_dir(brand: Brand) -> str:
     A location only: the directory is not created and may not exist, which
     is exactly how "installed but never launched" is told apart later.
     """
-    vendor, product = brand.win_vendor
     if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA")
-        root = Path(base) if base else Path.home() / "AppData" / "Local"
-        return str(root / vendor / product / "User Data")
+        env_name, subpath = brand.win_data_dir
+        base = os.environ.get(env_name)
+        if base:
+            root = Path(base)
+        else:
+            leaf = "Local" if env_name == "LOCALAPPDATA" else "Roaming"
+            root = Path.home() / "AppData" / leaf
+        return str(root.joinpath(*subpath.split("/")))
     if sys.platform == "darwin":
         root = Path.home() / "Library" / "Application Support"
-        return str(root / vendor / product)
+        return str(root.joinpath(*brand.mac_data_dir.split("/")))
     base = os.environ.get("XDG_CONFIG_HOME")
     root = Path(base) if base else Path.home() / ".config"
     return str(root.joinpath(*brand.linux_config_dir.split("/")))
@@ -400,11 +457,13 @@ def _parse_exec_value(value: str) -> str | None:
 def _linux_flatpak(brand: Brand) -> tuple[str, str] | None:
     """A flatpak install keeps its config inside the sandbox, not ~/.config.
 
-    Returns (launch command, user data dir) or None. The bundle identifier
-    is reused as the flatpak application id — right for most brands, and a
-    miss only costs a detection, never a wrong answer.
+    Returns (launch command, user data dir) or None. The application id is
+    stated per brand — it is NOT the macOS bundle id, which differs for
+    Edge and Opera.
     """
-    app_dir = Path.home() / ".var" / "app" / brand.mac_bundle_id
+    if not brand.flatpak_id:
+        return None
+    app_dir = Path.home() / ".var" / "app" / brand.flatpak_id
     try:
         if not app_dir.is_dir():
             return None
@@ -415,7 +474,7 @@ def _linux_flatpak(brand: Brand) -> tuple[str, str] | None:
         return None
     config = app_dir / "config"
     data_dir = config.joinpath(*brand.linux_config_dir.split("/"))
-    return f"{flatpak} run {brand.mac_bundle_id}", str(data_dir)
+    return f"{flatpak} run {brand.flatpak_id}", str(data_dir)
 
 
 def _detect_linux() -> list[Installed]:
