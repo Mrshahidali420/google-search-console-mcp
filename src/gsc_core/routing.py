@@ -8,6 +8,15 @@ routing never touches config or the database; it is pure string logic.
 
 Match order, most to least specific:
 
+0. identity — url IS one of properties, verbatim (case-insensitive). This
+   is the only way an sc-domain: property can ever resolve against
+   itself: "sc-domain:example.com" is not a URL, so host_of() reads the
+   colon as a port separator and produces the nonsense host "sc-domain",
+   failing every step below. A URL-prefix property mostly survives that
+   round trip by accident (its host_of() output usually still matches
+   itself), which is what made the gap easy to miss before this step
+   existed. Purely additive: it only ever short-circuits an exact match,
+   so it cannot change the outcome for a real page URL passed as `url`.
 1. exact host match — a URL-prefix property whose host equals the URL's host
 2. www/non-www toggle — the same, ignoring a leading "www." on either side
 3. sc-domain: property covering the host or any subdomain of it
@@ -49,17 +58,8 @@ def _without_www(host: str) -> str:
 def resolve_property(url: str, properties: list[str]) -> str | None:
     """Return the property string covering url, or None if none does.
 
-    Checks identity first, case-insensitively: is `url` itself one of
-    `properties`, verbatim? This is what lets a caller round-trip the exact
-    string gsc_list_sites() (or this function) already returned. Without
-    it, an sc-domain: property can never resolve against itself at all —
-    "sc-domain:example.com" is not a URL, so host_of() reads the colon as
-    a port separator and produces the nonsense host "sc-domain", which
-    then fails every host-based step below. A URL-prefix property mostly
-    survives that round trip by accident (its host_of() output usually
-    still matches), which made the gap easy to miss. Purely additive: it
-    runs before step 1 and only ever short-circuits an exact match, so it
-    cannot change the outcome for a real page URL.
+    See the module docstring for the full match order — step 0 (identity)
+    runs here first, before host_of() ever sees `url`.
     """
     for prop in properties:
         if prop.lower() == url.lower():

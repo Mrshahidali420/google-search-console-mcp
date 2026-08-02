@@ -86,7 +86,18 @@ class PerfError(RuntimeError):
     """Raised by callers (Task 6) that need a hard failure out of a
     Search Analytics response — this module's own functions raise
     ValueError for bad input instead, since that is a caller mistake, not
-    an API-shaped one; PerfError is for the network layer built on top."""
+    an API-shaped one; PerfError is for the network layer built on top.
+
+    `status` is the HTTP status code when one is known (None for a
+    transport failure, which never got a response to read one from) — a
+    log-safe fact about the failure, unlike `str(self)`, which may carry a
+    truncated response body and must never reach a logger (see
+    portfolio()'s except handler).
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def date_range(days: int = DEFAULT_DAYS, end: str | None = None,
@@ -287,6 +298,7 @@ def post_query(property: str, body: dict, provider: TokenProvider,
     """
     client = session or _session
     uri = QUERY_URI.format(site=quote(property, safe=""))
+    last_status: int | None = None
 
     for attempt in range(max_retries):
         try:
@@ -305,6 +317,8 @@ def post_query(property: str, body: dict, provider: TokenProvider,
         if resp.status_code == 200:
             return resp.json()
 
+        last_status = resp.status_code
+
         if resp.status_code == 401:
             provider.invalidate()
             continue
@@ -313,9 +327,10 @@ def post_query(property: str, body: dict, provider: TokenProvider,
             sleep(2 ** attempt * 2)
             continue
 
-        raise PerfError(f"HTTP {resp.status_code}: {resp.text[:_ERROR_DETAIL_LIMIT]}")
+        raise PerfError(f"HTTP {resp.status_code}: {resp.text[:_ERROR_DETAIL_LIMIT]}",
+                        status=resp.status_code)
 
-    raise PerfError("retries exhausted (rate limited?)")
+    raise PerfError("retries exhausted (rate limited?)", status=last_status)
 
 
 def _paginate(property: str, start_date: str, end_date: str, provider: TokenProvider,
@@ -427,19 +442,20 @@ def totals(site: str, properties: list[str], provider: TokenProvider,
 def hourly(site: str, properties: list[str], provider: TokenProvider,
           hours: int = 24, search_type: str = "web",
           session: requests.Session | None = None,
-          today: date | None = None,
+          now: datetime | None = None,
           sleep: Callable[[float], None] = time.sleep) -> list[dict]:
     """Trailing `hours` of hourly Search Analytics data for `site`.
 
-    `today`, if given, anchors "now" at the END of that date, not its
-    start: production's real `now` is always mid-way through "today", and
-    Google can never return data later than that real moment — the reason
-    filter_hourly_rows' lower-bound-only cutoff is sufficient. Anchoring
-    the injected seam to midnight instead would put "now" BEFORE the
-    request's own end_date, so a fixture with data spanning through
-    end_date would clear the lower bound in full and nothing would ever
-    get filtered out. Requesting more than HOURLY_WINDOW_DAYS is rejected
-    outright — Google does not retain hourly data that far back.
+    `now` anchors both the request's calendar span and the trailing-window
+    filter, so it is testable without depending on the real clock;
+    production calls leave it unset and get datetime.now(UTC). It has to
+    be a full instant, not a date: production's window rolls across two
+    calendar dates (a 24-hour ask spans, say, yesterday afternoon through
+    this morning) because it is measured from "right now", and a
+    date-only seam cannot express that — it can only ever cover one
+    calendar day, silently returning nothing for any window under 24
+    hours. Requesting more than HOURLY_WINDOW_DAYS is rejected outright —
+    Google does not retain hourly data that far back.
 
     dimensions/dataState are hardcoded to HOUR/hourly_all rather than going
     through validate_query, which rejects that combination everywhere else
@@ -456,9 +472,8 @@ def hourly(site: str, properties: list[str], provider: TokenProvider,
     if property is None:
         raise PerfError(f"{site!r} matches no Search Console property")
 
-    now = (datetime.combine(today, datetime.max.time(), tzinfo=UTC) if today
-          else datetime.now(UTC))
-    end_date = now.date()
+    moment = now or datetime.now(UTC)
+    end_date = moment.date()
     span_days = min(HOURLY_WINDOW_DAYS, -(-hours // 24) + 1)
     start_date = end_date - timedelta(days=span_days - 1)
 
@@ -467,7 +482,7 @@ def hourly(site: str, properties: list[str], provider: TokenProvider,
                       search_type=search_type, row_limit=MAX_ROW_LIMIT)
     payload = post_query(property, body, provider, session=session, sleep=sleep)
     rows = [normalize_row(row, ["hour"]) for row in payload.get("rows", [])]
-    return filter_hourly_rows(rows, hours, now=now)
+    return filter_hourly_rows(rows, hours, now=moment)
 
 
 def _zero_row(property: str, start_date: str, end_date: str, exc: Exception) -> dict:
@@ -508,12 +523,14 @@ def portfolio(properties: list[str], provider: TokenProvider,
         except (PerfError, ValueError) as exc:
             # Never log `exc` itself: PerfError's message can carry a
             # truncated response body (see post_query), and a body is fine
-            # to return to a caller but must never reach a logger. Only
-            # the property name and exception type go to the log; the
-            # full detail still reaches the caller via the row's "error"
-            # key below, which is not a log sink.
-            log.warning("portfolio: %s failed with %s", property,
-                        type(exc).__name__)
+            # to return to a caller but must never reach a logger. The
+            # property name and the HTTP status (PerfError.status, absent
+            # on a plain ValueError) go to the log instead — enough to
+            # tell a 403 from a 429 without the body. The full detail
+            # still reaches the caller via the row's "error" key below,
+            # which is not a log sink.
+            log.warning("portfolio: %s failed with status %s", property,
+                        getattr(exc, "status", None))
             return _zero_row(property, window_start, window_end, exc)
 
     workers = max(1, min(concurrency, len(properties)))

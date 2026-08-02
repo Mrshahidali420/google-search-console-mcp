@@ -1,5 +1,5 @@
 # tests/test_perf_query.py
-from datetime import date
+from datetime import UTC, datetime
 
 import pytest
 import requests
@@ -49,6 +49,15 @@ def test_non_transient_status_raises_perf_error():
     session = FakeSession(FakeResponse(403, text="denied"))
     with pytest.raises(perf.PerfError, match="403"):
         perf.post_query("sc-domain:example.com", {}, FakeProvider(), session=session)
+
+
+def test_non_transient_status_is_exposed_on_the_error():
+    """PerfError.status is a log-safe fact about the failure — distinct
+    from str(exc), which may carry a truncated response body."""
+    session = FakeSession(FakeResponse(403, text="denied"))
+    with pytest.raises(perf.PerfError) as exc_info:
+        perf.post_query("sc-domain:example.com", {}, FakeProvider(), session=session)
+    assert exc_info.value.status == 403
 
 
 def test_exhausted_retries_raise_perf_error():
@@ -200,9 +209,11 @@ def test_one_failing_property_does_not_sink_the_run():
     assert any(r.get("clicks") == 4 for r in out)
 
 
-def test_portfolio_failure_log_never_carries_the_response_body(caplog):
+def test_portfolio_failure_log_carries_status_but_not_body(caplog):
     """A truncated response body is fine to return to a caller (it lands in
-    the row's "error" key) but must never reach a logger."""
+    the row's "error" key) but must never reach a logger — dropping the
+    status code along with the body would be an over-correction, since a
+    403 and a 429 then read identically in the log."""
     session = FakeSession(
         FakeResponse(403, text="SECRET-BODY-user@example.com quota detail"),
         FakeResponse(200, rows_payload(row(clicks=4))),
@@ -211,6 +222,7 @@ def test_portfolio_failure_log_never_carries_the_response_body(caplog):
         out = perf.portfolio(PROPS, FakeProvider(), session=session, concurrency=1,
                              **WINDOW)
     assert any("SECRET-BODY" in r["error"] for r in out if "error" in r)
+    assert "403" in caplog.text
     assert "SECRET-BODY" not in caplog.text
 
 
@@ -259,7 +271,7 @@ def test_hourly_requests_the_maximum_row_limit():
 def test_hourly_pins_the_calendar_span():
     session = FakeSession(FakeResponse(200, rows_payload()))
     perf.hourly("example.com", PROPS, FakeProvider(), hours=24, session=session,
-               today=date(2020, 1, 15))
+               now=datetime(2020, 1, 15, 12, 0, tzinfo=UTC))
     body = session.calls[0]["json"]
     assert body["startDate"] == "2020-01-14"
     assert body["endDate"] == "2020-01-15"
@@ -269,21 +281,37 @@ def test_hourly_normalizes_rows_under_the_hour_key():
     payload = rows_payload(row(keys=["2020-01-15T10:00:00+00:00"]))
     session = FakeSession(FakeResponse(200, payload))
     out = perf.hourly("example.com", PROPS, FakeProvider(), hours=24, session=session,
-                      today=date(2020, 1, 15))
+                      now=datetime(2020, 1, 15, 12, 0, tzinfo=UTC))
     assert out[0]["hour"] == "2020-01-15T10:00:00+00:00"
 
 
-def test_hourly_filters_to_exactly_the_trailing_window():
-    """48 fixture rows across two full days; the injected `today` seam must
-    anchor "now" at the END of 2020-01-15 so only that day's 24 hours are
-    within a trailing 24-hour window — pins span_days, start_date/end_date,
-    and that filter_hourly_rows is actually called with now=now."""
+def test_hourly_sub_24_hour_window_returns_rows_not_a_whole_calendar_day():
+    """Calendar-day semantics (the reverted bug) anchor "now" at the end of
+    a date and measure the cutoff from there, so any window under 24 hours
+    excludes rows that sit earlier in the day than that artificial cutoff —
+    0 rows, every time. A true rolling window measured from the actual
+    instant `now` keeps them."""
+    now = datetime(2026, 1, 2, 10, 30, tzinfo=UTC)
+    session = FakeSession(FakeResponse(
+        200, rows_payload(row(keys=["2026-01-02T09:00:00+00:00"]))))
+    out = perf.hourly("example.com", PROPS, FakeProvider(), hours=3,
+                      session=session, now=now)
+    assert len(out) == 1
+
+
+def test_hourly_24_hour_window_spans_two_calendar_dates():
+    """Production's rolling 24-hour window crosses midnight; a date-only
+    seam cannot express that at all — this is what proves the seam is a
+    true rolling window and not calendar-day semantics wearing a
+    trailing-window name."""
+    now = datetime(2026, 1, 2, 10, 30, tzinfo=UTC)
     rows = (
-        [row(keys=[f"2020-01-14T{h:02d}:00:00+00:00"]) for h in range(24)]
-        + [row(keys=[f"2020-01-15T{h:02d}:00:00+00:00"]) for h in range(24)]
+        [row(keys=[f"2026-01-01T{h:02d}:00:00+00:00"]) for h in range(24)]
+        + [row(keys=[f"2026-01-02T{h:02d}:00:00+00:00"]) for h in range(11)]
     )
     session = FakeSession(FakeResponse(200, rows_payload(*rows)))
-    out = perf.hourly("example.com", PROPS, FakeProvider(), hours=24, session=session,
-                      today=date(2020, 1, 15))
+    out = perf.hourly("example.com", PROPS, FakeProvider(), hours=24,
+                      session=session, now=now)
+    dates_seen = {r["hour"][:10] for r in out}
     assert len(out) == 24
-    assert all(r["hour"].startswith("2020-01-15") for r in out)
+    assert dates_seen == {"2026-01-01", "2026-01-02"}
