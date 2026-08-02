@@ -22,6 +22,18 @@ def test_load_ignores_a_corrupt_file(tmp_path):
     assert config.load(target) == config.DEFAULTS
 
 
+def test_load_falls_back_when_the_path_is_a_directory(tmp_path):
+    directory = tmp_path / "config.json"
+    directory.mkdir()
+    assert config.load(directory) == config.DEFAULTS
+
+
+def test_load_falls_back_on_undecodable_bytes(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_bytes(b"\xff\xfe\x00\x00not utf-8")
+    assert config.load(target) == config.DEFAULTS
+
+
 def test_defaults_carry_no_client_data():
     """The one constraint that decides whether this repo is safe to publish.
 
@@ -85,10 +97,34 @@ def test_validate_rejects_malformed_delay_range():
             in config.validate(broken))
 
 
+def test_validate_rejects_non_boolean_stop_on_throttle():
+    broken = {**config.DEFAULTS, "stop_on_throttle": "yes"}
+    assert "stop_on_throttle must be true or false" in config.validate(broken)
+
+
+def test_validate_rejects_boolean_slots():
+    """bool subclasses int, so a bare isinstance check would accept true."""
+    broken = {**config.DEFAULTS, "property_slots": True}
+    assert "property_slots must be a positive integer" in config.validate(broken)
+
+
+def test_invalid_slots_does_not_produce_a_fabricated_reserve_message(tmp_path):
+    broken = {**config.DEFAULTS, "property_slots": "foo", "daily_reserve": 99}
+    problems = config.validate(broken)
+    assert "property_slots must be a positive integer" in problems
+    assert not any("must be below property_slots" in p for p in problems)
+
+
 def test_save_then_load_round_trip(tmp_path):
     target = tmp_path / "config.json"
     config.save({**config.DEFAULTS, "inspection_ttl_days": 14}, target)
     assert config.load(target)["inspection_ttl_days"] == 14
+
+
+def test_save_leaves_no_temp_file_behind(tmp_path):
+    target = tmp_path / "config.json"
+    config.save(config.DEFAULTS, target)
+    assert [p.name for p in tmp_path.iterdir()] == ["config.json"]
 
 
 def test_load_does_not_mutate_defaults(tmp_path):
