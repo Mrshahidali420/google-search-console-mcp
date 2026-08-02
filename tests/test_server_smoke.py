@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 
+from mcp import types
 from mcp.shared.memory import create_connected_server_and_client_session
 
 EXPECTED = {
@@ -33,7 +34,7 @@ EXPECTED = {
 NOT_YET_SHIPPED = {"gsc_request_indexing", "gsc_start_indexing_job"}
 
 
-async def _list_tools_over_the_wire():
+async def _list_tools_over_the_wire() -> list[types.Tool]:
     from gsc_mcp import server
 
     async with create_connected_server_and_client_session(server.mcp) as session:
@@ -45,7 +46,11 @@ def test_every_tool_is_registered_and_described(tmp_path, monkeypatch):
     monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
     tools = asyncio.run(_list_tools_over_the_wire())
     names = {tool.name for tool in tools}
-    assert EXPECTED <= names
+    # Equality, not a subset check: the claim this test makes is "exactly
+    # these six tools ship". A subset check (EXPECTED <= names) would pass
+    # even if a seventh, unplanned tool were accidentally registered under
+    # any name that isn't already listed in NOT_YET_SHIPPED below.
+    assert names == EXPECTED
     for tool in tools:
         assert tool.description, f"{tool.name} has no description"
 

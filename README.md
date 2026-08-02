@@ -1,6 +1,6 @@
 # Google Search Console MCP Server
 
-**An MCP server that gives Claude and other AI agents real control over Google Search Console** — check whether a URL is indexed, find the pages Google is ignoring, request indexing, submit sitemaps, and pull search analytics, all from a conversation.
+**An MCP server that gives Claude and other AI agents real control over Google Search Console** — list your properties, check whether a URL is indexed, submit sitemaps, pull search analytics, and diagnose setup problems, all from a conversation.
 
 [![CI](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
@@ -8,7 +8,7 @@
 [![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)](#project-status)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
-> Built for SEO practitioners who are tired of clicking "Request Indexing" 11 times a day, and for the AI agents that can do it for them.
+> Built for SEO practitioners tired of checking index status and submitting sitemaps by hand, one property at a time, and for the AI agents that can do it for them.
 
 ---
 
@@ -93,13 +93,23 @@ Until a verified app ships, every install needs its own:
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a
    project, enable the **Search Console API**, and create an **OAuth 2.0
    Client ID** (Desktop app type).
-2. Set the two environment variables below before starting the server —
-   without them, every tool call returns `{"ok": false, "error":
-   "not_configured", ...}` rather than doing anything:
+2. Set the two environment variables below before starting the server.
+   Without them, any tool that needs to talk to Google returns
+   `{"ok": false, "error": "not_configured", ...}` rather than doing
+   anything — `gsc_list_sites`, `gsc_check_status`, `gsc_performance`, and
+   `gsc_submit_sitemaps` all behave this way. `gsc_doctor` and `gsc_quota`
+   are the two exceptions: `gsc_doctor` still runs and reports
+   `oauth_client: not ok` as one line in its checks list rather than
+   failing outright, which makes it the right first tool to run when
+   something is stuck; `gsc_quota` is local-only and returns `[]` on an
+   empty store regardless of OAuth configuration.
 
 ```bash
 export GSC_MCP_CLIENT_ID="your-client-id.apps.googleusercontent.com"
 export GSC_MCP_CLIENT_SECRET="your-client-secret"
+# Windows PowerShell:
+#   $env:GSC_MCP_CLIENT_ID = "your-client-id.apps.googleusercontent.com"
+#   $env:GSC_MCP_CLIENT_SECRET = "your-client-secret"
 ```
 
 ### Connect it to an MCP client
@@ -157,7 +167,7 @@ Stated plainly, because they are the things a reviewer should look at first:
 - Nothing has authenticated against a real Google account. Every OAuth path is tested against fakes.
 - Google OAuth verification for the sensitive `webmasters` scope has not started.
 - No OAuth client is embedded yet, so users must supply their own Google Cloud credentials (see Install above).
-- `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright (renamed and restructured as `MCPServer`), so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to the new construction API.
+- `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright — confirmed directly against the 2.0 wheel, which has no `fastmcp` module at all — so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to whatever construction API replaced it.
 
 ## Contributing
 
