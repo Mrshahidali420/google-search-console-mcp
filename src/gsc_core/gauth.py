@@ -243,6 +243,12 @@ class TokenProvider:
     leaving the stored credential dead and the user re-authorising. The lock
     turns that into one refresh that the rest wait on and reuse.
 
+    Because the lock is PER-INSTANCE, the guarantee only holds while one
+    instance covers everything that might refresh concurrently. That is
+    what deps.provider() is for: it hands every tool call the same
+    provider rather than a fresh one, since concurrent tool calls are
+    exactly where the rotated-token race lives.
+
     The lock is per-instance and per-process — it does not coordinate with a
     second gsc-mcp process sharing the token file. That is a narrower race
     (save_token() is already atomic via os.replace) and closing it needs a

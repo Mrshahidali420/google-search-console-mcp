@@ -1,21 +1,28 @@
-"""Per-tool-call dependencies for the MCP server.
+"""Dependencies for the MCP server's tools. The two are shared DIFFERENTLY,
+and each way round is load-bearing.
 
-Every gsc_* tool builds its own TokenProvider and opens its own database
-connection through this module rather than sharing a module-level instance
-of either. That is not a style preference: store.tx()'s re-entrancy is
+A DATABASE CONNECTION IS PER CALL. store.tx()'s re-entrancy is
 CONNECTION-scoped, not task-scoped (see its docstring), so two concurrent
 tool calls sharing one connection would silently nest transactions and the
-inner RELEASE would not durably commit. Giving each call its own connection
-via connection() below is what keeps that hazard out of the picture.
+inner RELEASE would not durably commit. connection() below gives each call
+its own, which keeps that hazard out of the picture.
+
+A TOKEN PROVIDER IS SHARED. TokenProvider's refresh lock is per-instance,
+and the race it exists to stop — concurrent refreshes each spending a
+refresh token Google rotates on use — happens BETWEEN tool calls. A
+per-call provider would leave that lock guarding nothing at exactly the
+point the threat lives. provider() below therefore caches, keyed by the
+credentials and token path it was built from.
 """
 from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from typing import Iterator
 
-from gsc_core import gauth, store
+from gsc_core import gauth, paths, store
 
 CLIENT_ID_ENV = "GSC_MCP_CLIENT_ID"
 CLIENT_SECRET_ENV = "GSC_MCP_CLIENT_SECRET"
@@ -60,17 +67,44 @@ def oauth_client() -> tuple[str, str]:
     return client_id, client_secret
 
 
-def provider() -> gauth.TokenProvider:
-    """A fresh TokenProvider for one tool call.
+_provider_lock = threading.Lock()
+_providers: dict[tuple[str, str, str], gauth.TokenProvider] = {}
 
-    Not cached or shared across calls — TokenProvider itself is cheap to
-    construct (it just remembers the client id/secret/path) and its own
-    single-flight lock is per-instance, so nothing is gained by reusing one
-    across unrelated tool invocations, while a shared instance would be one
-    more piece of state a concurrent server would have to reason about.
+
+def provider() -> gauth.TokenProvider:
+    """The TokenProvider for this client and token file, SHARED across calls.
+
+    Unlike connection(), which must be per-call, this must NOT be: it is
+    the opposite hazard. TokenProvider's single-flight lock is
+    per-instance, and the race it exists to stop lives between concurrent
+    TOOL CALLS — Google rotates the refresh token on use, so N providers
+    refreshing at once each spend the same refresh token and the losers
+    persist one Google has already retired, leaving the stored credential
+    dead and the user re-authorising. Constructing one per call left that
+    lock guarding nothing at exactly the point the threat exists. Proven:
+    one shared provider under five concurrent access_token() calls issues
+    one refresh; five fresh ones issue five.
+
+    Cached by (client_id, client_secret, token path) rather than in a
+    plain module-level singleton, because oauth_client() and
+    paths.token_path() both read environment variables the test suite
+    monkeypatches — a singleton would hand a test the provider a previous
+    test built against a different client or a different token file. Keying
+    on what the provider was actually built from means a changed
+    environment gets a new provider and an unchanged one gets the same
+    instance, which is the whole point.
+
+    The cache is bounded by the number of distinct credential/path
+    combinations a process sees: exactly one in production.
     """
     client_id, client_secret = oauth_client()
-    return gauth.TokenProvider(client_id, client_secret)
+    key = (client_id, client_secret, str(paths.token_path()))
+    with _provider_lock:
+        existing = _providers.get(key)
+        if existing is None:
+            existing = gauth.TokenProvider(client_id, client_secret)
+            _providers[key] = existing
+        return existing
 
 
 @contextmanager

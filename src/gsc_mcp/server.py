@@ -13,8 +13,9 @@ downstream has a chance to reach for the true root logger before this
 module's own logging is nailed down.
 
 Every tool below opens its own database connection via `deps.connection()`
-and builds its own TokenProvider via `deps.provider()` — see deps.py's
-docstring for why a shared connection or provider is unsafe here. Tools
+and gets the shared TokenProvider via `deps.provider()` — see deps.py's
+docstring for why the connection must not be shared and why the provider
+must be. Tools
 return plain dicts/lists and never let an exception cross the MCP
 boundary: a raised exception is far less useful to a calling model than a
 structured `{"ok": False, "error": ..., "fix": ...}` it can act on.
@@ -46,6 +47,49 @@ _FIX_PROPERTIES = (
     "This account has no Search Console properties, or the token lacks "
     "the webmasters scope."
 )
+_FIX_API = (
+    "Search Console refused the call. Run gsc_doctor, and confirm the "
+    "signed-in account can see this property in Search Console."
+)
+_FIX_UNEXPECTED = (
+    "Something failed unexpectedly. Run gsc_doctor to check the setup and "
+    "retry; the log file records what happened."
+)
+
+
+def _api_fix(status: int | None) -> str:
+    """403 is almost always a missing webmasters scope or a property this
+    account cannot read, and that has a more useful next step than the
+    generic one."""
+    return _FIX_PROPERTIES if status == 403 else _FIX_API
+
+
+def _api_error(tool: str, exc: api.ApiError) -> dict:
+    log.warning("%s: Search Console returned HTTP %s", tool, exc.status)
+    return {"ok": False, "error": "api_error", "status": exc.status,
+            "fix": _api_fix(exc.status)}
+
+
+def _unexpected(tool: str, exc: Exception) -> dict:
+    """The catch-all that keeps the {ok, error, fix} contract whole.
+
+    Without this an unmodelled failure — an expired token meeting a
+    transiently failing token endpoint raises a plain RuntimeError out of
+    the eager probe in gsc_check_status, for one — escapes the tool.
+    FastMCP does turn that into `isError: true` rather than killing the
+    session, but the caller loses the structured `fix` this module
+    promises, and gets a stringified exception to parse instead.
+
+    Only the exception's TYPE NAME is recorded, never its message, for the
+    same reason gsc_doctor does the same: a message here can carry a
+    truncated response body (perf.PerfError does exactly that), a
+    credentialed URL, or a bearer token. That is fine to return to the
+    caller from the one place that already does it deliberately; it is not
+    fine in a log file.
+    """
+    log.warning("%s: unexpected %s", tool, type(exc).__name__)
+    return {"ok": False, "error": "unexpected", "detail": type(exc).__name__,
+            "fix": _FIX_UNEXPECTED}
 
 
 def _host_of_property(site_url: str) -> str:
@@ -80,7 +124,11 @@ def gsc_list_sites() -> list[dict] | dict:
     raising; if no OAuth client is configured at all, returns
     `{"ok": False, "error": "not_configured", "fix": ...}` instead — in
     either case the caller can surface `fix` directly rather than parsing
-    an exception.
+    an exception. A Search Console error returns `{"ok": False, "error":
+    "api_error", "status": <http status>, "fix": ...}`, and anything else
+    `{"ok": False, "error": "unexpected", "detail": <exception type>,
+    "fix": ...}`. An EMPTY LIST therefore means what it says — this
+    account really has no properties — and never a call that was refused.
 
     Does not fetch sitemaps, index status, or search analytics; see
     gsc_doctor, gsc_check_status, and gsc_performance for those. A
@@ -90,6 +138,26 @@ def gsc_list_sites() -> list[dict] | dict:
     """
     try:
         properties = api.list_properties(deps.provider())
+
+        sites: list[dict] = []
+        with deps.connection() as conn:
+            # Read what each property already has BEFORE upserting: the
+            # upsert below always writes what we pass as sitemaps, so a prior
+            # gsc_submit_sitemaps() result has to be looked up and carried
+            # forward explicitly here or it is overwritten with [] on every
+            # refresh — see the docstring above and gsc_submit_sitemaps
+            # (Task 9), which relies on this list surviving a routine
+            # gsc_list_sites call.
+            known_sitemaps = {site["property"]: site["sitemaps"]
+                              for site in store.get_sites(conn)}
+            for entry in properties:
+                site_url = entry.get("siteUrl", "")
+                permission = entry.get("permissionLevel")
+                host = _host_of_property(site_url)
+                sitemaps = known_sitemaps.get(site_url, [])
+                store.upsert_site(conn, site_url, host, permission, sitemaps)
+                sites.append({"property": site_url, "host": host,
+                              "permission": permission})
     except deps.NotConfigured:
         log.info("gsc_list_sites: no OAuth client configured; "
                  "reporting not_configured")
@@ -97,25 +165,10 @@ def gsc_list_sites() -> list[dict] | dict:
     except gauth.AuthRequired:
         log.info("gsc_list_sites: no usable token; reporting auth_required")
         return _auth_required()
-
-    sites: list[dict] = []
-    with deps.connection() as conn:
-        # Read what each property already has BEFORE upserting: the
-        # upsert below always writes what we pass as sitemaps, so a prior
-        # gsc_submit_sitemaps() result has to be looked up and carried
-        # forward explicitly here or it is overwritten with [] on every
-        # refresh — see the docstring above and gsc_submit_sitemaps (Task 9),
-        # which relies on this list surviving a routine gsc_list_sites call.
-        known_sitemaps = {site["property"]: site["sitemaps"]
-                          for site in store.get_sites(conn)}
-        for entry in properties:
-            site_url = entry.get("siteUrl", "")
-            permission = entry.get("permissionLevel")
-            host = _host_of_property(site_url)
-            sitemaps = known_sitemaps.get(site_url, [])
-            store.upsert_site(conn, site_url, host, permission, sitemaps)
-            sites.append({"property": site_url, "host": host,
-                          "permission": permission})
+    except api.ApiError as exc:
+        return _api_error("gsc_list_sites", exc)
+    except Exception as exc:  # noqa: BLE001 — see _unexpected
+        return _unexpected("gsc_list_sites", exc)
 
     return sorted(sites, key=lambda site: site["property"])
 
@@ -192,6 +245,14 @@ def _check_properties() -> dict:
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,
                 "fix": _FIX_OAUTH_CLIENT}
+    except gauth.AuthRequired as exc:
+        # Distinct from the generic branch below: "the token was rejected"
+        # and "you may be missing a scope" have different next steps, and
+        # api.list_properties now separates the two rather than reporting
+        # a refused call as an account with no properties.
+        log.warning("doctor: %s check raised %s", name, type(exc).__name__)
+        return {"name": name, "ok": False, "detail": type(exc).__name__,
+                "fix": _FIX_TOKEN}
     except Exception as exc:  # noqa: BLE001 — see gsc_doctor docstring
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,
@@ -338,6 +399,15 @@ def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
     except gauth.AuthRequired:
         log.info("gsc_check_status: no usable token; reporting auth_required")
         return _auth_required()
+    except api.ApiError as exc:
+        return _api_error("gsc_check_status", exc)
+    except Exception as exc:  # noqa: BLE001 — see _unexpected
+        # The eager probe above raises a plain RuntimeError when a stored
+        # token is expired AND Google's token endpoint is transiently
+        # failing — neither NotConfigured nor AuthRequired. Without this
+        # branch that leaves the tool via FastMCP as an isError with no
+        # structured fix attached.
+        return _unexpected("gsc_check_status", exc)
 
 
 def _submission_report(
@@ -380,7 +450,7 @@ def _quota_binding(verdict: quota.QuotaVerdict,
 
 
 @mcp.tool()
-def gsc_quota() -> list[dict]:
+def gsc_quota() -> list[dict] | dict:
     """Report Request-Indexing and URL Inspection budget for every property
     the store currently knows about.
 
@@ -415,31 +485,34 @@ def gsc_quota() -> list[dict]:
     "inspection_daily", or "inspection_minute" — or None when every budget
     has headroom.
     """
-    settings = config.load()
-    property_slots = settings["property_slots"]
-    daily_reserve = settings["daily_reserve"]
-    moment = datetime.now(UTC)
+    try:
+        settings = config.load()
+        property_slots = settings["property_slots"]
+        daily_reserve = settings["daily_reserve"]
+        moment = datetime.now(UTC)
 
-    report: list[dict] = []
-    with deps.connection() as conn:
-        for site in store.get_sites(conn):
-            property = site["property"]
-            verdict, submission = _submission_report(
-                conn, property, property_slots, daily_reserve, moment)
-            inspection_verdict = quota.inspection_check(
-                conn, property, wanted=1, now=moment)
-            inspection = {
-                "daily_free": inspection_verdict.daily_free,
-                "minute_free": inspection_verdict.minute_free,
-                "daily_limit": quota.DAILY_INSPECTION_LIMIT,
-                "minute_limit": quota.MINUTE_INSPECTION_LIMIT,
-            }
-            report.append({
-                "property": property,
-                "submission": submission,
-                "inspection": inspection,
-                "binding": _quota_binding(verdict, inspection_verdict),
-            })
+        report: list[dict] = []
+        with deps.connection() as conn:
+            for site in store.get_sites(conn):
+                property = site["property"]
+                verdict, submission = _submission_report(
+                    conn, property, property_slots, daily_reserve, moment)
+                inspection_verdict = quota.inspection_check(
+                    conn, property, wanted=1, now=moment)
+                inspection = {
+                    "daily_free": inspection_verdict.daily_free,
+                    "minute_free": inspection_verdict.minute_free,
+                    "daily_limit": quota.DAILY_INSPECTION_LIMIT,
+                    "minute_limit": quota.MINUTE_INSPECTION_LIMIT,
+                }
+                report.append({
+                    "property": property,
+                    "submission": submission,
+                    "inspection": inspection,
+                    "binding": _quota_binding(verdict, inspection_verdict),
+                })
+    except Exception as exc:  # noqa: BLE001 — see _unexpected
+        return _unexpected("gsc_quota", exc)
     return report
 
 
@@ -556,6 +629,8 @@ def gsc_performance(
         return _auth_required()
     except (perf.PerfError, ValueError) as exc:
         return {"ok": False, **window, "note": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — see _unexpected
+        return {**_unexpected("gsc_performance", exc), **window}
 
     return result
 
@@ -568,6 +643,40 @@ def _merge_sitemaps(existing: list[str], newly_submitted: list[str]) -> list[str
         if sitemap_url not in merged:
             merged.append(sitemap_url)
     return merged
+
+
+def _record_submitted(conn: sqlite3.Connection, snapshot: list[dict],
+                      succeeded: dict[str, list[str]]) -> None:
+    """Merge newly-submitted sitemaps into `sites`, re-reading CURRENT state.
+
+    The caller read its `snapshot` before making N slow network calls.
+    Merging against that snapshot is a read-modify-write with the whole
+    round trip sitting inside it, and upsert_site REPLACES the sitemaps
+    column outright — so a concurrent gsc_submit_sitemaps that recorded a
+    sitemap in the meantime has its row silently overwritten. The lost
+    sitemap is one Google really did accept, and because a bare
+    gsc_submit_sitemaps() resubmits only what the store knows about, it is
+    never resubmitted again either: permanently absent, with nothing
+    anywhere reporting a failure.
+
+    Re-reading INSIDE the transaction is what closes it. store.tx() issues
+    BEGIN IMMEDIATE, so the write lock is held before the read happens and
+    no other writer can commit between the read and the upserts — the
+    merge is against current state, not against a pre-network snapshot.
+
+    A property missing from the re-read (deleted between the two) falls
+    back to the snapshot's host/permission rather than dropping the
+    submission: re-creating a row for a sitemap Google accepted is the
+    recoverable direction; forgetting it is not.
+    """
+    with store.tx(conn):
+        current = {site["property"]: site for site in store.get_sites(conn)}
+        fallback = {site["property"]: site for site in snapshot}
+        for property, newly_submitted in succeeded.items():
+            site = current.get(property) or fallback[property]
+            store.upsert_site(
+                conn, property, site["host"], site["permission"],
+                _merge_sitemaps(site["sitemaps"], newly_submitted))
 
 
 def _sitemap_targets(
@@ -619,8 +728,20 @@ def gsc_submit_sitemaps(sitemaps: list[str] | None = None) -> dict | list[dict]:
     "error": "auth_required", "fix": ...}` instead of raising, once real
     work is about to start (nothing has been submitted yet at that point);
     if no OAuth client is configured at all, `{"ok": False, "error":
-    "not_configured", "fix": ...}`.
+    "not_configured", "fix": ...}`. Any other failure comes back as
+    `{"ok": False, "error": "unexpected", "detail": <exception type>,
+    "fix": ...}`.
     """
+    try:
+        return _submit_sitemaps(sitemaps)
+    except Exception as exc:  # noqa: BLE001 — see _unexpected
+        return _unexpected("gsc_submit_sitemaps", exc)
+
+
+def _submit_sitemaps(sitemaps: list[str] | None) -> dict | list[dict]:
+    """gsc_submit_sitemaps' body, split out so the tool above is nothing but
+    the {ok, error, fix} guard — the loop below has real work to do and
+    wrapping it in place buried that work two levels deep in a try."""
     with deps.connection() as conn:
         sites = store.get_sites(conn)
         properties = [site["property"] for site in sites]
@@ -663,12 +784,7 @@ def gsc_submit_sitemaps(sitemaps: list[str] | None = None) -> dict | list[dict]:
                 succeeded.setdefault(property, []).append(sitemap_url)
 
         if succeeded:
-            site_by_property = {site["property"]: site for site in sites}
-            for property, newly_submitted in succeeded.items():
-                existing_site = site_by_property[property]
-                merged = _merge_sitemaps(existing_site["sitemaps"], newly_submitted)
-                store.upsert_site(conn, property, existing_site["host"],
-                                  existing_site["permission"], merged)
+            _record_submitted(conn, sites, succeeded)
 
         if auth_failed:
             log.info("gsc_submit_sitemaps: no usable token; reporting "
