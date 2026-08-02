@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>GSC Indexer Bridge — Options</title>
+<style>body{font:14px system-ui;margin:24px;max-width:480px;color:#1b1b1b}
+h2{margin:28px 0 6px;font-size:16px}h2:first-child{margin-top:0}
+label{display:block;margin:12px 0 4px}input{width:100%;padding:6px}
+button{margin-top:12px;padding:8px 16px;cursor:pointer}
+button.primary{background:#1a73e8;color:#fff;border:1px solid #1a73e8;border-radius:4px}
+button.primary:disabled{opacity:.6;cursor:default}
+select{width:100%;padding:6px}
+.hint{color:#555;font-size:12px;line-height:1.5;margin:8px 0 0}
+.state{font-size:15px;margin:6px 0 0;padding:10px 12px;border-radius:6px;
+       background:#f4f4f6;border-left:4px solid #bbb}
+.state.ok{background:#e8f5e9;border-left-color:#2e7d32}
+.state.warn{background:#fff8e1;border-left-color:#f9a825}
+.state.bad{background:#fdecea;border-left-color:#c62828}
+code{background:#f2f2f2;padding:1px 4px;border-radius:3px;word-break:break-all}
+details{margin-top:14px}summary{cursor:pointer;font-size:13px;color:#444}
+.row{display:flex;gap:8px;align-items:center;margin-top:6px}
+.row code{flex:1}</style></head>
+<body>
+
+<h2>Connection</h2>
+<p class="state" id="bridgeState">○ checking…</p>
+<p class="hint" id="diag"></p>
+<button id="pair" class="primary">Connect now</button>
+<span id="pairMsg"></span>
+<p class="hint">Setup is automatic: the extension fetches its own token from the
+tool and reconnects on its own. Press this only if something looks stuck — it
+re-pairs from scratch, which also fixes a token that has gone stale.</p>
+<p class="hint"><strong>The tool only listens while a job is running</strong>, so
+“waiting for the tool” is the normal resting state, not a fault. It connects
+within a second or two of a run starting.</p>
+
+<h2>Observation mode</h2>
+<p class="hint"><strong>Every mode submits by clicking.</strong> These only
+control what is recorded while it happens. The replay path was removed on
+2026-07-25: the submission carries a ~1,100-character argument the page builds
+itself, so it can never be learned by watching traffic.</p>
+<label for="rpcMode">Mode</label>
+<select id="rpcMode">
+  <option value="off">Click only (default)</option>
+  <option value="learn">Learn: click once, record the request</option>
+  <option value="probe">Probe: inspect and record, never submit (no slot)</option>
+</select>
+<p class="hint" id="recipe" style="white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace;">Recipe: none recorded yet.</p>
+<p class="hint">Probe inspects and records without submitting — it costs no quota slot.</p>
+<button id="saveRpc">Save mode</button>
+<button id="forget" type="button">Forget recipe</button>
+<span id="rpcMsg"></span>
+
+<h2>Diagnostics</h2>
+<details>
+  <summary>Extension ID, token and port</summary>
+  <p class="hint">The tool matches this ID against the extension it finds in
+  your browser profile before it hands over a token. If they differ, it is
+  loaded from a different folder.</p>
+  <div class="row"><code id="extId">…</code>
+    <button id="copyId" type="button" style="margin:0">Copy</button></div>
+  <label for="token">Token — filled in automatically; only needed by hand if
+    pairing cannot reach the browser</label>
+  <input id="token" type="text" autocomplete="off">
+  <label for="port">Port</label>
+  <input id="port" type="number" value="8765">
+  <button id="save">Save</button> <span id="msg"></span>
+</details>
+
+<script src="options.js"></script>
+</body></html>

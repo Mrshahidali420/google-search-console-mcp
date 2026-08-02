@@ -59,6 +59,13 @@ Issues = "https://github.com/Mrshahidali420/google-search-console-mcp/issues"
 dev = ["pytest>=9.1", "pytest-cov>=5.0"]
 
 [tool.hatch.build.targets.wheel]
+# The vendored browser extension (src/gsc_mcp/extension/) ships as package
+# data. Hatchling carries non-Python files inside a listed package by default,
+# so no force-include entry is needed: a wheel built from this config was
+# unpacked and confirmed to contain all ten extension files under
+# gsc_mcp/extension/. Re-check that if the build backend is ever changed --
+# a package-data glob that silently matches nothing fails at install time,
+# not in CI.
 packages = ["src/gsc_core", "src/gsc_mcp"]
 
 [tool.pytest.ini_options]

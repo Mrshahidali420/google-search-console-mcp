@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "GSC Indexer Bridge",
+  "version": "1.10.0",
+  "description": "Drives Search Console Request Indexing for the local gsc-indexer tool over a localhost bridge.",
+  "permissions": ["storage", "tabs", "alarms", "debugger"],
+  "host_permissions": ["https://search.google.com/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://search.google.com/search-console*",
+                  "https://search.google.com/u/*/search-console*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://search.google.com/search-console*",
+                  "https://search.google.com/u/*/search-console*"],
+      "js": ["rpc-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "action": { "default_popup": "popup.html" },
+  "options_page": "options.html"
+}
