@@ -197,6 +197,24 @@ def test_matching_is_unknown_when_no_account_has_authorised_yet(survey):
     assert entry["matches_authorised_account"] is None
 
 
+def test_every_profile_carries_the_has_extension_placeholder(survey,
+                                                             monkeypatch):
+    """Task 8 populates has_extension once pairing exists. The key ships
+    NOW, as None, so its type never changes on a consumer: a key added to
+    an already-published shape changes the contract under anything reading
+    it in the meantime. This test is what stops it being deleted as dead
+    weight before Task 8 arrives.
+    """
+    _signed_in_account(monkeypatch, ACCOUNT)
+    survey([_candidate("chrome", "Default", ACCOUNT),
+            _candidate("brave", "Profile 2", None)])
+    result = tools_browsers.detect_browsers()
+    for entry in result["profiles"]:
+        assert "has_extension" in entry
+        assert entry["has_extension"] is None
+    assert result["recommended"]["has_extension"] is None
+
+
 # ---------------------------------------------------------------------------
 # A machine with no browser is an ordinary state, not an error
 # ---------------------------------------------------------------------------

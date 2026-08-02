@@ -866,7 +866,11 @@ def gsc_detect_browsers() -> dict:
     Returns `{"ok": True, "profiles": [...], "recommended": <one of them or
     None>, "reasons": [...]}`. Each profile is `{"browser", "browser_key",
     "profile", "display_name", "signed_in", "account_discoverable",
-    "matches_authorised_account", "recommended"}`.
+    "matches_authorised_account", "has_extension", "recommended"}`.
+
+    `has_extension` is ALWAYS null for now — whether the pairing extension
+    is installed in a profile is not checked yet. Read null as "not
+    checked", never as "not installed".
 
     `signed_in` says a Google account was found in that profile's files.
     `account_discoverable` is a fact about the BRAND: Brave, Vivaldi, Opera

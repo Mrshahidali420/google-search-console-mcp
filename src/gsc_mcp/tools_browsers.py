@@ -35,8 +35,8 @@ So NO ADDRESS IS RETURNED, in either direction:
     what identifies a profile to a human anyway.
 
 What the transcript does contain: a brand label, a profile directory name,
-a display name, three booleans about the account, and prose reasons with no
-identifier in them. `matches_authorised_account` is what makes that
+a display name, three booleans about the account, a `has_extension`
+placeholder, and prose reasons with no identifier in them. `matches_authorised_account` is what makes that
 sufficient — it is the useful half of knowing the address, without the
 address.
 
@@ -130,6 +130,12 @@ def _entry(candidate: profiles.Candidate, best: profiles.Candidate | None,
         "signed_in": bool(profile.email),
         "account_discoverable": brand.reports_google_account,
         "matches_authorised_account": _matches(profile, brand, account_email),
+        # PLACEHOLDER, populated by Task 8 once pairing exists. It ships now,
+        # as None, so its TYPE never changes on a consumer: adding a key to an
+        # already-published shape changes the contract under anything reading
+        # this tool in the meantime. Do not delete it as dead weight — None
+        # here means "not checked yet", which is exactly what is true today.
+        "has_extension": None,
         "recommended": (best is not None
                         and candidate.profile is best.profile
                         and candidate.installed is best.installed),
