@@ -2,6 +2,7 @@
 
 **An MCP server that gives Claude and other AI agents real control over Google Search Console** — check whether a URL is indexed, find the pages Google is ignoring, request indexing, submit sitemaps, and pull search analytics, all from a conversation.
 
+[![CI](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-green)](LICENSE)
 [![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)](#project-status)
