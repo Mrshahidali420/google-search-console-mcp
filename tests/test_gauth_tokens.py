@@ -304,3 +304,59 @@ def test_concurrent_access_token_calls_refresh_exactly_once(tmp_path):
     assert len(session.calls) == 1, "the refresh must be single-flight"
     assert tokens == ["refreshed"] * workers
     assert gauth.load_token(target)["refresh_token"] == "r"
+
+
+# --- the sign-in advice must name something that exists (B5) -----------------
+#
+# Both AuthRequired paths told the user to "run gsc_setup()". No such tool is
+# registered -- it is a Plan 3 entry on the roadmap -- so the one message a
+# signed-out user is guaranteed to see sent them to a dead end. These pin the
+# advice to tools that exist today; a future gsc_setup can update them.
+
+_REAL_TOOLS = {"gsc_doctor", "gsc_list_sites", "gsc_check_status",
+               "gsc_quota", "gsc_performance", "gsc_submit_sitemaps"}
+
+
+def _named_tools(message: str) -> set[str]:
+    import re
+    return set(re.findall(r"gsc_[a-z_]+", message))
+
+
+def test_the_missing_credentials_message_names_only_real_tools(tmp_path):
+    provider = gauth.TokenProvider("cid", "secret",
+                                   token_path=tmp_path / "absent.json")
+    with pytest.raises(gauth.AuthRequired) as caught:
+        provider.access_token()
+    named = _named_tools(str(caught.value))
+    assert named <= _REAL_TOOLS, f"names a tool that does not exist: {named}"
+    assert named, "the message should still point somewhere actionable"
+
+
+def test_the_rejected_credentials_message_names_only_real_tools(tmp_path):
+    target = tmp_path / "token.json"
+    past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    gauth.save_token({"refresh_token": "r", "access_token": "stale",
+                      "expires_at": past}, target)
+    provider = gauth.TokenProvider(
+        "cid", "secret", token_path=target,
+        session=FakeSession({"error": "invalid_grant"}, status=400))
+    with pytest.raises(gauth.AuthRequired) as caught:
+        provider.access_token()
+    named = _named_tools(str(caught.value))
+    assert named <= _REAL_TOOLS, f"names a tool that does not exist: {named}"
+    assert named
+
+
+def test_the_advice_matches_the_tools_the_server_actually_registers():
+    """_REAL_TOOLS above is a hand-written list, and a hand-written list
+    drifts. This pins it to the real registration, so adding gsc_setup for
+    real makes the messages above legal automatically -- and removing a tool
+    the advice names makes them fail."""
+    import inspect
+
+    from gsc_mcp import server
+
+    registered = {name for name, obj in vars(server).items()
+                  if name.startswith("gsc_")
+                  and (inspect.isfunction(obj) or hasattr(obj, "fn"))}
+    assert _REAL_TOOLS == registered

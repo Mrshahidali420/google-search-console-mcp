@@ -198,7 +198,8 @@ def _decode_token_response(response) -> dict:
     if error in _REAUTH_ERRORS:
         raise AuthRequired(
             f"Google rejected the stored credentials ({error}). "
-            "Run gsc_setup() to authorise again."
+            "Authorise again: run gsc_doctor for what is missing, then "
+            "re-run the consent flow."
         )
     detail = body.get("error_description", "")
     raise RuntimeError(
@@ -267,7 +268,9 @@ class TokenProvider:
     def _load(self) -> dict:
         stored = load_token(self._path)
         if not stored or "refresh_token" not in stored:
-            raise AuthRequired("no stored credentials; run gsc_setup()")
+            raise AuthRequired(
+                "No stored credentials. Run gsc_doctor to see what the setup "
+                "is missing, then complete the consent flow to sign in.")
         return stored
 
     def access_token(self) -> str:

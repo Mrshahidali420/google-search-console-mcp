@@ -191,3 +191,59 @@ def test_failed_commit_does_not_poison_the_connection(tmp_path):
     with store.tx(conn):
         conn.execute("INSERT INTO meta (key, value) VALUES ('b', '2')")
     assert conn.execute("SELECT value FROM meta WHERE key='b'").fetchone()["value"] == "2"
+
+
+def _traced(conn) -> list[str]:
+    """Record every statement the connection executes."""
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    return statements
+
+
+def test_a_successful_nested_tx_releases_its_savepoint(tmp_path):
+    """The successful RELEASE was covered by nothing: deleting it leaves the
+    savepoint on the stack, but the OUTER COMMIT still commits everything, so
+    every data-level assertion stays green while savepoints accumulate. Only
+    the statements themselves show it, so this asserts on those.
+
+    api._reserve nests inside batch writes, so a leak here is not theoretical
+    -- one savepoint per property per call, held for the life of the
+    transaction.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    statements = _traced(conn)
+    with store.tx(conn):
+        conn.execute("INSERT INTO meta (key, value) VALUES ('outer', '1')")
+        with store.tx(conn):
+            conn.execute("INSERT INTO meta (key, value) VALUES ('inner', '2')")
+    conn.set_trace_callback(None)
+
+    savepoints = [s for s in statements if s.startswith("SAVEPOINT ")]
+    releases = [s for s in statements if s.startswith("RELEASE ")]
+    assert len(savepoints) == 1
+    assert len(releases) == 1
+    # Same savepoint, and released -- not merely some RELEASE somewhere.
+    assert releases[0].split()[1] == savepoints[0].split()[1]
+    # The success path must not touch the rollback statements at all.
+    assert not [s for s in statements if s.startswith("ROLLBACK")]
+    # And the release happened INSIDE the outer transaction, before COMMIT.
+    assert statements.index(releases[0]) < statements.index("COMMIT")
+
+
+def test_repeated_nested_txs_do_not_stack_savepoints(tmp_path):
+    """Every inner block opens and closes its own savepoint, so N nested
+    blocks produce N savepoints and N releases -- never N and none."""
+    conn = store.connect(tmp_path / "state.db")
+    statements = _traced(conn)
+    with store.tx(conn):
+        for n in range(3):
+            with store.tx(conn):
+                conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)",
+                             (f"k{n}", str(n)))
+    conn.set_trace_callback(None)
+
+    assert len([s for s in statements if s.startswith("SAVEPOINT ")]) == 3
+    assert len([s for s in statements if s.startswith("RELEASE ")]) == 3
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM meta WHERE key LIKE 'k%'").fetchone()["n"] == 3
