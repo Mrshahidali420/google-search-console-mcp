@@ -337,12 +337,16 @@ def _detect_windows() -> list[Installed]:
     for brand in BRANDS.values():
         try:
             exe = _win_registry_exe(brand) or _win_scan_exe(brand)
+            # user_data_dir stays INSIDE the guard: it reads the environment
+            # and can fall through to Path.home(), which raises when no home
+            # can be resolved. Opera is the only brand reading APPDATA, so a
+            # failure there must cost Opera alone, not the other five.
+            if exe:
+                found.append(Installed(brand, exe, user_data_dir(brand)))
         except Exception as exc:  # noqa: BLE001 — one brand must not hide five
             log.debug("windows detection skipped %s (%s)",
                       brand.key, type(exc).__name__)
             continue
-        if exe:
-            found.append(Installed(brand, exe, user_data_dir(brand)))
     return found
 
 

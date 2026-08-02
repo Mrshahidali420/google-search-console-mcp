@@ -310,6 +310,36 @@ def test_one_brands_registry_failure_does_not_hide_the_others(
     assert [i.brand.key for i in found] == ["edge"]
 
 
+def test_one_brands_data_dir_failing_does_not_hide_the_others(
+        monkeypatch, tmp_path):
+    """The per-brand guard must cover the data dir, not just the exe lookup.
+
+    Reproduced the way it actually happens rather than by patching
+    user_data_dir: Opera is the only brand reading APPDATA, so with APPDATA
+    unset it alone falls through to Path.home(). A home directory that
+    cannot be resolved raises RuntimeError there — and that must cost Opera
+    only, not the other five.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    monkeypatch.delenv("APPDATA", raising=False)
+
+    def no_home(cls):
+        raise RuntimeError("home directory cannot be determined")
+
+    monkeypatch.setattr(browsers.Path, "home", classmethod(no_home))
+
+    exes = {key: _fake_exe(tmp_path, key, brand.exe_name)
+            for key, brand in browsers.BRANDS.items()}
+    monkeypatch.setattr(browsers, "_win_registry_exe",
+                        lambda b: str(exes[b.key]))
+    monkeypatch.setattr(browsers, "_win_scan_roots", lambda: [])
+
+    found = [i.brand.key for i in browsers._detect_windows()]
+    assert found == [k for k in browsers.BRANDS if k != "opera"]
+    assert "opera" not in found
+
+
 def test_windows_results_come_back_in_brands_order(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
@@ -357,6 +387,50 @@ def test_macos_finds_an_app_bundle_and_its_binary(monkeypatch, tmp_path):
     assert found[0].exe_path == str(
         app / "Contents" / "MacOS" / brand.mac_app_name)
     assert "Application Support" in found[0].user_data_dir
+
+
+def _raise_for(brand_key, monkeypatch):
+    """Make user_data_dir raise for one brand and behave for the rest."""
+    real = browsers.user_data_dir
+
+    def guarded(brand):
+        if brand.key == brand_key:
+            raise RuntimeError("home directory cannot be determined")
+        return real(brand)
+
+    monkeypatch.setattr(browsers, "user_data_dir", guarded)
+
+
+def test_macos_data_dir_failure_costs_one_brand_only(monkeypatch, tmp_path):
+    """Same guarantee as the Windows case, pinned on the macOS detector."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(browsers.Path, "home", classmethod(lambda cls: tmp_path))
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    for brand in browsers.BRANDS.values():
+        _fake_app(apps, brand)
+    monkeypatch.setattr(browsers, "_mac_app_roots", lambda: [apps])
+    _raise_for("vivaldi", monkeypatch)
+
+    found = [i.brand.key for i in browsers._detect_macos()]
+    assert found == [k for k in browsers.BRANDS if k != "vivaldi"]
+
+
+def test_linux_data_dir_failure_costs_one_brand_only(monkeypatch, tmp_path):
+    """Same guarantee as the Windows case, pinned on the Linux detector."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setattr(browsers.Path, "home", classmethod(lambda cls: tmp_path))
+
+    binaries = {brand.linux_binaries[0]: str(_fake_exe(tmp_path, "bin", key))
+                for key, brand in browsers.BRANDS.items()}
+    monkeypatch.setattr(browsers.shutil, "which",
+                        lambda name, **kw: binaries.get(name))
+    monkeypatch.setattr(browsers, "_linux_desktop_dirs", lambda: [])
+    _raise_for("edge", monkeypatch)
+
+    found = [i.brand.key for i in browsers._detect_linux()]
+    assert found == [k for k in browsers.BRANDS if k != "edge"]
 
 
 def test_macos_rejects_a_bundle_whose_identifier_belongs_to_another_brand(
