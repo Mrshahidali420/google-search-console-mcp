@@ -3,6 +3,7 @@ import os
 import stat
 import sys
 from datetime import datetime, timedelta, UTC
+from pathlib import Path
 
 import pytest
 
@@ -190,13 +191,13 @@ def test_non_json_error_body_raises_runtime_error(tmp_path):
                             "http://127.0.0.1:1", session=HtmlSession())
 
 
-def test_error_message_never_carries_the_response_body(tmp_path):
+def test_error_message_never_carries_the_response_body():
     class LeakyResponse:
         status_code = 400
         text = "SECRET-BODY-CONTENT"
 
         def json(self):
-            return {"error": "invalid_request"}
+            return {"unexpected": "shape"}
 
     class LeakySession:
         def post(self, url, data=None, timeout=None):
@@ -217,3 +218,40 @@ def test_naive_expires_at_degrades_to_not_fresh(tmp_path):
     provider = gauth.TokenProvider("cid", "secret", token_path=target,
                                    session=session)
     assert provider.access_token() == "refreshed"
+
+
+def test_save_token_hardens_the_file_before_writing(tmp_path, monkeypatch):
+    """Runs on every platform. The POSIX mode assertions are skipped on
+    Windows, so without this, deleting _harden entirely goes unnoticed here.
+    """
+    calls = []
+    real_harden = gauth._harden
+
+    def spy(path):
+        calls.append((Path(path).name, Path(path).exists(),
+                      Path(path).stat().st_size))
+        return real_harden(path)
+
+    monkeypatch.setattr(gauth, "_harden", spy)
+    gauth.save_token({"refresh_token": "r"}, tmp_path / "token.json")
+
+    assert calls, "_harden was never called"
+    name, existed, size = calls[0]
+    assert name.startswith(".token-")
+    assert existed
+    assert size == 0, "hardening must happen before the token is written"
+
+
+def test_refresh_with_no_access_token_raises_and_does_not_persist(tmp_path):
+    """Low fix: a 200 body missing access_token must raise before the stale
+    token on disk is overwritten with an unusable one."""
+    target = tmp_path / "token.json"
+    past = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    gauth.save_token({"refresh_token": "r", "access_token": "stale",
+                      "expires_at": past}, target)
+    session = FakeSession({})
+    provider = gauth.TokenProvider("cid", "secret", token_path=target,
+                                   session=session)
+    with pytest.raises(RuntimeError, match="no access_token"):
+        provider.access_token()
+    assert gauth.load_token(target)["access_token"] == "stale"

@@ -73,17 +73,19 @@ class AuthRequired(RuntimeError):
     """No usable credentials. The caller should route the user to setup."""
 
 
-def _harden(path: Path, *, directory: bool = False) -> None:
-    """Restrict a path to the current user. Best effort — never fatal.
+def _harden(path: Path) -> None:
+    """Restrict a file to the current user. Best effort — never fatal.
 
     POSIX uses chmod. On Windows chmod is a no-op, so we break ACL inheritance
     and grant only the current user, which is the nearest equivalent available
-    without a keyring dependency.
+    without a keyring dependency. icacls is resolved to an absolute path
+    under SystemRoot rather than found on PATH: CreateProcess searches the
+    current working directory before System32, so a bare "icacls" would run
+    an executable planted in the MCP server's CWD.
     """
-    mode = 0o700 if directory else 0o600
     if sys.platform != "win32":
         try:
-            os.chmod(path, mode)
+            os.chmod(path, 0o600)
         except OSError:
             log.warning("could not restrict permissions on %s", path.name)
         return
@@ -92,34 +94,46 @@ def _harden(path: Path, *, directory: bool = False) -> None:
     if not user:
         log.warning("cannot restrict %s: USERNAME unset", path.name)
         return
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    icacls = os.path.join(system_root, "System32", "icacls.exe")
     try:
         subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(F)"],
+            [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:(F)"],
             check=True, capture_output=True, timeout=15,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("could not restrict permissions on %s: %s", path.name, exc)
+    except subprocess.CalledProcessError as exc:
+        # exc's default __str__ embeds the full argv, including the
+        # absolute token path — log only the file name and exit code.
+        log.warning("could not restrict permissions on %s: icacls exited %s",
+                    path.name, exc.returncode)
+    except (OSError, subprocess.SubprocessError):
+        # Covers a missing icacls.exe and a timed-out run. TimeoutExpired's
+        # __str__ also embeds the full argv, so nothing from the exception
+        # itself is logged here either.
+        log.warning("could not restrict permissions on %s", path.name)
 
 
 def save_token(data: dict, path: Path | None = None) -> None:
     """Write the token file atomically, readable only by this user.
 
-    The file is created 0600 by mkstemp BEFORE the refresh token is written
-    into it — creating it first and chmod'ing after would leave the credential
-    world-readable at a predictable path for the width of that window, on
-    every refresh. The random temp name also stops two processes colliding and
+    The temp file is hardened immediately after creation, before the refresh
+    token is written into it — writing first and hardening after would leave
+    the credential unprotected on disk for the width of the write, on every
+    refresh. The random temp name also stops two processes colliding and
     promoting a half-written file.
     """
     target = path or paths.token_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    _harden(target.parent, directory=True)
 
     handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".token-",
                                          suffix=".tmp")
     try:
+        # Harden BEFORE writing, not after: on Windows mkstemp gives no
+        # equivalent of POSIX 0600-at-creation, so writing first would put
+        # the refresh token on disk unprotected for the width of the write.
+        _harden(Path(temporary))
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             json.dump(data, stream, indent=2)
-        _harden(Path(temporary))
         os.replace(temporary, target)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
@@ -155,6 +169,10 @@ def _decode_token_response(response) -> dict:
         body = {}
 
     if response.status_code == 200:
+        if "access_token" not in body:
+            raise RuntimeError(
+                "token endpoint returned 200 with no access_token"
+            )
         return body
 
     error = body.get("error") or f"HTTP {response.status_code}"
