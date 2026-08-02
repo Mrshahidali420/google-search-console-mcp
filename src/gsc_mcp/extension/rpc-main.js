@@ -42,6 +42,15 @@
     "sec-fetch-dest", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
   ]);
 
+  // `at=` is the page's XSRF token. It is refreshed per session, but these
+  // payloads are reported up the bridge and land in a run log, and a token in
+  // a log is a token in a log. One helper, used by every path that stores a
+  // recorded body, so the pattern cannot be fixed in one place and forgotten
+  // in the other two. Global: a batched payload carries `at=` once per
+  // sub-request, so a non-global replace scrubs only the first.
+  const redact = (s) =>
+    String(s == null ? "" : s).replace(/((^|&)at=)[^&]*/g, "$1<redacted>");
+
   let armed = null; // { targetUrl, phase, captures: [] } while learning
 
   // WHY THIS RECORDS EVERY CANDIDATE INSTEAD OF THE FIRST ONE
@@ -116,9 +125,8 @@
         bodyLen: body.length, hasUrl: false,
         // Keep the payload: the submission (Fj3Owf, found 2026-07-25) does not
         // carry the URL, so its shape is the only way to learn how it names its
-        // target. `at` is an XSRF token and is refreshed per session anyway —
-        // strip it rather than write it into a log file.
-        body: body.replace(/((^|&)at=)[^&]*/, "$1<redacted>").slice(0, 1200),
+        // target. Strip the XSRF token rather than write it into a log file.
+        body: redact(body).slice(0, 1200),
         method: (method || "POST").toUpperCase(),
         headers,
       });
@@ -129,7 +137,7 @@
       endpoint,
       method: (method || "POST").toUpperCase(),
       headers,
-      bodyTemplate: body,
+      bodyTemplate: redact(body),
       marker: candidates[level],
       markerLevel: level,
       rpcids: rpcidsOf(endpoint),
@@ -180,7 +188,7 @@
       endpoint, rpcids: rpcidsOf(endpoint), phase: armed.phase,
       len: text.length,
       tokens: Array.from(new Set(text.match(TOKENISH) || [])).slice(0, 12),
-      body: text.slice(0, 4000),
+      body: redact(text).slice(0, 4000),
       // kept only for matching at harvest, stripped before it leaves this world
       _full: text.slice(0, 200000),
     });

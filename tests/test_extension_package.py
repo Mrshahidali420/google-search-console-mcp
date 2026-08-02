@@ -71,6 +71,58 @@ def test_no_extension_file_contains_a_credential_or_install_id():
         assert not secretish.search(text), f"{name} hardcodes a credential"
 
 
+# --- rpc-main.js XSRF redaction ---------------------------------------------
+# `at=` is the page's XSRF token. rpc-main.js has THREE paths that store a
+# recorded body, and every one of them is reported up the bridge into a run
+# log. Each gets its own assertion on purpose: one combined test would pass on
+# the strength of whichever path it happened to check first, which is exactly
+# how two of these three shipped unredacted in the first place.
+
+
+def _rpc_main_source():
+    return (files("gsc_mcp") / "extension" /
+            "rpc-main.js").read_text(encoding="utf-8")
+
+
+def _block(source, start, end):
+    """The source between a start marker and the next end marker after it."""
+    begin = source.index(start)
+    return source[begin:source.index(end, begin + len(start))]
+
+
+def test_the_redaction_helper_is_global():
+    """A non-global replace scrubs only the first `at=`, and a batched
+    payload carries one per sub-request."""
+    match = re.search(
+        r"const redact\s*=[\s\S]{0,240}?\.replace\(/(.+?)/([a-z]*)\s*,",
+        _rpc_main_source())
+    assert match, "rpc-main.js declares no redact() helper"
+    assert "at=" in match.group(1), "redact() no longer targets the at= token"
+    assert "g" in match.group(2), "redact() replaces only the first match"
+
+
+def test_the_observed_path_redacts_the_xsrf_token():
+    """The `level < 0` branch — an rpc call whose body carries no target URL."""
+    block = _block(_rpc_main_source(), "armed.observed.push({", "});")
+    assert re.search(r"\bbody:\s*redact\(", block), \
+        "armed.observed.push stores an unredacted body"
+
+
+def test_the_captures_path_redacts_the_xsrf_token():
+    """The URL-bearing branch. Stored the body verbatim until 2026-08-03."""
+    block = _block(_rpc_main_source(), "armed.captures.push({", "});")
+    assert re.search(r"\bbodyTemplate:\s*redact\(", block), \
+        "armed.captures.push stores an unredacted bodyTemplate"
+
+
+def test_the_response_path_redacts_the_xsrf_token():
+    """recordResponse() — a whole Google response body, also stored verbatim
+    until 2026-08-03."""
+    block = _block(_rpc_main_source(), "function recordResponse(", "\n  }")
+    assert re.search(r"\bbody:\s*redact\(", block), \
+        "recordResponse stores an unredacted response body"
+
+
 def test_the_manifest_version_matches_the_background_script():
     """Two hand-maintained copies of one version string drift silently,
     and the handshake checks the one in background.js."""
