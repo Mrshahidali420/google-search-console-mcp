@@ -37,7 +37,7 @@ from urllib.parse import quote
 import requests
 
 from . import quota, routing, runlog, store
-from .gauth import TokenProvider
+from .gauth import AuthRequired, TokenProvider
 
 log = runlog.get(__name__)
 
@@ -114,10 +114,39 @@ def list_properties(provider: TokenProvider,
     Each entry is `{"siteUrl": ..., "permissionLevel": ...}` straight from
     the API; an account with no verified properties returns an empty list
     rather than a missing key.
+
+    A NON-200 RAISES. This is the one place the boundary can sit: "[] " and
+    "the call was refused" are indistinguishable downstream, and every
+    caller reads [] as a fact about the account. gsc_check_status labels
+    every URL `no_property` — "no Search Console property matches this
+    host" — off the back of it, so a 403 from a token missing the
+    webmasters scope would tell a user their sites are unknown to Google.
+    Unlike inspect_url and submit_sitemap, which return an error row so a
+    bulk loop survives one bad URL, this call has no per-item loop to keep
+    going for: if it fails there is no answer at all, only a wrong one.
+
+    - 401 -> AuthRequired. The token is missing, expired or rejected;
+      that is already the signal every tool turns into the structured
+      "sign in" answer, so it does not need a second spelling.
+    - anything else, including a body that is not JSON -> ApiError
+      carrying the status, so a caller can tell a 403 (scope) from a 500
+      (Google) without parsing a string.
     """
     client = session or _session
     resp = client.get(SITES_URI, headers=_auth_headers(provider), timeout=30)
-    return resp.json().get("siteEntry", [])
+    if resp.status_code == 401:
+        raise AuthRequired(
+            "Search Console rejected the access token (HTTP 401)")
+    if resp.status_code != 200:
+        raise ApiError(
+            f"sites.list returned HTTP {resp.status_code}",
+            status=resp.status_code)
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise ApiError("sites.list returned a body that is not JSON",
+                       status=resp.status_code) from exc
+    return body.get("siteEntry", [])
 
 
 def inspect_url(url: str, property: str, provider: TokenProvider,
@@ -660,4 +689,14 @@ class ApiError(RuntimeError):
     """Raised by callers that need a hard failure instead of an
     ("error", detail) tuple — inspect_url and submit_sitemap deliberately
     return rather than raise so a bulk caller can keep going past one bad
-    URL, but callers with no such loop can wrap a result in this."""
+    URL, but callers with no such loop can wrap a result in this.
+
+    `status` is the HTTP status when there was one, else None. It carries
+    the status as a NUMBER rather than leaving a caller to parse it out of
+    the message, and the message never includes a response body: this
+    exception's text can reach a log, and a body cannot.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status

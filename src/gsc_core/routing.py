@@ -28,9 +28,26 @@ A host can be covered by more than one property at steps 3 and 4 (e.g. both
 preferring the most specific (longest) match, so this does the same rather
 than depending on list order — the caller's property list has no ordering
 guarantee the way the original tool's config.json dict insertion order did.
+
+SCHEME is the tie-break of last resort at steps 1, 2 and 4. A host can be
+registered twice — "http://example.com/" AND "https://example.com/" are
+separate Search Console properties, and the two hold separate data. Host
+matching alone cannot tell them apart, so an https URL used to resolve to
+whichever came first in the list; store.get_sites() orders by property
+string, which sorts "http://" before "https://", making that the http one
+every time. Reversing the input flipped the answer, which is the tell that
+the old result was an accident of ordering rather than a decision.
+
+Specificity stays PRIMARY and scheme only separates properties that are
+otherwise equally good, so "most specific wins" is unchanged: a longer
+host still beats a scheme match at step 4. An sc-domain: property has no
+scheme and covers both, so step 3 is untouched. A `url` with no scheme at
+all matches no property's scheme, and falls back to list order exactly as
+before.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from urllib.parse import urlparse
 
 
@@ -40,6 +57,18 @@ def host_of(url: str) -> str:
     netloc = urlparse(candidate).netloc.lower()
     netloc = netloc.split("@")[-1]  # drop userinfo
     return netloc.split(":")[0]  # drop port
+
+
+def scheme_of(url: str) -> str:
+    """Lowercased scheme, or "" for a bare host that carries none.
+
+    Deliberately NOT defaulted to "http" the way host_of() defaults its
+    parse target: "" means "this string said nothing about a scheme", and
+    that has to stay distinguishable from an explicit http:// so a
+    scheme-less input falls back to list order rather than being matched
+    against http properties in preference to https ones.
+    """
+    return urlparse(url).scheme.lower() if "://" in url else ""
 
 
 def _is_covered(host: str, domain: str) -> bool:
@@ -67,6 +96,26 @@ def resolve_property(url: str, properties: list[str]) -> str | None:
 
     host = host_of(url)
     host_bare = _without_www(host)
+    scheme = scheme_of(url)
+
+    def same_scheme(prop: str) -> bool:
+        return bool(scheme) and scheme_of(prop) == scheme
+
+    def best(candidates: list[str], specificity: Callable[[str], int]) -> str:
+        """The winner among equally-eligible properties for one step.
+
+        `specificity` stays PRIMARY and scheme is only a tie-break within
+        it, which is what keeps this additive: max() returns the first
+        maximal element, so with one candidate, or with no candidate
+        sharing the URL's scheme, the answer is exactly what returning the
+        first match in list order used to give. It differs only where two
+        properties were equally good and the old code picked by list order
+        — the case where https://example.com/ resolved to an
+        http://example.com/ property purely because get_sites() sorts
+        "http" before "https".
+        """
+        return max(candidates, key=lambda prop: (specificity(prop),
+                                                 same_scheme(prop)))
 
     prefix_hosts = {prop: host_of(prop) for prop in properties
                     if not prop.startswith("sc-domain:")}
@@ -76,15 +125,18 @@ def resolve_property(url: str, properties: list[str]) -> str | None:
     domain_hosts = {prop: prop.removeprefix("sc-domain:").lower()
                     for prop in properties if prop.startswith("sc-domain:")}
 
-    # Step 1: exact host match.
-    for prop, prop_host in prefix_hosts.items():
-        if prop_host == host:
-            return prop
+    # Step 1: exact host match. Every candidate here is equally specific
+    # (the host matched exactly), so scheme is the only tie-break there is.
+    exact = [prop for prop, prop_host in prefix_hosts.items()
+             if prop_host == host]
+    if exact:
+        return best(exact, lambda prop: 0)
 
-    # Step 2: www/non-www toggle.
-    for prop, prop_host in prefix_hosts.items():
-        if _without_www(prop_host) == host_bare:
-            return prop
+    # Step 2: www/non-www toggle. Equally specific for the same reason.
+    toggled = [prop for prop, prop_host in prefix_hosts.items()
+               if _without_www(prop_host) == host_bare]
+    if toggled:
+        return best(toggled, lambda prop: 0)
 
     # Step 3: sc-domain: property covering the host or any subdomain of it.
     domain_matches = [prop for prop, domain in domain_hosts.items()
@@ -96,7 +148,7 @@ def resolve_property(url: str, properties: list[str]) -> str | None:
     suffix_matches = [prop for prop, prop_host in prefix_hosts.items()
                        if _is_covered(host, prop_host)]
     if suffix_matches:
-        return max(suffix_matches, key=lambda prop: len(prefix_hosts[prop]))
+        return best(suffix_matches, lambda prop: len(prefix_hosts[prop]))
 
     return None
 

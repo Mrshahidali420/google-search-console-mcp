@@ -124,3 +124,93 @@ def test_identity_match_does_not_disturb_host_based_matching():
     assert routing.resolve_property("https://blog.example.com/a", [DOMAIN]) == DOMAIN
     assert routing.resolve_property("https://elsewhere.test/a", [DOMAIN, PREFIX]) is None
     assert routing.resolve_property("https://www.example.net/a", [PREFIX]) == PREFIX
+
+
+# --------------------------------------------------------- scheme awareness
+#
+# There was zero http:// coverage here before these. A host registered under
+# BOTH schemes is two separate Search Console properties holding separate
+# data, and host matching alone cannot tell them apart.
+
+HTTP_PREFIX = "http://example.com/"
+HTTPS_PREFIX = "https://example.com/"
+
+
+@pytest.mark.parametrize("properties", [
+    [HTTP_PREFIX, HTTPS_PREFIX],
+    [HTTPS_PREFIX, HTTP_PREFIX],
+])
+def test_https_url_picks_the_https_property_whatever_the_list_order(properties):
+    """store.get_sites() sorts by property string, so "http://" comes first
+    and an https URL used to resolve to the http property every time.
+    Reversing the list flipped the answer — the tell that the old result was
+    an accident of ordering."""
+    assert routing.resolve_property(
+        "https://example.com/page", properties) == HTTPS_PREFIX
+
+
+@pytest.mark.parametrize("properties", [
+    [HTTP_PREFIX, HTTPS_PREFIX],
+    [HTTPS_PREFIX, HTTP_PREFIX],
+])
+def test_http_url_picks_the_http_property_whatever_the_list_order(properties):
+    assert routing.resolve_property(
+        "http://example.com/page", properties) == HTTP_PREFIX
+
+
+def test_scheme_also_breaks_the_www_toggle_step():
+    properties = ["http://www.example.com/", "https://www.example.com/"]
+    assert routing.resolve_property(
+        "https://example.com/page", properties) == "https://www.example.com/"
+
+
+def test_scheme_breaks_ties_at_the_suffix_step_too():
+    properties = ["http://example.com/", "https://example.com/"]
+    assert routing.resolve_property(
+        "https://deep.example.com/page", properties) == HTTPS_PREFIX
+
+
+def test_a_longer_host_still_beats_a_scheme_match():
+    """Specificity stays PRIMARY; scheme only separates equally specific
+    candidates. Weakening that would send a shop.example.com URL to the
+    bare-domain property just because the schemes lined up."""
+    properties = ["https://example.com/", "http://shop.example.com/"]
+    assert routing.resolve_property(
+        "https://a.shop.example.com/x", properties) == "http://shop.example.com/"
+
+
+def test_a_lone_http_property_still_matches_an_https_url():
+    """No scheme match available means fall back to what was there before —
+    matching on host alone. Refusing to route would be a regression."""
+    assert routing.resolve_property("https://example.com/page",
+                                    [HTTP_PREFIX]) == HTTP_PREFIX
+
+
+def test_a_scheme_less_url_falls_back_to_list_order():
+    """"" is not http: a bare host said nothing about a scheme, so it must
+    not be treated as preferring the http property."""
+    assert routing.resolve_property(
+        "example.com/page", [HTTP_PREFIX, HTTPS_PREFIX]) == HTTP_PREFIX
+    assert routing.resolve_property(
+        "example.com/page", [HTTPS_PREFIX, HTTP_PREFIX]) == HTTPS_PREFIX
+
+
+def test_sc_domain_property_covers_both_schemes():
+    """An sc-domain: property has no scheme; step 3 is untouched."""
+    assert routing.resolve_property("http://example.com/a", [DOMAIN]) == DOMAIN
+    assert routing.resolve_property("https://example.com/a", [DOMAIN]) == DOMAIN
+
+
+def test_scheme_of_reports_empty_for_a_bare_host():
+    assert routing.scheme_of("https://example.com/a") == "https"
+    assert routing.scheme_of("HTTP://example.com/a") == "http"
+    assert routing.scheme_of("example.com/a") == ""
+
+
+def test_route_all_is_scheme_aware_too():
+    properties = [HTTP_PREFIX, HTTPS_PREFIX]
+    assert routing.route_all(
+        ["https://example.com/a", "http://example.com/b"], properties) == [
+        ("https://example.com/a", HTTPS_PREFIX),
+        ("http://example.com/b", HTTP_PREFIX),
+    ]

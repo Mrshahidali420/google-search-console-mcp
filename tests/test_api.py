@@ -2,7 +2,7 @@ import pytest
 import requests
 
 from _fakes import FakeProvider, FakeResponse, FakeSession, indexed_payload
-from gsc_core import api
+from gsc_core import api, gauth
 
 
 # ---------------------------------------------------------------- classify
@@ -159,6 +159,45 @@ def test_list_properties_returns_site_entries():
 def test_list_properties_on_an_empty_account_returns_an_empty_list():
     session = FakeSession(FakeResponse(200, {}))
     assert api.list_properties(FakeProvider(), session=session) == []
+
+
+def test_list_properties_raises_auth_required_on_401():
+    session = FakeSession(FakeResponse(401, {}))
+    with pytest.raises(gauth.AuthRequired):
+        api.list_properties(FakeProvider(), session=session)
+
+
+@pytest.mark.parametrize("status", [403, 404, 429, 500, 503])
+def test_list_properties_raises_api_error_on_any_other_non_200(status):
+    """A refused call must never be indistinguishable from an empty account.
+
+    403 is the one that matters most: a token without the webmasters scope
+    used to come back as [], which gsc_check_status then reports as every
+    URL having no matching property — telling the user their sites are
+    unknown to Google when the call was simply rejected.
+    """
+    session = FakeSession(FakeResponse(status, {"error": {"code": status}}))
+    with pytest.raises(api.ApiError) as caught:
+        api.list_properties(FakeProvider(), session=session)
+    assert caught.value.status == status
+
+
+def test_list_properties_api_error_carries_no_response_body():
+    """ApiError's text can reach a log; a response body must not."""
+    session = FakeSession(FakeResponse(403, {}, text="secret-ish body"))
+    with pytest.raises(api.ApiError) as caught:
+        api.list_properties(FakeProvider(), session=session)
+    assert "secret-ish" not in str(caught.value)
+
+
+def test_list_properties_raises_api_error_when_a_200_body_is_not_json():
+    class NotJson(FakeResponse):
+        def json(self):
+            raise ValueError("no json")
+
+    session = FakeSession(NotJson(200))
+    with pytest.raises(api.ApiError):
+        api.list_properties(FakeProvider(), session=session)
 
 
 # ------------------------------------------------------------------ sitemaps
