@@ -36,7 +36,9 @@ So NO ADDRESS IS RETURNED, in either direction:
 
 What the transcript does contain: a brand label, a brand key, the brand's
 static extensions URL, a profile directory name, a display name, three
-booleans about the account, a `has_extension` placeholder, and prose
+booleans about the account, whether our bridge extension is installed in
+that profile — the fact, never the extension ID, which is 32 characters
+naming one person's install — and prose
 reasons with no identifier in them. `matches_authorised_account` is what makes that
 sufficient — it is the useful half of knowing the address, without the
 address.
@@ -53,7 +55,9 @@ operator's Windows account name.
 """
 from __future__ import annotations
 
-from gsc_core import gauth, profiles, runlog
+from pathlib import Path
+
+from gsc_core import gauth, pairing, profiles, runlog
 
 log = runlog.get(__name__)
 
@@ -94,7 +98,13 @@ def _report() -> dict:
     # profiles.py's Default-first numeric sort. Re-sorting on the score
     # would be re-deriving the ranking; leaving it alone keeps two identical
     # runs identical.
-    listed = [_entry(candidate, best, account_email) for candidate in candidates]
+    # Resolved ONCE for the whole survey, and passed down. Per-profile
+    # resolution would re-extract the extension up to six times per call,
+    # and — worse — could hand two entries different answers if an upgrade
+    # landed mid-report.
+    ext_dir = _extension_dir()
+    listed = [_entry(candidate, best, account_email, ext_dir)
+              for candidate in candidates]
 
     report = {
         "ok": True,
@@ -110,7 +120,7 @@ def _report() -> dict:
 
 
 def _entry(candidate: profiles.Candidate, best: profiles.Candidate | None,
-           account_email: str | None) -> dict:
+           account_email: str | None, ext_dir: Path | None = None) -> dict:
     """One profile, described without identifying anyone.
 
     `recommended` is decided by object identity against what recommend()
@@ -141,16 +151,51 @@ def _entry(candidate: profiles.Candidate, best: profiles.Candidate | None,
         "signed_in": bool(profile.email),
         "account_discoverable": brand.reports_google_account,
         "matches_authorised_account": _matches(profile, brand, account_email),
-        # PLACEHOLDER, populated by Task 8 once pairing exists. It ships now,
-        # as None, so its TYPE never changes on a consumer: adding a key to an
-        # already-published shape changes the contract under anything reading
-        # this tool in the meantime. Do not delete it as dead weight — None
-        # here means "not checked yet", which is exactly what is true today.
-        "has_extension": None,
+        # True, False, or None — and None is not a polite False here either.
+        # None means the check could not be PERFORMED (the extension could
+        # not be extracted, so there is no directory to match against);
+        # False means it was performed and the extension is not installed in
+        # this profile. Collapsing the two would tell a user to reinstall an
+        # extension that is sitting right there.
+        "has_extension": _has_extension(candidate, ext_dir),
         "recommended": (best is not None
                         and candidate.profile is best.profile
                         and candidate.installed is best.installed),
     }
+
+
+def _extension_dir() -> Path | None:
+    """The extracted extension directory, or None when there isn't one.
+
+    None is what makes ``has_extension`` honestly tri-state: with nothing to
+    match a recorded load path against, no profile has been checked, and
+    saying "not installed" about all six would be a fabrication. Never
+    raises, and logs by exception TYPE NAME — an OSError from the config
+    directory carries the operator's account name in its message.
+    """
+    try:
+        return pairing.extension_dir()
+    except Exception as exc:  # noqa: BLE001 — the flag is optional, the tool is not
+        log.debug("extension directory unavailable (%s)", type(exc).__name__)
+        return None
+
+
+def _has_extension(candidate: profiles.Candidate, ext_dir: Path | None):
+    """Is our bridge extension installed in this profile? True/False/None.
+
+    The ID itself is deliberately NOT returned. It is 32 characters that
+    name one person's install, it is of no use to a model choosing a
+    profile, and this result goes into a transcript nobody here controls.
+    """
+    if ext_dir is None:
+        return None
+    try:
+        found = pairing.find_extension_id(candidate.installed,
+                                          candidate.profile, ext_dir=ext_dir)
+    except Exception as exc:  # noqa: BLE001 — one profile of many
+        log.debug("extension check failed (%s)", type(exc).__name__)
+        return None
+    return found is not None
 
 
 def _matches(profile: profiles.Profile, brand, account_email: str | None):

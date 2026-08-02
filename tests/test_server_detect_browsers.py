@@ -13,6 +13,7 @@ with a next step rather than an error the model has to explain away.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -63,6 +64,30 @@ def no_stored_account(monkeypatch):
     and the test will start reading the machine it runs on.
     """
     monkeypatch.setattr(tools_browsers, "_authorised_email", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path):
+    """Point GSC_MCP_HOME at a scratch directory for every test here.
+
+    The extension check extracts into config_dir(), so without this the
+    suite would write into the developer's real application-data folder.
+
+    Set through os.environ rather than monkeypatch on purpose: the four
+    tests exercising the real _authorised_email() call monkeypatch.undo(),
+    which reverts every setattr AND setenv on the shared per-test
+    monkeypatch — including this one — and would put the extraction back
+    into the real home for exactly those tests.
+    """
+    previous = os.environ.get("GSC_MCP_HOME")
+    os.environ["GSC_MCP_HOME"] = str(tmp_path / "home")
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("GSC_MCP_HOME", None)
+        else:
+            os.environ["GSC_MCP_HOME"] = previous
 
 
 def _signed_in_account(monkeypatch, address):
@@ -333,22 +358,83 @@ def test_matching_is_unknown_when_no_account_has_authorised_yet(survey):
     assert entry["matches_authorised_account"] is None
 
 
-def test_every_profile_carries_the_has_extension_placeholder(survey,
-                                                             monkeypatch):
-    """Task 8 populates has_extension once pairing exists. The key ships
-    NOW, as None, so its type never changes on a consumer: a key added to
-    an already-published shape changes the contract under anything reading
-    it in the meantime. This test is what stops it being deleted as dead
-    weight before Task 8 arrives.
+def test_a_profile_without_the_extension_reports_false_not_none(survey,
+                                                                monkeypatch):
+    """The check ran and the answer is no. False, not None: None here means
+    "could not check", and the two lead a user to different next steps.
     """
     _signed_in_account(monkeypatch, ACCOUNT)
     survey([_candidate("chrome", "Default", ACCOUNT),
             _candidate("brave", "Profile 2", None)])
     result = tools_browsers.detect_browsers()
     for entry in result["profiles"]:
-        assert "has_extension" in entry
+        assert entry["has_extension"] is False
+    assert result["recommended"]["has_extension"] is False
+
+
+def test_the_profile_holding_the_extension_reports_true(survey, tmp_path):
+    """The whole point of the field, against real files rather than a stub:
+    a preferences file recording our extraction directory under a
+    well-formed id."""
+    from gsc_core import pairing
+
+    root = tmp_path / "User Data"
+    pdir = root / "Default"
+    pdir.mkdir(parents=True)
+    (pdir / "Secure Preferences").write_text(json.dumps(
+        {"extensions": {"settings": {
+            "a" * 32: {"path": str(pairing.extension_dir())}}}}),
+        encoding="utf-8")
+
+    paired = profiles.Profile(directory="Default", name="Personal",
+                              email=None, path=str(pdir))
+    survey([profiles.Candidate(installed=_installed("chrome"), profile=paired,
+                               score=0, reasons=[]),
+            _candidate("brave", "Profile 2", None)])
+
+    by_key = {entry["browser_key"]: entry["has_extension"]
+              for entry in tools_browsers.detect_browsers()["profiles"]}
+    assert by_key == {"chrome": True, "brave": False}
+
+
+def test_the_extension_id_itself_is_never_returned(survey, tmp_path):
+    """32 characters naming one person's install. The tool answers whether
+    the extension is there, not which install it is."""
+    from gsc_core import pairing
+
+    ext_id = "a" * 32
+    root = tmp_path / "User Data"
+    pdir = root / "Default"
+    pdir.mkdir(parents=True)
+    (pdir / "Secure Preferences").write_text(json.dumps(
+        {"extensions": {"settings": {
+            ext_id: {"path": str(pairing.extension_dir())}}}}),
+        encoding="utf-8")
+    paired = profiles.Profile(directory="Default", name="Personal",
+                              email=None, path=str(pdir))
+    survey([profiles.Candidate(installed=_installed("chrome"), profile=paired,
+                               score=0, reasons=[])])
+
+    result = tools_browsers.detect_browsers()
+    assert result["profiles"][0]["has_extension"] is True
+    assert ext_id not in _blob(result)
+
+
+def test_has_extension_stays_none_when_the_check_cannot_be_performed(
+        survey, monkeypatch):
+    """No extraction directory means no profile was checked. Reporting
+    False for all of them would be a fabrication that sends a user to
+    reinstall an extension that is sitting right there."""
+    def _explode():
+        raise OSError("config dir is read-only")
+
+    monkeypatch.setattr(tools_browsers.pairing, "extension_dir", _explode)
+    survey([_candidate("chrome", "Default", None),
+            _candidate("brave", "Profile 2", None)])
+    result = tools_browsers.detect_browsers()
+    assert result["ok"] is True
+    for entry in result["profiles"]:
         assert entry["has_extension"] is None
-    assert result["recommended"]["has_extension"] is None
 
 
 # ---------------------------------------------------------------------------
