@@ -24,7 +24,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-from gsc_core import api, config, gauth, paths, quota, routing, runlog, store
+from gsc_core import api, config, gauth, paths, perf, quota, routing, runlog, store
 
 # Must run before FastMCP is constructed — see the module docstring.
 runlog.init()
@@ -441,6 +441,241 @@ def gsc_quota() -> list[dict]:
                 "binding": _quota_binding(verdict, inspection_verdict),
             })
     return report
+
+
+def _final_data_state_warning() -> str:
+    return (
+        f"data_state='final' silently omits the most recent "
+        f"~{perf.FINAL_LAG_DAYS} day(s) of data -- Google has not finished "
+        f"processing them yet, and nothing in the response marks the gap. "
+        f"The Search Console web UI has no such restriction and shows those "
+        f"days immediately, so a 'final' query compared against what a human "
+        f"sees in the UI right now will look like a discrepancy or a missed "
+        f"traffic change when both are simply answering different questions. "
+        f"Prefer data_state='all' (the default here) unless you specifically "
+        f"need finalized-only rows; its trade-off is that the last day or two "
+        f"may still revise upward on a later query."
+    )
+
+
+@mcp.tool()
+def gsc_performance(
+    site: str | None = None, days: int = 28, dim: str | None = None,
+    limit: int = 25, start_date: str | None = None, end_date: str | None = None,
+    data_state: str = "all", search_type: str = "web",
+) -> dict:
+    """Search Analytics performance: clicks, impressions, ctr, position.
+
+    Three shapes, chosen by what is passed:
+    - No `site` -> one row per property the store knows about (`scope:
+      "portfolio"`, `sites`, `totals` aggregated across all of them).
+    - `site`, no `dim` -> a single aggregate for that site (`scope: "site"`,
+      plus `clicks`/`impressions`/`ctr`/`position`).
+    - `site` and `dim` -> per-`dim` rows for that site, sorted by clicks
+      descending (`scope: <dim>`, `rows`, `totals` aggregated across `rows`).
+    `dim` must be one of perf.VALID_DIMENSIONS ("query", "page", "country",
+    "device", "date", "searchAppearance").
+
+    Date window: pass `start_date` AND `end_date` (both "YYYY-MM-DD") for an
+    explicit range, or leave both unset and get the trailing `days` calendar
+    days ending yesterday. `start_date` without `end_date` is refused
+    outright -- `{"ok": False, "note": "start_date needs end_date (both
+    YYYY-MM-DD)"}` -- rather than guessing an end.
+
+    IMPORTANT -- `data_state` defaults to "all", not Google's own API default
+    of "final". Passing `data_state="final"` attaches a `warning` string
+    explaining why: data_state='final' silently omits the most recent
+    ~perf.FINAL_LAG_DAYS (3) day(s) of data -- Google has not finished
+    processing them yet, and nothing in the response marks the gap. The
+    Search Console web UI has no such restriction and shows those days
+    immediately, so a 'final' query compared against what a human sees in
+    the UI right now will look like a discrepancy or a missed traffic
+    change when both are simply answering different questions. Prefer
+    data_state='all' (the default here) unless you specifically need
+    finalized-only rows; its trade-off is that the last day or two may
+    still revise upward on a later query.
+
+    On a missing, expired, or rejected token, returns `{"ok": False, "error":
+    "auth_required", "fix": ...}`; if no OAuth client is configured at all,
+    `{"ok": False, "error": "not_configured", "fix": ...}`. Any other failure
+    -- a bad dimension, an unroutable site, a Search Console API error --
+    comes back as `{"ok": False, "start", "end", "note": str(exc)}` rather
+    than raising.
+    """
+    if start_date and not end_date:
+        return {"ok": False, "note": "start_date needs end_date (both YYYY-MM-DD)"}
+
+    try:
+        if start_date and end_date:
+            window_start, window_end = start_date, end_date
+        else:
+            window_start, window_end = perf.date_range(days, end=end_date)
+    except ValueError as exc:
+        return {"ok": False, "note": str(exc)}
+
+    window = {"start": window_start, "end": window_end}
+    result: dict = dict(window)
+    if data_state == "final":
+        result["warning"] = _final_data_state_warning()
+
+    try:
+        active_provider = deps.provider()
+        with deps.connection() as conn:
+            properties = [row["property"] for row in store.get_sites(conn)]
+
+            if site is None:
+                sites_report = perf.portfolio(
+                    properties, active_provider, days=days,
+                    start_date=start_date, end_date=end_date,
+                    data_state=data_state, search_type=search_type)
+                result["scope"] = "portfolio"
+                result["sites"] = sites_report
+                result["totals"] = perf.aggregate_rows(sites_report)
+            elif dim is None:
+                site_totals = perf.totals(
+                    site, properties, active_provider, days=days,
+                    start_date=start_date, end_date=end_date,
+                    data_state=data_state, search_type=search_type)
+                result["scope"] = "site"
+                result.update(site_totals)
+            else:
+                rows = perf.query(
+                    site, properties, active_provider, days=days,
+                    dimensions=[dim], start_date=start_date, end_date=end_date,
+                    data_state=data_state, search_type=search_type, limit=limit)
+                rows.sort(key=lambda row: row["clicks"], reverse=True)
+                result["scope"] = dim
+                result["rows"] = rows
+                result["totals"] = perf.aggregate_rows(rows)
+    except deps.NotConfigured:
+        log.info("gsc_performance: no OAuth client configured; "
+                 "reporting not_configured")
+        return {"ok": False, "error": "not_configured", "fix": _FIX_OAUTH_CLIENT}
+    except gauth.AuthRequired:
+        log.info("gsc_performance: no usable token; reporting auth_required")
+        return _auth_required()
+    except (perf.PerfError, ValueError) as exc:
+        return {"ok": False, **window, "note": str(exc)}
+
+    return result
+
+
+def _merge_sitemaps(existing: list[str], newly_submitted: list[str]) -> list[str]:
+    """Append newly succeeded sitemaps onto what a property already had,
+    without duplicating one already recorded."""
+    merged = list(existing)
+    for sitemap_url in newly_submitted:
+        if sitemap_url not in merged:
+            merged.append(sitemap_url)
+    return merged
+
+
+def _sitemap_targets(
+    sitemaps: list[str] | None, sites: list[dict], properties: list[str],
+) -> list[tuple[str | None, str]]:
+    """(property, sitemap_url) pairs to submit.
+
+    An explicit `sitemaps` list is routed against the store's known
+    properties one URL at a time -- a URL that matches nothing gets a `None`
+    property, reported back as a failed row rather than dropped silently.
+    Omitted, this falls back to whatever is already recorded per property in
+    the store, which is the ONLY case that touches `store.sites.sitemaps`
+    directly rather than routing a caller-supplied list.
+    """
+    if sitemaps is not None:
+        return [(routing.resolve_property(url, properties), url) for url in sitemaps]
+    return [(site["property"], sitemap_url)
+            for site in sites for sitemap_url in site["sitemaps"]]
+
+
+@mcp.tool()
+def gsc_submit_sitemaps(sitemaps: list[str] | None = None) -> dict | list[dict]:
+    """Submit one or more sitemaps to Search Console (PUT, idempotent --
+    safe to resubmit an already-known sitemap).
+
+    `sitemaps` is an optional list of sitemap URLs; each is routed to its
+    covering property via the same host-matching gsc_check_status and
+    gsc_request_indexing use. Omit it to resubmit every sitemap already on
+    record for every property (the same list gsc_list_sites carries
+    forward on refresh).
+
+    REFUSES TO GUESS: when `sitemaps` is omitted and the store has no
+    sitemap recorded for any property, this returns `{"ok": False, "note":
+    "No sitemaps known. Pass sitemaps=[...] explicitly."}` rather than
+    trying `/sitemap.xml` -- submitting a URL nobody named is an
+    outward-facing action against the caller's Search Console property, and
+    a wrong guess leaves a permanent failed submission in their sitemap
+    list for no reason.
+
+    Returns a list of `{"site", "sitemap", "http_status", "ok", "note"}`
+    (api.submit_sitemap's shape) -- one entry per sitemap attempted, plus one
+    `{"site": None, "sitemap", "http_status": None, "ok": False, "note"}`
+    entry for any URL that matched no known property. Every successful
+    submission is recorded back onto its property's row (merged with,
+    never replacing, whatever sitemaps were already there), so a later bare
+    call resubmits it too.
+
+    On a missing, expired, or rejected token, returns `{"ok": False,
+    "error": "auth_required", "fix": ...}` instead of raising, once real
+    work is about to start (nothing has been submitted yet at that point);
+    if no OAuth client is configured at all, `{"ok": False, "error":
+    "not_configured", "fix": ...}`.
+    """
+    with deps.connection() as conn:
+        sites = store.get_sites(conn)
+        properties = [site["property"] for site in sites]
+        targets = _sitemap_targets(sitemaps, sites, properties)
+
+        if not targets:
+            return {"ok": False,
+                    "note": "No sitemaps known. Pass sitemaps=[...] explicitly."}
+
+        try:
+            active_provider = deps.provider()
+        except deps.NotConfigured:
+            log.info("gsc_submit_sitemaps: no OAuth client configured; "
+                     "reporting not_configured")
+            return {"ok": False, "error": "not_configured", "fix": _FIX_OAUTH_CLIENT}
+
+        results: list[dict] = []
+        succeeded: dict[str, list[str]] = {}
+        auth_failed = False
+        for property, sitemap_url in targets:
+            if property is None:
+                results.append({
+                    "site": None, "sitemap": sitemap_url, "http_status": None,
+                    "ok": False,
+                    "note": "no Search Console property matches this URL",
+                })
+                continue
+            try:
+                outcome = api.submit_sitemap(property, sitemap_url, active_provider)
+            except gauth.AuthRequired:
+                # A token that dies mid-loop (rather than at the very first
+                # call) must not un-submit the sitemaps that already reached
+                # Google -- stop here, persist below what already
+                # succeeded, then report auth_required rather than silently
+                # discarding real submissions.
+                auth_failed = True
+                break
+            results.append(outcome)
+            if outcome["ok"]:
+                succeeded.setdefault(property, []).append(sitemap_url)
+
+        if succeeded:
+            site_by_property = {site["property"]: site for site in sites}
+            for property, newly_submitted in succeeded.items():
+                existing_site = site_by_property[property]
+                merged = _merge_sitemaps(existing_site["sitemaps"], newly_submitted)
+                store.upsert_site(conn, property, existing_site["host"],
+                                  existing_site["permission"], merged)
+
+        if auth_failed:
+            log.info("gsc_submit_sitemaps: no usable token; reporting "
+                     "auth_required")
+            return _auth_required()
+
+        return results
 
 
 def main() -> None:
