@@ -67,10 +67,13 @@ def test_receiver_times_out():
             receiver.wait(timeout=0.5)
 
 
-def test_consent_flow_sends_one_redirect_uri_to_both_calls(monkeypatch, tmp_path):
-    """The token exchange must present the identical redirect_uri that was in
-    the authorization URL. An earlier draft read it back after the socket had
-    closed, which Google rejects.
+def test_consent_flow_sends_one_redirect_uri_to_both_calls(monkeypatch):
+    """The token exchange must present the same redirect_uri that went into
+    the authorization URL, since Google compares them.
+
+    Note this is an end-to-end consistency check, not a regression guard for
+    reading the value back after shutdown: server_close() leaves
+    server_address intact, so redirect_uri returns the same string either way.
     """
     seen = {}
 
@@ -105,7 +108,7 @@ def test_consent_flow_sends_one_redirect_uri_to_both_calls(monkeypatch, tmp_path
     assert seen["exchange_redirect_uri"] == auth_redirect
 
 
-def test_a_favicon_request_does_not_break_consent(monkeypatch):
+def test_a_favicon_request_does_not_break_consent():
     """A browser probes /favicon.ico after navigating. That carries no state
     and must not be mistaken for a failed redirect.
     """
@@ -120,3 +123,23 @@ def test_a_favicon_request_does_not_break_consent(monkeypatch):
             daemon=True,
         ).start()
         assert receiver.wait(timeout=10) == "the-code"
+
+
+def test_a_second_callback_cannot_overwrite_the_first_result():
+    """Once a result is recorded, later requests must be ignored outright.
+
+    A late or duplicated redirect carrying a bad state would otherwise
+    overwrite a good code with a state-mismatch error.
+    """
+    with gauth.LoopbackReceiver() as receiver:
+        urllib.request.urlopen(
+            f"{receiver.redirect_uri}/?code=first&state={receiver.state}",
+            timeout=5,
+        ).read()
+        # A second redirect, this time with a wrong state.
+        urllib.request.urlopen(
+            f"{receiver.redirect_uri}/?code=second&state=wrong-state",
+            timeout=5,
+        ).read()
+
+        assert receiver.wait(timeout=10) == "first"
