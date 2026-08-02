@@ -37,6 +37,11 @@ def pkce_pair() -> tuple[str, str]:
 
 def build_auth_url(client_id: str, redirect_uri: str, challenge: str,
                    state: str) -> str:
+    if len(state) < 16:
+        raise ValueError(
+            "state must be at least 16 characters of unguessable entropy; "
+            "it is the only defence against a forged redirect"
+        )
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
