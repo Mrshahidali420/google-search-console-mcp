@@ -121,15 +121,50 @@ def account_used(conn: sqlite3.Connection, account: str, *,
                  now: datetime | None = None) -> int:
     """Slots this account spent across every property in the window.
 
-    Tracked so that a per-account ceiling, if one exists, becomes visible in
-    real data rather than guessed at.
+    Counts open submissions as well as committed slots, and reads them in the
+    same order as used() — so a submission closing between the two reads is
+    counted twice rather than not at all. Over-counting wastes a slot;
+    under-counting earns a hard Quota Exceeded.
     """
     moment = now or datetime.now(UTC)
-    row = conn.execute(
+    cutoff = _window_start(moment)
+    in_flight = conn.execute(
+        "SELECT COUNT(*) AS n FROM submissions "
+        "WHERE account=? AND committed=0 AND requested_at > ?",
+        (account, cutoff),
+    ).fetchone()["n"]
+    committed = conn.execute(
         "SELECT COUNT(*) AS n FROM quota_slots WHERE account=? AND used_at > ?",
-        (account, _window_start(moment)),
+        (account, cutoff),
+    ).fetchone()["n"]
+    return int(in_flight) + int(committed)
+
+
+def _account_next_free(conn: sqlite3.Connection, account: str, *,
+                       slots: int, now: datetime) -> datetime | None:
+    """When this account's next slot frees, mirroring next_free() per property.
+
+    Must stay in step with account_used(): if one counts a source the other
+    ignores, a verdict can report no capacity and no wait time at once.
+    """
+    if max(0, slots - account_used(conn, account, now=now)) > 0:
+        return None
+    cutoff = _window_start(now)
+    row = conn.execute(
+        "SELECT MIN(stamp) AS oldest FROM ("
+        "  SELECT used_at AS stamp FROM quota_slots "
+        "   WHERE account=? AND used_at > ? "
+        "  UNION ALL "
+        "  SELECT requested_at AS stamp FROM submissions "
+        "   WHERE account=? AND committed=0 AND requested_at > ? "
+        ")",
+        (account, cutoff, account, cutoff),
     ).fetchone()
-    return int(row["n"])
+    if row is None or row["oldest"] is None:
+        return None
+    return datetime.fromisoformat(row["oldest"]) + timedelta(
+        minutes=SLOT_WINDOW_MINUTES
+    )
 
 
 def check(conn: sqlite3.Connection, account: str, property: str, *,
@@ -155,10 +190,23 @@ def check(conn: sqlite3.Connection, account: str, property: str, *,
     elif account_free is not None and account_free <= 0:
         binding = "account"
 
+    if binding is None:
+        next_free_at = None
+    else:
+        computed = (
+            next_free(conn, property, slots=property_slots, now=moment)
+            if binding == "property"
+            else _account_next_free(conn, account, slots=account_slots, now=moment)
+        )
+        # A slot can free between our two reads. Never return "blocked, with no
+        # wait time" — that reads as "go ahead" to a caller and is exactly the
+        # contradiction this pair of fields caused once already.
+        next_free_at = computed or moment
+
     return QuotaVerdict(
         allowed=binding is None,
         binding=binding,
         property_free=property_free,
         account_free=account_free,
-        next_free_at=next_free(conn, property, slots=property_slots, now=moment),
+        next_free_at=next_free_at,
     )
