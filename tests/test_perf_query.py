@@ -1,11 +1,18 @@
 # tests/test_perf_query.py
+from datetime import date
+
 import pytest
+import requests
 
 from _fakes import FakeProvider, FakeResponse, FakeSession
 from gsc_core import perf
 
 PROPS = ["sc-domain:example.com", "https://www.example.net/"]
-WINDOW = {"start_date": "2026-07-01", "end_date": "2026-07-28"}
+# Deliberately NOT a 28-day (DEFAULT_DAYS) span: if _resolve_window's
+# explicit-date passthrough were ever bypassed in favour of falling back to
+# date_range(days=DEFAULT_DAYS), a 28-day WINDOW would silently produce the
+# identical dates and hide the bug. A 14-day span makes that mutation visible.
+WINDOW = {"start_date": "2026-07-01", "end_date": "2026-07-14"}
 
 
 def rows_payload(*rows):
@@ -51,6 +58,27 @@ def test_exhausted_retries_raise_perf_error():
                         session=session, sleep=lambda _: None)
 
 
+def test_transport_exception_backs_off_and_retries():
+    """Parity with api.inspect_url: a transport exception backs off with
+    2 ** attempt seconds (not the *2 transient-status formula) and retries."""
+    session = FakeSession(requests.ConnectionError("boom"),
+                          FakeResponse(200, rows_payload()))
+    slept = []
+    perf.post_query("sc-domain:example.com", {}, FakeProvider(), session=session,
+                    sleep=slept.append)
+    assert slept == [1]
+
+
+def test_401_consumes_no_sleep():
+    """Parity with api.inspect_url: an expired token is not a rate-limit
+    signal, so retrying past a 401 must not spend a backoff sleep."""
+    session = FakeSession(FakeResponse(401), FakeResponse(200, rows_payload()))
+    slept = []
+    perf.post_query("sc-domain:example.com", {}, FakeProvider(), session=session,
+                    sleep=slept.append)
+    assert slept == []
+
+
 # ------------------------------------------------------------------- query
 
 def test_unroutable_site_raises_perf_error():
@@ -62,6 +90,16 @@ def test_unroutable_site_raises_perf_error():
 def test_query_targets_the_resolved_property_url():
     session = FakeSession(FakeResponse(200, rows_payload(row())))
     perf.query("example.com", PROPS, FakeProvider(), session=session, **WINDOW)
+    assert "sc-domain%3Aexample.com" in session.calls[0]["url"]
+
+
+def test_query_accepts_the_exact_property_string_as_site():
+    """gsc_list_sites() returns property strings, not page URLs — the most
+    plausible thing an AI assistant hands back in as `site`. This must
+    resolve via routing.resolve_property's identity pass, not raise."""
+    session = FakeSession(FakeResponse(200, rows_payload(row())))
+    perf.query("sc-domain:example.com", PROPS, FakeProvider(), session=session,
+              **WINDOW)
     assert "sc-domain%3Aexample.com" in session.calls[0]["url"]
 
 
@@ -105,6 +143,16 @@ def test_invalid_dimension_is_rejected_before_any_request():
     assert session.calls == []
 
 
+def test_query_forwards_the_sleep_seam():
+    """A retry inside the pagination loop must honour the caller's injected
+    sleep, not fall back to the real clock three layers down."""
+    session = FakeSession(FakeResponse(503), FakeResponse(200, rows_payload(row())))
+    slept = []
+    perf.query("example.com", PROPS, FakeProvider(), session=session,
+              sleep=slept.append, **WINDOW)
+    assert slept == [2]
+
+
 # ------------------------------------------------------------------ totals
 
 def test_totals_returns_aggregates_with_the_resolved_property():
@@ -113,6 +161,15 @@ def test_totals_returns_aggregates_with_the_resolved_property():
     assert out["clicks"] == 9
     assert out["site"] == "sc-domain:example.com"
     assert out["start"] == "2026-07-01"
+
+
+def test_totals_issues_exactly_one_http_call():
+    """Pins _paginate's `page_size <= 0` break: a single full (non-short)
+    row exactly exhausts limit=1, and the loop must stop there rather than
+    issuing a second page request for a limit that is already spent."""
+    session = FakeSession(FakeResponse(200, rows_payload(row(clicks=9, impressions=90))))
+    perf.totals("example.com", PROPS, FakeProvider(), session=session, **WINDOW)
+    assert len(session.calls) == 1
 
 
 # --------------------------------------------------------------- portfolio
@@ -143,6 +200,28 @@ def test_one_failing_property_does_not_sink_the_run():
     assert any(r.get("clicks") == 4 for r in out)
 
 
+def test_portfolio_failure_log_never_carries_the_response_body(caplog):
+    """A truncated response body is fine to return to a caller (it lands in
+    the row's "error" key) but must never reach a logger."""
+    session = FakeSession(
+        FakeResponse(403, text="SECRET-BODY-user@example.com quota detail"),
+        FakeResponse(200, rows_payload(row(clicks=4))),
+    )
+    with caplog.at_level("WARNING", logger="gsc.gsc_core.perf"):
+        out = perf.portfolio(PROPS, FakeProvider(), session=session, concurrency=1,
+                             **WINDOW)
+    assert any("SECRET-BODY" in r["error"] for r in out if "error" in r)
+    assert "SECRET-BODY" not in caplog.text
+
+
+def test_portfolio_forwards_the_sleep_seam():
+    session = FakeSession(FakeResponse(503), FakeResponse(200, rows_payload(row())))
+    slept = []
+    perf.portfolio(["sc-domain:example.com"], FakeProvider(), session=session,
+                   concurrency=1, sleep=slept.append, **WINDOW)
+    assert slept == [2]
+
+
 # ------------------------------------------------------------------ hourly
 
 def test_hourly_uses_the_hour_dimension_and_hourly_data_state():
@@ -157,3 +236,54 @@ def test_hourly_rejects_a_window_beyond_what_google_retains():
     with pytest.raises(ValueError):
         perf.hourly("example.com", PROPS, FakeProvider(),
                     hours=perf.HOURLY_WINDOW_DAYS * 24 + 1, session=FakeSession())
+
+
+def test_hourly_targets_the_resolved_property_url():
+    session = FakeSession(FakeResponse(200, rows_payload()))
+    perf.hourly("example.com", PROPS, FakeProvider(), hours=24, session=session)
+    assert "sc-domain%3Aexample.com" in session.calls[0]["url"]
+
+
+def test_hourly_unroutable_site_raises_perf_error():
+    with pytest.raises(perf.PerfError, match="no Search Console property"):
+        perf.hourly("elsewhere.test", PROPS, FakeProvider(), hours=24,
+                    session=FakeSession())
+
+
+def test_hourly_requests_the_maximum_row_limit():
+    session = FakeSession(FakeResponse(200, rows_payload()))
+    perf.hourly("example.com", PROPS, FakeProvider(), hours=24, session=session)
+    assert session.calls[0]["json"]["rowLimit"] == perf.MAX_ROW_LIMIT
+
+
+def test_hourly_pins_the_calendar_span():
+    session = FakeSession(FakeResponse(200, rows_payload()))
+    perf.hourly("example.com", PROPS, FakeProvider(), hours=24, session=session,
+               today=date(2020, 1, 15))
+    body = session.calls[0]["json"]
+    assert body["startDate"] == "2020-01-14"
+    assert body["endDate"] == "2020-01-15"
+
+
+def test_hourly_normalizes_rows_under_the_hour_key():
+    payload = rows_payload(row(keys=["2020-01-15T10:00:00+00:00"]))
+    session = FakeSession(FakeResponse(200, payload))
+    out = perf.hourly("example.com", PROPS, FakeProvider(), hours=24, session=session,
+                      today=date(2020, 1, 15))
+    assert out[0]["hour"] == "2020-01-15T10:00:00+00:00"
+
+
+def test_hourly_filters_to_exactly_the_trailing_window():
+    """48 fixture rows across two full days; the injected `today` seam must
+    anchor "now" at the END of 2020-01-15 so only that day's 24 hours are
+    within a trailing 24-hour window — pins span_days, start_date/end_date,
+    and that filter_hourly_rows is actually called with now=now."""
+    rows = (
+        [row(keys=[f"2020-01-14T{h:02d}:00:00+00:00"]) for h in range(24)]
+        + [row(keys=[f"2020-01-15T{h:02d}:00:00+00:00"]) for h in range(24)]
+    )
+    session = FakeSession(FakeResponse(200, rows_payload(*rows)))
+    out = perf.hourly("example.com", PROPS, FakeProvider(), hours=24, session=session,
+                      today=date(2020, 1, 15))
+    assert len(out) == 24
+    assert all(r["hour"].startswith("2020-01-15") for r in out)

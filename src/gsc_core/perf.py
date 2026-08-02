@@ -279,21 +279,11 @@ def post_query(property: str, body: dict, provider: TokenProvider,
                sleep: Callable[[float], None] = time.sleep) -> dict:
     """POST one searchAnalytics.query request, retrying past transient failures.
 
-    Mirrors api.inspect_url's retry policy exactly — same branches, same
-    backoff formulas — so the two clients cannot silently drift apart:
-
-    - bearer re-read from `provider` on every attempt.
-    - 401 -> invalidate the token and retry on the next loop iteration,
-      without spending a backoff sleep.
-    - 429/500/502/503 -> exponential backoff (2 ** attempt * 2 seconds) and
-      retry.
-    - a transport exception -> backs off with 2 ** attempt seconds and
-      retries, raising on the final attempt.
-    - any other status -> raise immediately, no retry.
-
-    The one difference from inspect_url: this raises PerfError rather than
-    returning an error tuple. A paginated caller has no sane "error row" to
-    substitute mid-loop, so a hard failure is the only sound response.
+    Mirrors api.inspect_url's retry policy exactly (see that function's
+    docstring for the branch-by-branch reasoning) so the two clients cannot
+    silently drift apart. The one difference: this raises PerfError rather
+    than returning an error tuple — a paginated caller has no sane "error
+    row" to substitute mid-loop.
     """
     client = session or _session
     uri = QUERY_URI.format(site=quote(property, safe=""))
@@ -332,7 +322,8 @@ def _paginate(property: str, start_date: str, end_date: str, provider: TokenProv
              dimensions: list[str] | None = None, data_state: str = DEFAULT_DATA_STATE,
              search_type: str = "web", limit: int = DEFAULT_ROW_LIMIT,
              filters: list[dict] | None = None,
-             session: requests.Session | None = None) -> list[dict]:
+             session: requests.Session | None = None,
+             sleep: Callable[[float], None] = time.sleep) -> list[dict]:
     """The pagination loop against an ALREADY-RESOLVED property.
 
     Preserve this contract exactly: `page_size = min(MAX_ROW_LIMIT, limit -
@@ -345,6 +336,12 @@ def _paginate(property: str, start_date: str, end_date: str, provider: TokenProv
     one — harmless against the real API, which never returns a partial
     page followed by more, but it turns a fake session that runs out of
     queued responses into an infinite loop instead of a failing test.
+
+    `sleep` is forwarded to every post_query() call so a caller three
+    layers up (query/totals/portfolio) can still avoid a real backoff
+    delay when a page retries — without this seam retries inside a
+    pagination loop always block on the real clock, no matter what the
+    caller passed to query()/totals()/portfolio().
     """
     rows: list[dict] = []
     start_row = 0
@@ -356,7 +353,7 @@ def _paginate(property: str, start_date: str, end_date: str, provider: TokenProv
         body = build_body(start_date, end_date, dimensions=dimensions,
                           data_state=data_state, search_type=search_type,
                           row_limit=page_size, start_row=start_row, filters=filters)
-        payload = post_query(property, body, provider, session=session)
+        payload = post_query(property, body, provider, session=session, sleep=sleep)
         page = payload.get("rows", [])
         rows.extend(normalize_row(row, dimensions) for row in page)
 
@@ -382,7 +379,8 @@ def query(site: str, properties: list[str], provider: TokenProvider,
          start_date: str | None = None, end_date: str | None = None,
          data_state: str = DEFAULT_DATA_STATE, search_type: str = "web",
          limit: int = DEFAULT_ROW_LIMIT, filters: list[dict] | None = None,
-         session: requests.Session | None = None) -> list[dict]:
+         session: requests.Session | None = None,
+         sleep: Callable[[float], None] = time.sleep) -> list[dict]:
     """Paginated Search Analytics rows for `site`, normalised with dimension
     names. `limit=0` means every row Google will give.
 
@@ -399,14 +397,15 @@ def query(site: str, properties: list[str], provider: TokenProvider,
     return _paginate(property, window_start, window_end, provider,
                      dimensions=dimensions, data_state=data_state,
                      search_type=search_type, limit=limit, filters=filters,
-                     session=session)
+                     session=session, sleep=sleep)
 
 
 def totals(site: str, properties: list[str], provider: TokenProvider,
           days: int = DEFAULT_DAYS, start_date: str | None = None,
           end_date: str | None = None, data_state: str = DEFAULT_DATA_STATE,
           search_type: str = "web", filters: list[dict] | None = None,
-          session: requests.Session | None = None) -> dict:
+          session: requests.Session | None = None,
+          sleep: Callable[[float], None] = time.sleep) -> dict:
     """Site-wide aggregate metrics for the window, plus site/start/end.
 
     Queried with no dimensions, so Google returns at most one row; `limit=1`
@@ -420,7 +419,7 @@ def totals(site: str, properties: list[str], provider: TokenProvider,
     rows = _paginate(property, window_start, window_end, provider,
                      dimensions=None, data_state=data_state,
                      search_type=search_type, limit=1, filters=filters,
-                     session=session)
+                     session=session, sleep=sleep)
     return {"site": property, "start": window_start, "end": window_end,
            **aggregate_rows(rows)}
 
@@ -428,19 +427,23 @@ def totals(site: str, properties: list[str], provider: TokenProvider,
 def hourly(site: str, properties: list[str], provider: TokenProvider,
           hours: int = 24, search_type: str = "web",
           session: requests.Session | None = None,
-          today: date | None = None) -> list[dict]:
+          today: date | None = None,
+          sleep: Callable[[float], None] = time.sleep) -> list[dict]:
     """Trailing `hours` of hourly Search Analytics data for `site`.
 
-    `today` anchors the request's calendar span so it is testable without
-    depending on the real clock; production calls leave it unset and get
-    the real date. Requesting more than HOURLY_WINDOW_DAYS is rejected
-    outright — Google does not retain hourly data that far back, so
-    sending it would just come back empty with no signal why.
+    `today`, if given, anchors "now" at the END of that date, not its
+    start: production's real `now` is always mid-way through "today", and
+    Google can never return data later than that real moment — the reason
+    filter_hourly_rows' lower-bound-only cutoff is sufficient. Anchoring
+    the injected seam to midnight instead would put "now" BEFORE the
+    request's own end_date, so a fixture with data spanning through
+    end_date would clear the lower bound in full and nothing would ever
+    get filtered out. Requesting more than HOURLY_WINDOW_DAYS is rejected
+    outright — Google does not retain hourly data that far back.
 
     dimensions/dataState are hardcoded to HOUR/hourly_all rather than going
-    through validate_query, which deliberately rejects that combination
-    everywhere else (see validate_query's docstring) — hourly() is the one
-    call site allowed to use it.
+    through validate_query, which rejects that combination everywhere else
+    (see its docstring) — hourly() is the one call site allowed to use it.
     """
     if hours <= 0:
         raise ValueError(f"hours must be positive, got {hours}")
@@ -453,7 +456,7 @@ def hourly(site: str, properties: list[str], provider: TokenProvider,
     if property is None:
         raise PerfError(f"{site!r} matches no Search Console property")
 
-    now = (datetime.combine(today, datetime.min.time(), tzinfo=UTC) if today
+    now = (datetime.combine(today, datetime.max.time(), tzinfo=UTC) if today
           else datetime.now(UTC))
     end_date = now.date()
     span_days = min(HOURLY_WINDOW_DAYS, -(-hours // 24) + 1)
@@ -462,7 +465,7 @@ def hourly(site: str, properties: list[str], provider: TokenProvider,
     body = build_body(start_date.isoformat(), end_date.isoformat(),
                       dimensions=[HOUR_DIMENSION], data_state=HOURLY_DATA_STATE,
                       search_type=search_type, row_limit=MAX_ROW_LIMIT)
-    payload = post_query(property, body, provider, session=session)
+    payload = post_query(property, body, provider, session=session, sleep=sleep)
     rows = [normalize_row(row, ["hour"]) for row in payload.get("rows", [])]
     return filter_hourly_rows(rows, hours, now=now)
 
@@ -480,7 +483,8 @@ def portfolio(properties: list[str], provider: TokenProvider,
              days: int = DEFAULT_DAYS, start_date: str | None = None,
              end_date: str | None = None, data_state: str = DEFAULT_DATA_STATE,
              search_type: str = "web", concurrency: int = 4,
-             session: requests.Session | None = None) -> list[dict]:
+             session: requests.Session | None = None,
+             sleep: Callable[[float], None] = time.sleep) -> list[dict]:
     """One totals-shaped row per property, sorted busiest (clicks, then
     impressions) first.
 
@@ -497,11 +501,19 @@ def portfolio(properties: list[str], provider: TokenProvider,
         try:
             rows = _paginate(property, window_start, window_end, provider,
                              dimensions=None, data_state=data_state,
-                             search_type=search_type, limit=1, session=session)
+                             search_type=search_type, limit=1, session=session,
+                             sleep=sleep)
             return {"site": property, "start": window_start, "end": window_end,
                    **aggregate_rows(rows)}
         except (PerfError, ValueError) as exc:
-            log.warning("portfolio: %s failed: %s", property, exc)
+            # Never log `exc` itself: PerfError's message can carry a
+            # truncated response body (see post_query), and a body is fine
+            # to return to a caller but must never reach a logger. Only
+            # the property name and exception type go to the log; the
+            # full detail still reaches the caller via the row's "error"
+            # key below, which is not a log sink.
+            log.warning("portfolio: %s failed with %s", property,
+                        type(exc).__name__)
             return _zero_row(property, window_start, window_end, exc)
 
     workers = max(1, min(concurrency, len(properties)))

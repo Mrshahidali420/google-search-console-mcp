@@ -47,7 +47,24 @@ def _without_www(host: str) -> str:
 
 
 def resolve_property(url: str, properties: list[str]) -> str | None:
-    """Return the property string covering url, or None if none does."""
+    """Return the property string covering url, or None if none does.
+
+    Checks identity first, case-insensitively: is `url` itself one of
+    `properties`, verbatim? This is what lets a caller round-trip the exact
+    string gsc_list_sites() (or this function) already returned. Without
+    it, an sc-domain: property can never resolve against itself at all —
+    "sc-domain:example.com" is not a URL, so host_of() reads the colon as
+    a port separator and produces the nonsense host "sc-domain", which
+    then fails every host-based step below. A URL-prefix property mostly
+    survives that round trip by accident (its host_of() output usually
+    still matches), which made the gap easy to miss. Purely additive: it
+    runs before step 1 and only ever short-circuits an exact match, so it
+    cannot change the outcome for a real page URL.
+    """
+    for prop in properties:
+        if prop.lower() == url.lower():
+            return prop
+
     host = host_of(url)
     host_bare = _without_www(host)
 

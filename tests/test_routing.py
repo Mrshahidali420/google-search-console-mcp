@@ -97,3 +97,30 @@ def test_route_all_preserves_input_order_and_flags_misses():
 
 def test_empty_property_list_matches_nothing():
     assert routing.resolve_property("https://example.com/a", []) is None
+
+
+# --------------------------------------------------------- identity match
+
+def test_sc_domain_property_resolves_against_its_own_exact_string():
+    """sc-domain: properties are not URLs — host_of() cannot parse one, so
+    without an identity pass this can never resolve at all."""
+    assert routing.resolve_property(DOMAIN, [DOMAIN]) == DOMAIN
+
+
+def test_url_prefix_property_resolves_against_its_own_exact_string():
+    assert routing.resolve_property(PREFIX, [PREFIX]) == PREFIX
+
+
+def test_identity_match_is_case_insensitive():
+    assert routing.resolve_property(
+        "SC-DOMAIN:EXAMPLE.COM", ["sc-domain:example.com"]
+    ) == "sc-domain:example.com"
+
+
+def test_identity_match_does_not_disturb_host_based_matching():
+    """The identity pass is additive: ordinary page URLs still resolve
+    exactly as before, through the host-based steps."""
+    assert routing.resolve_property("https://example.com/a", [DOMAIN]) == DOMAIN
+    assert routing.resolve_property("https://blog.example.com/a", [DOMAIN]) == DOMAIN
+    assert routing.resolve_property("https://elsewhere.test/a", [DOMAIN, PREFIX]) is None
+    assert routing.resolve_property("https://www.example.net/a", [PREFIX]) == PREFIX
