@@ -62,8 +62,10 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from enum import Enum
 from importlib.resources import as_file, files
 from pathlib import Path
+from typing import NamedTuple
 
 from gsc_core import browsers, paths, profiles, runlog
 
@@ -413,14 +415,64 @@ def _read_json(path: Path) -> tuple[object | None, bool]:
 # Pairing
 # ---------------------------------------------------------------------------
 
+class PairCode(Enum):
+    """Which rule decided a pair_request. A CLOSED vocabulary, on purpose.
+
+    The prose ``reason`` cannot be logged: its commonest form interpolates
+    ``extension_dir()``, an absolute path carrying the operator's account
+    name, and the bridge's logger writes to a file that outlives the
+    session and gets pasted into bug reports. Redacting the prose was
+    rejected — a redaction pattern would have to anticipate every string
+    this module can return — so the log gets a code instead.
+
+    An ``Enum`` rather than a string constant because the property that
+    makes this safe is that a code cannot be BUILT. Nothing can format a
+    path into a member, and a caller inventing one gets a ValueError from
+    ``PairCode(...)`` rather than a leak. Adding a denial branch means
+    adding a member here, which is exactly the review moment wanted.
+
+    Values are the wire/log spelling and are pinned by test: a log line is
+    read by people and by grep, and renaming one silently is a breakage.
+    """
+
+    OK = "ok"
+    #: The bridge was started without a browser target — run gsc_pair.
+    NO_TARGET = "no_target"
+    #: The claim is not shaped like a Chromium extension ID at all.
+    MALFORMED_ID = "malformed_id"
+    #: The connection's Origin disagrees with the ID it claims to be.
+    BAD_ORIGIN = "bad_origin"
+    #: Nothing in this profile is loaded from our extraction directory —
+    #: Chrome is pointed at some other unpacked directory, or at none.
+    DIR_MISMATCH = "dir_mismatch"
+    #: Something IS loaded from our directory, under a different ID: the
+    #: extension was reloaded from elsewhere and Chromium rehashed it.
+    ID_MISMATCH = "id_mismatch"
+
+
+class Verdict(NamedTuple):
+    """The answer to one pair_request, in the two forms it is needed in.
+
+    ``reason`` goes on the wire to the extension, which shows it to the
+    user who already owns the path inside it. ``code`` is the only half
+    that may be logged. Keeping them on one object is what stops a future
+    caller from logging the wrong one by reflex.
+    """
+
+    allowed: bool
+    reason: str
+    code: PairCode
+
+
 def verify_pair_request(installed: browsers.Installed,
                         profile: profiles.Profile,
                         claimed_id: str,
-                        origin: str | None) -> tuple[bool, str]:
+                        origin: str | None) -> Verdict:
     """May the bridge hand its token to a client claiming to be our extension?
 
-    Returns (allowed, reason); the reason is shown to the user either way,
-    so a refusal always says what to do about it.
+    Returns a ``Verdict``: the reason is shown to the user either way, so a
+    refusal always says what to do about it, and the code says which rule
+    fired in a form that is safe to write to a log file.
 
     This is NOT trust-on-first-use. The browser profile records the ID
     Chromium assigned to the unpacked extension loaded from OUR directory,
@@ -430,23 +482,31 @@ def verify_pair_request(installed: browsers.Installed,
     Google session cookies too, and the token buys it nothing.
     """
     if not EXTENSION_ID_RE.match(claimed_id or ""):
-        return False, "malformed extension id"
+        return Verdict(False, "malformed extension id", PairCode.MALFORMED_ID)
     if origin and origin != f"chrome-extension://{claimed_id}":
-        return False, f"Origin {origin} does not match the claimed extension id"
+        return Verdict(
+            False,
+            f"Origin {origin} does not match the claimed extension id",
+            PairCode.BAD_ORIGIN,
+        )
 
     real = look_up_extension(installed, profile).extension_id
     if not real:
-        return False, (
+        return Verdict(
+            False,
             f"no extension is loaded from {extension_dir()} in "
             f"{installed.brand.label} — open {installed.brand.extensions_url}, "
-            "turn on Developer mode, and Load unpacked from that directory"
+            "turn on Developer mode, and Load unpacked from that directory",
+            PairCode.DIR_MISMATCH,
         )
     if real != claimed_id:
-        return False, (
+        return Verdict(
+            False,
             f"that is not the extension installed from {extension_dir()} "
-            f"(this browser profile has {real})"
+            f"(this browser profile has {real})",
+            PairCode.ID_MISMATCH,
         )
-    return True, "verified against the browser profile"
+    return Verdict(True, "verified against the browser profile", PairCode.OK)
 
 
 def wake_url(ext_id: str) -> str:
