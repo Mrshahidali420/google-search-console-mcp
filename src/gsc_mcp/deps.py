@@ -31,7 +31,7 @@ CLIENT_SECRET_ENV = "GSC_MCP_CLIENT_SECRET"
 # distributed package so a user never has to create one in the Cloud
 # Console themselves. That Cloud app does not exist yet, and a placeholder
 # secret must never be a real one committed to a public repository — so
-# both constants are empty until the verified app exists. Populating them
+# both constants are empty until the published app exists. Populating them
 # is a one-line change at that point; the environment variables below let
 # development and internal use proceed in the meantime without it.
 EMBEDDED_CLIENT_ID = ""

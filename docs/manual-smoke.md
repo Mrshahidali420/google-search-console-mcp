@@ -111,8 +111,10 @@ Call `gsc_setup()`.
 ## 4. Approve the consent screen, then call `gsc_setup()` again
 
 Sign in as the account that owns your properties and approve the scope.
-Google will warn you that the app is unverified — expected, verification
-has not started; choose the advanced option and continue.
+Google may warn you that the app is unverified — expected for an app
+still in Testing; choose the advanced option and continue. A published
+app requesting only the non-sensitive Search Console scopes should not
+show it.
 
 Then call `gsc_setup()` a second time.
 

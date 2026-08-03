@@ -146,7 +146,7 @@ python -m venv .venv
 app for this project does not exist yet, and a real client secret can
 never be committed to a public repository — so `EMBEDDED_CLIENT_ID` and
 `EMBEDDED_CLIENT_SECRET` in `gsc_mcp/deps.py` are empty strings by design.
-Until a verified app ships, every install needs its own:
+Until a published app ships an embedded client, every install needs its own:
 
 All of this happens in [Google Cloud Console](https://console.cloud.google.com/),
 free, and takes about five minutes. Do the steps in order — step 4 is the
@@ -172,22 +172,26 @@ one people skip, and skipping it fails at the very end.
      what you are granted.
    - Save through to the end.
 
-4. **Add yourself as a Test user.** Still on the OAuth consent screen,
-   find **Test users** (on newer consoles: **Audience → Test users**) and
-   add the Google address that owns your Search Console properties.
+4. **Publish the app** — or add yourself as a Test user. Either works;
+   publishing is better, and this is the step people skip.
 
-   This step is not optional and it is the one that fails late. The
-   Search Console scope (`webmasters`) is a **sensitive scope**, so while
-   your app sits in **Testing** status — which is where every new app
-   starts — Google will only let listed test users sign in. Everyone else
-   gets `403: access_denied` on the consent screen, *after* creating the
-   project, enabling the API, creating the client, setting the environment
-   variables, and running `gsc_setup`. Nothing earlier warns you.
+   Every new app starts in **Testing** status, where Google lets only
+   listed test users sign in. Everyone else gets `403: access_denied` on
+   the consent screen — *after* creating the project, enabling the API,
+   creating the client, setting the environment variables and running
+   `gsc_setup`. Nothing earlier warns you. A Testing app also expires its
+   refresh token every 7 days, so sign-in breaks a week later in a way
+   that looks like a bug here and is not.
 
-   You do not need to publish the app or submit it for verification. A
-   Testing app with you as a test user works indefinitely for your own
-   account; the only cost is that the refresh token expires every 7 days
-   and you sign in again.
+   Both Search Console scopes are classed **non-sensitive** by Google, so
+   publishing costs nothing: no verification, no security assessment, no
+   user cap. **Audience → Publishing status → Publish app**, and both
+   problems above disappear.
+
+   If you would rather stay in Testing, find **Test users** (on newer
+   consoles: **Audience → Test users**) and add the Google address that
+   owns your Search Console properties. That works indefinitely for your
+   own account, at the cost of signing in again every 7 days.
 
 5. **Create the OAuth client.** **APIs & Services → Credentials → Create
    credentials → OAuth client ID**, application type **Desktop app**.
@@ -406,8 +410,7 @@ Stated plainly, because they are the things a reviewer should look at first:
 - macOS and Linux browser detection has only ever run against fixtures, never on real hardware, here or in CI. The first person to run the smoke checklist on a Mac or a Linux box is performing that test.
 - `gsc_detect_browsers` reports `matches_authorised_account` as `null` on every real machine today. The flag reads an `account_email` key from the stored token, and nothing writes it: the current scope set returns no identity claim and the consent step does not record the authorising account. The plumbing is correct and inert. Treat the field as "unknown", not as "does not match".
 - The `extension` check reports whether the extension is **registered**, not whether it is working. Only the bridge learns whether the MV3 worker is alive, and only at submission time.
-- Google OAuth verification for the sensitive `webmasters` scope has not started.
-- No OAuth client is embedded yet, so users must supply their own Google Cloud credentials (see Install above).
+- No OAuth client is embedded yet, so users must supply their own Google Cloud credentials (see Install above). Google classes both Search Console scopes as **non-sensitive**, so the app that will carry that client needs no verification and no user cap — only publishing.
 - `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright — confirmed directly against the 2.0 wheel, which has no `fastmcp` module at all — so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to whatever construction API replaced it.
 
 ## Contributing

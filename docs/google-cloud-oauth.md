@@ -1,61 +1,87 @@
 # Setting up the Google Cloud OAuth app
 
-Everything in this file happens in the Google Cloud Console and in your own
-web hosting — none of it is a code change, and none of it can be done from
-this repo. The one code change at the end is two lines in
+Everything here happens in the Google Cloud Console — none of it is a code
+change. The one code change comes at the end, and it is two lines in
 `src/gsc_mcp/deps.py`.
 
 Console UI names move around. If a heading below does not match what you
-see, search the console for the API or setting rather than hunting for the
-exact wording.
+see, search the console rather than hunting for the exact wording.
+
+## The short version
+
+**Both Search Console scopes are non-sensitive.** The console confirms it:
+Google Auth Platform → Data access lists `.../auth/webmasters` and
+`.../auth/webmasters.readonly` under *Your non-sensitive scopes*, with
+*Your sensitive scopes* and *Your restricted scopes* both empty.
+
+That removes the whole verification track. No review, no third-party
+security assessment, no 100-user cap, no homepage or privacy-policy
+prerequisite, no demo video. You create the app, you publish it, you are
+done — and there is no reason to downgrade to `webmasters.readonly`,
+so `gsc_submit_sitemaps` (the one call needing write access,
+`api.py:218`) keeps working.
 
 ---
 
-## Phase A — a working client, today
+## Steps
 
-This unblocks the manual smoke test in `docs/manual-smoke.md`, which has
-never run, because nothing in this codebase has ever authenticated against
-a real Google account. No verification is needed for this phase.
-
-- [ ] **1. Create a Cloud project.** One project, dedicated to this app.
-      Do not reuse a project you already use for client work — the OAuth
-      app's identity, and later its verification, belongs to the project.
+- [ ] **1. Create a Cloud project.** One project dedicated to this app.
+      Don't reuse a project used for client work — the OAuth app's
+      identity belongs to the project.
 
 - [ ] **2. Enable the API.** APIs & Services → Library → **Google Search
       Console API** (`searchconsole.googleapis.com`) → Enable.
 
-      Do **not** enable the separate "Web Search Indexing API". Despite the
-      name it only accepts `JobPosting` and `BroadcastEvent` pages, and it
-      is not what this tool uses. Request Indexing goes through the browser
-      extension precisely because Google exposes no public API for it.
+      Separate from all the consent-screen work, and easy to miss because
+      nothing prompts for it. Without it every call returns a 403 saying
+      the API is disabled.
 
-- [ ] **3. Configure the consent screen.** Google Auth Platform → Branding.
-      App name, user support email, developer contact email.
+      Do **not** enable the "Web Search Indexing API". Despite the name it
+      only accepts `JobPosting` and `BroadcastEvent` pages. Request
+      Indexing goes through the bundled browser extension precisely
+      because Google exposes no public API for it.
 
-      The app name must not imply Google built or endorses it. "GSC MCP"
-      is fine; "Google Search Console MCP" invites a rejection at
-      verification. Skip the logo for now — uploading one adds a separate
-      brand review to the timeline.
+- [ ] **3. Configure the consent screen.** Google Auth Platform →
+      Branding. App name, user support email, developer contact email.
 
-- [ ] **4. Audience: External.** Leave publishing status on **Testing**,
-      and add your own Google account under Test users.
+      The app name shows on the consent screen as "<name> wants access to
+      your Google Account". Don't put "Google" in it — names implying
+      Google built or endorses the app get rejected. `GSC MCP` is fine.
 
-- [ ] **5. Add the scope.** Data access → Add scopes →
+- [ ] **4. Audience: External.**
+
+- [ ] **5. Add the scope.** Data access → Add or remove scopes →
       `https://www.googleapis.com/auth/webmasters`
 
-      This is the single scope the server requests (`gauth.py:34`). Full
-      `webmasters`, not `webmasters.readonly`, because sitemap submission
-      writes. It is classed **sensitive** — which matters in Phase B.
+      Full `webmasters`, not `.readonly`, because sitemap submission
+      writes. This is the only scope the server requests
+      (`gauth.py:34`), so adding `.readonly` as well just puts an extra
+      line on the consent screen.
 
-- [ ] **6. Create the client.** Clients → Create client → **Desktop app**.
-      Copy the client ID and client secret.
+- [ ] **6. Publish the app.** Audience → Publishing status → **Publish
+      app**.
+
+      Don't skip this. A new app starts in **Testing**, where only listed
+      test users can sign in *and Google expires refresh tokens after
+      seven days* — sign-in works, then breaks a week later looking
+      exactly like a bug in this code. Publishing costs nothing here
+      because the scopes are non-sensitive.
+
+      The Audience page keeps showing a "0 users / 100 user cap" bar
+      afterwards. Ignore it: by its own wording the cap applies only to
+      apps "requesting unapproved sensitive or restricted scopes", and
+      this app requests neither. The bar renders for every External app
+      regardless.
+
+- [ ] **7. Create the client.** Clients → Create client → **Desktop app**.
 
       Desktop app is the right type: the server runs on the user's own
-      machine and receives the redirect on a loopback address. The flow
-      already uses PKCE with S256 (`gauth.py:52-56`), which is what
-      actually secures an installed-app client.
+      machine and takes the redirect on a loopback address, which is the
+      only client type Google allows to do that with an arbitrary port.
+      The flow already uses PKCE with S256 (`gauth.py:52-56`), which is
+      what actually secures an installed-app client.
 
-- [ ] **7. Point the server at it.** Environment variables, which always
+- [ ] **8. Point the server at it.** Environment variables, which always
       win over the embedded constants:
 
       ```
@@ -63,79 +89,35 @@ a real Google account. No verification is needed for this phase.
       GSC_MCP_CLIENT_SECRET=<the client secret>
       ```
 
-- [ ] **8. Run the manual smoke test.** `docs/manual-smoke.md`. It spends
-      real quota slots — roughly eleven per property per rolling day, and
-      they do not come back.
+      Never commit these. See below for why the repo values stay empty.
 
-### The seven-day trap
-
-While publishing status is **Testing**, Google expires refresh tokens
-after **seven days**. Sign-in will appear to work and then break a week
-later, in a way that looks like a bug in this code and is not. Phase B is
-what removes it. If you hit it before then, sign in again.
+- [ ] **9. Run the manual smoke test.** `docs/manual-smoke.md`. Nothing in
+      this codebase has ever authenticated against a real Google account,
+      so this is the first real exercise of the OAuth path. It spends real
+      quota slots — roughly eleven per property per rolling day, and they
+      do not come back.
 
 ---
 
-## Phase B — verification, so other people can use it
-
-Required before the app leaves the 100-user cap that applies to every
-unverified app. Budget 2–6 weeks, most of it waiting on Google's replies.
-
-**The good news:** `webmasters` is a *sensitive* scope, not a *restricted*
-one. Restricted scopes (Gmail, Drive) require a paid third-party CASA
-security assessment. Sensitive scopes do not. You avoid the expensive
-part.
-
-**The long poles are the prerequisites, not the review.** Google will not
-start until all of these exist, so start them first:
-
-- [ ] **A homepage** on a domain you own, publicly reachable, that
-      describes what the app does. Not a GitHub repo page.
-- [ ] **A privacy policy** at a URL on that *same* domain, linked from the
-      homepage. It must say what Google user data the app touches, why,
-      and that you comply with the Google API Services User Data Policy
-      including the Limited Use requirements.
-- [ ] **Domain ownership verified in Search Console** under the same Google
-      account that owns the Cloud project. Fitting, given what this tool
-      does.
-- [ ] **A demo video** on YouTube (unlisted is fine) showing the OAuth
-      consent screen — with the client ID visible in the address bar — the
-      grant, and what the app then does with the data.
-- [ ] **A scope justification**: one paragraph on why the app cannot work
-      without full `webmasters`. Say that it submits sitemaps and reads
-      URL inspection results, and that the read-only variant cannot submit.
-
-Then: Google Auth Platform → Publishing status → **Publish app** →
-Prepare for verification → submit. Expect a round or two of questions.
-
----
-
-## The decision this forces
+## Shipping the client to users
 
 `EMBEDDED_CLIENT_ID` and `EMBEDDED_CLIENT_SECRET` are empty strings
-(`deps.py:37-38`) and a real secret must never be committed to a public
-repo. Decision D1 says the product ships its own client so a user just
-clicks Allow. Those two facts collide, and the collision is real:
+(`deps.py:37-38`). Decision D1 says the product ships its own client so a
+user just clicks Allow. Both can be true, because **the repo and the
+released package are different places**.
 
-A Desktop-app client secret is **not** confidential — Google's own docs
-acknowledge that an installed app cannot keep one, which is why PKCE
-exists. So embedding it is not a security failure in the usual sense.
-What it does mean on a *public* repo is that the value is in git history
-permanently, and anyone can stand up a consent screen carrying your app's
-name and your verification.
+A Desktop-app client secret is not confidential — an installed app cannot
+keep one, which is why PKCE exists, and anyone can unzip a wheel and read
+it. So embedding it in a release is normal practice. What committing it to
+a *public repo* costs you is cheap rotation: a value in git history is
+permanent, while a value baked into a build can be changed in the console
+and rebuilt whenever you want.
 
-Three ways to go, and this is your call:
+So: keep the constants empty in git, and inject at build time. The
+mechanism to use is a gitignored `_embedded.py` that `deps.py` imports
+inside a `try/except ImportError`, falling back to `""`. CI writes that
+file from repository secrets immediately before `python -m build`. No
+tracked source is mutated, the fallback stays explicit and testable, and a
+source checkout behaves exactly as it does today.
 
-1. **Embed both.** What D1 assumes. Standard practice for installed apps.
-   Cost: your published app's identity is reusable by anyone, and every
-   user counts against your app's standing with Google.
-2. **Distribute the client ID, keep the secret out of git**, injected at
-   package-build time. Reduces the exposure without changing the user's
-   experience. Verify in the console whether your client type will accept
-   a token exchange without the secret — that behaviour has changed before
-   and I would not build on my recollection of it.
-3. **Leave both empty** — every user creates their own Cloud client. No
-   verification, no user cap, no shared identity. Cost: real setup
-   friction, which is exactly what D1 wanted to remove.
-
-Phase A works identically under all three, so nothing here blocks starting.
+This is not yet built.
