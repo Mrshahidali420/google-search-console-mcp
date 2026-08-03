@@ -72,12 +72,18 @@ _DELEGATIONS = [
 def test_the_wrapper_delegates_and_returns_the_body_result(
     tool_name: str, body_name: str, args: tuple, kwargs: dict,
     want_args: tuple, want_kwargs: dict, monkeypatch: pytest.MonkeyPatch,
+    home,
 ) -> None:
     """The whole contract of a wrapper: arguments in, result out, untouched.
 
     Identity on the sentinel, not equality: a wrapper that rebuilt the dict
     would be putting result-shaping logic in server.py, which is the one
     file this milestone is not allowed to grow.
+
+    `home` is taken even though the spy means no real body runs. That is
+    exactly the assumption a wrapper regression would break: a wrapper that
+    stopped delegating would run the real tool against the contributor's
+    own GSC_MCP_HOME — their store, and their eleven-a-day quota.
     """
     sentinel: dict = {"ok": True, "sentinel": object()}
     seen: list[tuple] = []
@@ -94,7 +100,7 @@ def test_the_wrapper_delegates_and_returns_the_body_result(
 
 
 def test_job_status_can_be_called_with_no_job_id(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, home,
 ) -> None:
     """"the most recent job" is the documented default, so the default has
     to survive the wrapper — a required parameter here would make the
@@ -108,7 +114,7 @@ def test_job_status_can_be_called_with_no_job_id(
 
 
 def test_no_wrapper_swallows_the_bodys_refusal(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, home,
 ) -> None:
     """A refusal envelope is the tool bodies' job. If a wrapper ever grew a
     try/except of its own it would rewrite them, and the caller would lose
