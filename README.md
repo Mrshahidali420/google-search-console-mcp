@@ -142,11 +142,17 @@ python -m venv .venv
 
 ### You must bring your own OAuth client
 
-`gsc-mcp` does not ship an embedded Google OAuth client. The Google Cloud
-app for this project does not exist yet, and a real client secret can
-never be committed to a public repository — so `EMBEDDED_CLIENT_ID` and
-`EMBEDDED_CLIENT_SECRET` in `gsc_mcp/deps.py` are empty strings by design.
-Until a published app ships an embedded client, every install needs its own:
+Release wheels carry their own OAuth client, injected at build time — but
+no release has been published yet, so if you are installing from source
+you need your own. A source checkout never contains a client: a real
+secret cannot be committed to a public repository, so it is written into
+the build instead (see
+[docs/google-cloud-oauth.md](docs/google-cloud-oauth.md)) and
+`deps._embedded_client()` falls back to empty without it.
+
+Environment variables override an embedded client either way, so these
+steps also apply if you have a release build but want to point it at your
+own Google Cloud project:
 
 All of this happens in [Google Cloud Console](https://console.cloud.google.com/),
 free, and takes about five minutes. Do the steps in order — step 4 is the
@@ -410,7 +416,7 @@ Stated plainly, because they are the things a reviewer should look at first:
 - macOS and Linux browser detection has only ever run against fixtures, never on real hardware, here or in CI. The first person to run the smoke checklist on a Mac or a Linux box is performing that test.
 - `gsc_detect_browsers` reports `matches_authorised_account` as `null` on every real machine today. The flag reads an `account_email` key from the stored token, and nothing writes it: the current scope set returns no identity claim and the consent step does not record the authorising account. The plumbing is correct and inert. Treat the field as "unknown", not as "does not match".
 - The `extension` check reports whether the extension is **registered**, not whether it is working. Only the bridge learns whether the MV3 worker is alive, and only at submission time.
-- No OAuth client is embedded yet, so users must supply their own Google Cloud credentials (see Install above). Google classes both Search Console scopes as **non-sensitive**, so the app that will carry that client needs no verification and no user cap — only publishing.
+- The embedded-client machinery is built and verified, but **no release has been published**, so in practice everyone installing today still supplies their own Google Cloud credentials (see Install above). The wheel produced by the `Release build` workflow does carry a client; nothing has shipped it to a package index yet.
 - `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright — confirmed directly against the 2.0 wheel, which has no `fastmcp` module at all — so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to whatever construction API replaced it.
 
 ## Contributing

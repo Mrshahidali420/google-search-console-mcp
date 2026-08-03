@@ -91,6 +91,14 @@ path = "src/gsc_mcp/__init__.py"
 # a package-data glob that silently matches nothing fails at install time,
 # not in CI.
 packages = ["src/gsc_core", "src/gsc_mcp"]
+# _embedded.py carries the OAuth client CI injects at build time (decision
+# D1). It is gitignored so the secret never reaches this public repo, and
+# hatchling excludes VCS-ignored files from builds by default — which would
+# silently ship a wheel WITHOUT the client while every check still passed.
+# This re-includes it. The release workflow unpacks the built wheel and
+# fails if the client is not in it, because "silently absent" is the one
+# outcome this entry exists to prevent and a config line is not proof.
+artifacts = ["src/gsc_mcp/_embedded.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

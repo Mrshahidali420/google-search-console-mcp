@@ -30,9 +30,15 @@ def test_oauth_client_raises_when_nothing_is_configured(monkeypatch):
         deps.oauth_client()
 
 
-def test_no_real_client_secret_is_committed():
-    """A public repo must never carry a live OAuth secret."""
-    assert deps.EMBEDDED_CLIENT_SECRET == ""
+# The guard that used to live here asserted deps.EMBEDDED_CLIENT_SECRET == ""
+# at RUNTIME. That stopped being the right claim once a release build could
+# legitimately populate it from a gitignored _embedded.py: on a machine with
+# that file present the assertion fails while the repo is still perfectly
+# clean, which is a false alarm, and the pressure to "fix" a false alarm is
+# how real guards get deleted. The invariant that actually matters -- no
+# live secret in TRACKED source -- is asserted in test_embedded_client.py,
+# where it is checked by scanning the files rather than by reading a
+# constant whose value is now build-dependent.
 
 
 def test_connection_is_a_fresh_object_each_call(tmp_path, monkeypatch):

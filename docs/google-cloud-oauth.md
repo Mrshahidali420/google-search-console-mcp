@@ -101,10 +101,9 @@ so `gsc_submit_sitemaps` (the one call needing write access,
 
 ## Shipping the client to users
 
-`EMBEDDED_CLIENT_ID` and `EMBEDDED_CLIENT_SECRET` are empty strings
-(`deps.py:37-38`). Decision D1 says the product ships its own client so a
-user just clicks Allow. Both can be true, because **the repo and the
-released package are different places**.
+Decision D1 says the product ships its own client so a user just clicks
+Allow. No tracked file holds that client, and both facts are true at once,
+because **the repo and the released package are different places**.
 
 A Desktop-app client secret is not confidential — an installed app cannot
 keep one, which is why PKCE exists, and anyone can unzip a wheel and read
@@ -113,11 +112,38 @@ a *public repo* costs you is cheap rotation: a value in git history is
 permanent, while a value baked into a build can be changed in the console
 and rebuilt whenever you want.
 
-So: keep the constants empty in git, and inject at build time. The
-mechanism to use is a gitignored `_embedded.py` that `deps.py` imports
-inside a `try/except ImportError`, falling back to `""`. CI writes that
-file from repository secrets immediately before `python -m build`. No
-tracked source is mutated, the fallback stays explicit and testable, and a
-source checkout behaves exactly as it does today.
+So the client is injected at build time. Four pieces:
 
-This is not yet built.
+| Piece | Where |
+|---|---|
+| Generator | `scripts/write_embedded.py` — writes `src/gsc_mcp/_embedded.py` from `GSC_MCP_CLIENT_ID` / `GSC_MCP_CLIENT_SECRET`, and refuses if either is unset |
+| Reader | `deps._embedded_client()` — imports it under `try/except ImportError`, falling back to `("", "")` |
+| Ignore rule | `.gitignore` — the generated file never reaches git |
+| Packaging | `artifacts` under `[tool.hatch.build.targets.wheel]` — re-includes it, since hatchling excludes VCS-ignored files by default |
+
+That last one is the trap. Without it the build still *succeeds* and
+silently produces a wheel with no client, which is why
+`.github/workflows/release.yml` unpacks the wheel it just built and fails
+if the client is missing or empty.
+
+To cut a release: **Actions → Release build → Run workflow**. It needs two
+repository secrets under Settings → Secrets and variables → Actions,
+`GSC_MCP_CLIENT_ID` and `GSC_MCP_CLIENT_SECRET`. The wheel lands as a build
+artifact; publishing it to PyPI is a separate decision and needs its own
+token.
+
+To do the same locally:
+
+```
+GSC_MCP_CLIENT_ID=... GSC_MCP_CLIENT_SECRET=... python scripts/write_embedded.py
+python -m build --wheel
+```
+
+Environment variables still override an embedded client
+(`deps.oauth_client()`), so a self-hoster can always point a release build
+at their own Cloud project.
+
+The test suite runs as if no client were embedded — `tests/conftest.py`
+blanks the constants for every test. Without that, the suite's result would
+depend on whether the generated file happened to exist on the machine
+running it.

@@ -13,3 +13,13 @@ build/
 
 # Superpowers-created worktrees live here; they are checkouts, not content.
 .worktrees/
+
+# The OAuth client baked into release builds (decision D1). CI writes this
+# file from repository secrets immediately before `python -m build`; it must
+# never be committed, because a secret in git history is permanent even
+# after deletion and that forecloses the cheap rotation an installed-app
+# secret depends on. tool.hatch.build.targets.wheel.artifacts in
+# pyproject.toml re-includes it for the wheel, since hatchling excludes
+# VCS-ignored files by default. test_embedded_client.py asserts this line
+# exists -- deleting it reddens the suite.
+src/gsc_mcp/_embedded.py

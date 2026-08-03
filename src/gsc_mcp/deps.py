@@ -27,15 +27,41 @@ from gsc_core import gauth, paths, store
 CLIENT_ID_ENV = "GSC_MCP_CLIENT_ID"
 CLIENT_SECRET_ENV = "GSC_MCP_CLIENT_SECRET"
 
-# Decision D1: gsc-mcp ships its own Google OAuth client, embedded in the
-# distributed package so a user never has to create one in the Cloud
-# Console themselves. That Cloud app does not exist yet, and a placeholder
-# secret must never be a real one committed to a public repository — so
-# both constants are empty until the published app exists. Populating them
-# is a one-line change at that point; the environment variables below let
-# development and internal use proceed in the meantime without it.
-EMBEDDED_CLIENT_ID = ""
-EMBEDDED_CLIENT_SECRET = ""
+def _embedded_client() -> tuple[str, str]:
+    """The OAuth client baked in at build time, or ("", "") without one.
+
+    Decision D1: gsc-mcp ships its own Google OAuth client so a user never
+    has to create one in the Cloud Console. The value cannot live in
+    tracked source — this repository is public, and a secret committed to
+    git is permanent even once deleted, which forecloses the cheap
+    rotation that makes an installed-app secret tolerable. So CI writes
+    gsc_mcp/_embedded.py from repository secrets just before building the
+    wheel, and this reads it if it is there.
+
+    The try/except is the load-bearing part, not a nicety. A bare import
+    would raise ImportError in every SOURCE checkout — every developer,
+    and every run of this test suite — because the file only exists in a
+    build. And it would never be caught here, since CI is itself a source
+    checkout: it would fail only for users, only in the case nobody tests.
+
+    getattr rather than attribute access for the same shape of reason one
+    level down: a CI run whose secret was unset writes a file missing a
+    name, and reading it directly would take the server down at import,
+    before any tool could report why. Empty instead routes it to the same
+    NotConfigured message a missing file produces, which names the fix.
+    """
+    try:
+        from gsc_mcp import _embedded
+    except ImportError:
+        return "", ""
+    return (getattr(_embedded, "CLIENT_ID", ""),
+            getattr(_embedded, "CLIENT_SECRET", ""))
+
+
+# Resolved once at import. Kept as module-level constants rather than
+# called per use so that oauth_client()'s precedence stays readable and so
+# tests can monkeypatch either side of it independently.
+EMBEDDED_CLIENT_ID, EMBEDDED_CLIENT_SECRET = _embedded_client()
 
 
 class NotConfigured(RuntimeError):

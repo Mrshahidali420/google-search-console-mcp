@@ -1,0 +1,74 @@
+name: Release build
+
+# Builds a wheel with this project's own OAuth client baked in (decision
+# D1), so an installed user never has to create one in the Cloud Console.
+#
+# Deliberately not on push: the client secret is only available to this
+# workflow, and a build that spends it should be something a human asked
+# for. The wheel is uploaded as an artifact rather than published — putting
+# it on PyPI is a separate decision that needs its own token.
+#
+# Requires two repository secrets, Settings → Secrets and variables →
+# Actions:
+#   GSC_MCP_CLIENT_ID
+#   GSC_MCP_CLIENT_SECRET
+# Neither is ever echoed. Logs on a public repository are public, and a
+# secret printed into a build log is as leaked as one committed. GitHub
+# masks registered secrets in logs, but that is a safety net, not a design.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build wheel with embedded client
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install build tooling
+        run: python -m pip install build
+
+      - name: Inject the OAuth client
+        env:
+          GSC_MCP_CLIENT_ID: ${{ secrets.GSC_MCP_CLIENT_ID }}
+          GSC_MCP_CLIENT_SECRET: ${{ secrets.GSC_MCP_CLIENT_SECRET }}
+        # Exits non-zero if either secret is unset, so a misconfigured
+        # repository fails here rather than producing a wheel that imports
+        # fine and only fails when a user tries to sign in.
+        run: python scripts/write_embedded.py
+
+      - name: Build
+        run: python -m build --wheel
+
+      # The config line that puts _embedded.py into the wheel
+      # (tool.hatch.build.targets.wheel.artifacts) exists to defeat
+      # hatchling's default of excluding VCS-ignored files. If it ever
+      # stops working, every other step here still passes and the wheel
+      # ships without a client. So unpack the built wheel and check.
+      - name: Prove the client is actually in the wheel
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          if "gsc_mcp/_embedded.py" not in names:
+              sys.exit(f"{wheel} has no gsc_mcp/_embedded.py")
+          body = zipfile.ZipFile(wheel).read("gsc_mcp/_embedded.py").decode()
+          # Compares against the empty-string fallback rather than printing
+          # anything, so this proves the values are populated without
+          # revealing them.
+          if 'CLIENT_ID = ""' in body or 'CLIENT_SECRET = ""' in body:
+              sys.exit(f"{wheel} embeds an empty client")
+          print(f"{wheel}: embedded client present and non-empty")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
