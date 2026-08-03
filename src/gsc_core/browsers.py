@@ -24,7 +24,7 @@ import shutil
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from gsc_core import runlog
 
@@ -273,13 +273,19 @@ def _parse_command_path(value: str | None) -> str | None:
 
 
 def _win_exe_matches(brand: Brand, exe_path: str) -> bool:
-    """Does this executable actually belong to this brand?"""
-    name = os.path.basename(exe_path).lower()
+    """Does this executable actually belong to this brand?
+
+    Splits with PureWindowsPath rather than os.path, so the answer does not
+    depend on the host. Only Windows ever calls this at runtime, but a
+    backslash is an ordinary filename character to POSIX, so os.path would
+    hand back the whole string as the basename and every path would miss.
+    """
+    name = PureWindowsPath(exe_path).name.lower()
     if name != brand.exe_name.lower():
         return False
     if name not in _AMBIGUOUS_EXE_NAMES:
         return True
-    parts = {p.lower() for p in Path(exe_path).parts}
+    parts = {p.lower() for p in PureWindowsPath(exe_path).parts}
     # Only the vendor directory disambiguates. The product segment is not
     # enough: two brands both install under an "Application" folder.
     return brand.win_vendor[0].lower() in parts
