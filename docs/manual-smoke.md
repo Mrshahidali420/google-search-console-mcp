@@ -10,13 +10,15 @@ authenticated against this code. This checklist is what stands in for that,
 and until someone has run it, "you can sign in with gsc-mcp" is a claim the
 repository cannot support.
 
-It spends **no indexing quota.** Nothing in Milestone 3A submits anything —
-the most expensive call in here is `sites.list`. The quota-spending smoke
-test, covering `gsc_request_indexing` and the job tools, arrives with
-Milestone 3B and will need its own checklist and its own throwaway
-property.
+It comes in two passes. **Steps 1-8 spend no indexing quota** — the most
+expensive call in them is `sites.list` — and are the read-only path.
+**Step 9 spends real, unrecoverable slots** on a real property and is
+optional, gated, and to be run deliberately. Read its own preamble before
+starting it.
 
-Budget 20-30 minutes, most of it waiting for a browser.
+Budget 20-30 minutes for the read-only pass, most of it waiting for a
+browser, and a further hour or so for the submission pass — most of that
+spent watching a 130-180 second gap go by.
 
 ---
 
@@ -280,7 +282,112 @@ Call `gsc_list_sites()`.
 - [ ] `host` is populated for each.
 - [ ] Calling it a second time returns the same list.
 
-This is the end of the read-only path. Stop here.
+This is the end of the read-only path. Stop here unless you are running
+the submission pass below.
+
+---
+
+## 9. The submission pass — **this spends real quota**
+
+**Read this whole preamble before you run anything in it.**
+
+Every step below sends a real Request Indexing click through a real
+browser in a real Search Console session. A spent slot is unrecoverable
+and there are only about eleven per property per rolling day. Nothing in
+this section can be undone or refunded.
+
+So:
+
+- Use a **throwaway property** you own and do not care about — not a
+  client's, not one you are actively working. Its budget will be
+  noticeably down for the next 24 hours.
+- Run it on a day you are not doing manual submissions on the same
+  property. The two share one budget and the ledger cannot see clicks you
+  made by hand.
+- Expect it to be slow. The gap between submissions is 130-180 seconds and
+  is not adjustable downward. A five-URL run is up to fifteen minutes of
+  nothing appearing to happen. **That is the tool working.**
+
+Record `gsc_quota()`'s `spendable_free` for the property before you start
+and again at the end; the difference is what this pass cost.
+
+These are the states the automated suite cannot reach. Each is worth more
+than the happy path, because each is a place a fake cannot tell you the
+truth.
+
+### 9.1 First-ever pairing
+
+Start with no `bridge_token.txt` in `GSC_MCP_HOME`.
+
+- [ ] The extension asks to pair rather than connecting silently.
+- [ ] The bridge verifies the request against the profile it resolved.
+- [ ] The extension stores the token and reconnects on its own.
+- [ ] The token appears nowhere in the log, nowhere in a tool result, and
+      nowhere in the transcript. If you can see it in any of those, stop
+      and file that first — it is a worse bug than anything else here.
+
+### 9.2 The browser is closed when the run starts
+
+Close the browser entirely, then call `gsc_request_indexing` with one URL.
+
+- [ ] `auto_launch_browser` opens it.
+- [ ] The extension connects and the URL is submitted without a second call.
+
+### 9.3 The MV3 service worker has been evicted
+
+Leave the browser open and completely idle for five minutes or more, so
+Chromium tears the extension's background worker down, then submit.
+
+- [ ] The bridge's fast wait expires without a connection.
+- [ ] The wake poke opens `connect.html`.
+- [ ] The extension connects and the run proceeds.
+- [ ] It does **not** fail with `extension_not_connected`.
+
+### 9.4 The network drops mid-URL
+
+Start a job over three or four URLs. Pull the network cable — or disable
+the adapter — while one URL is in flight, and restore it inside two
+minutes.
+
+- [ ] The URL is re-sent rather than abandoned.
+- [ ] The batch survives; the remaining URLs still go.
+- [ ] `gsc_job_status` shows one outcome per URL, with no duplicates.
+
+### 9.5 Stopping a job by hand
+
+Start a job over several URLs and call `gsc_stop_job` while one is in
+flight.
+
+- [ ] The call returns immediately and says it is stopping.
+- [ ] The URL in flight still gets a real outcome — not `error`, not a
+      missing row. It has already spent its slot and its row has to settle.
+- [ ] No further URL is attempted.
+- [ ] The job lands in state `stopped_user`.
+
+### 9.6 A genuine `Quota Exceeded` from Google
+
+The end of the pass, because it costs whatever is left. Keep submitting
+against the same property until Google refuses one.
+
+- [ ] The run stops at that URL rather than trying the rest.
+- [ ] The job lands in state `stopped_throttled`.
+- [ ] `stop_reason` names the refusal.
+- [ ] `gsc_quota()` shows that property at zero `spendable_free`, and the
+      other properties unchanged — the budget is per property.
+
+### 9.7 A restart mid-job
+
+Start a job, then kill the server process while it is running and start it
+again.
+
+- [ ] `gsc_job_status` reports the old job as `failed`, not as still
+      running — the startup reconcile closed it.
+- [ ] A new job can be started; the dead one does not block it.
+- [ ] A submission row the crash left open is settled once it is older
+      than fifteen minutes — restart again after that and `gsc_quota`
+      stops showing a slot stuck in flight. The grace period is
+      deliberate: a row opened moments ago may belong to a submission
+      another process still has in flight, and closing it would steal it.
 
 ---
 

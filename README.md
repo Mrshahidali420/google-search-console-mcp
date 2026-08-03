@@ -14,19 +14,19 @@
 
 ## Project status
 
-**Pre-alpha. The MCP surface is wired up; browser-driven submission is not.**
+**Pre-alpha. The whole surface is wired up, including submission; none of it has met a real Google account yet.**
 
-Eight tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. The sign-in path now exists end to end and can be walked by hand — see [docs/manual-smoke.md](docs/manual-smoke.md) — but the submission path does not, and no real Google account has authenticated against this code yet; see Known gaps.
+Twelve tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in and submission both exist end to end in code and can be walked by hand — see [docs/manual-smoke.md](docs/manual-smoke.md) — but no real Google account has authenticated against this code, and no URL has been submitted through it; see Known gaps.
 
 | Milestone | Scope | State |
 |---|---|---|
 | 1. Foundation | Paths, logging, SQLite store, quota engine, OAuth + PKCE, config | **Done** |
 | 2. MCP surface | The tools below, exposed over MCP | **Done** |
 | 3A. Onboarding | Guided sign-in, browser/profile detection, the bridge extension | **Done** |
-| 3B. Submission | Browser-driven Request Indexing, job control | Next |
+| 3B. Submission | Browser-driven Request Indexing, job control | **Code complete, unverified** |
 | 4. Reporting | Indexation audits, discovery loops, bulk runs | Planned |
 
-Watch or star the repo if you want to know when Milestone 3B ships.
+Watch or star the repo if you want to know when Milestone 4 ships.
 
 ## Tools
 
@@ -42,6 +42,10 @@ Shipped and registered on the MCP server today:
 | `gsc_submit_sitemaps` | Submit or resubmit sitemaps to a property |
 | `gsc_setup` | Walk through sign-in and setup; idempotent, returns the single next step |
 | `gsc_detect_browsers` | Locate installed browsers and profiles for browser-driven submission |
+| `gsc_request_indexing` | Submit up to five URLs for indexing, one at a time. **Blocks for minutes** — see [Submitting URLs](#submitting-urls) |
+| `gsc_start_indexing_job` | Queue a background submission run over any number of URLs; returns at once |
+| `gsc_job_status` | Progress and state for one submission job, or the most recent |
+| `gsc_stop_job` | Ask a running submission job to stop after the URL in flight |
 
 ### Planned
 
@@ -49,10 +53,6 @@ Not yet built — tracked for future milestones:
 
 | Tool | What it does | Milestone |
 |---|---|---|
-| `gsc_request_indexing` | Submit a URL for indexing, quota permitting | 3B |
-| `gsc_start_indexing_job` | Kick off a batch indexing-request job | 3B |
-| `gsc_job_status` | Check on a running indexing job | 3B |
-| `gsc_stop_job` | Cancel a running indexing job | 3B |
 | `gsc_find_unindexed` | Find URLs Google has not indexed | 4 |
 | `gsc_audit` | Bulk indexation audit across a property | 4 |
 
@@ -67,6 +67,37 @@ Most tools in this space get Google's limits wrong, then get throttled and blame
 | URL Inspection | 600 per minute per property | Rate limit |
 
 Properties are independent, so eight properties means eight independent budgets. This server tracks slots individually rather than counting a daily total, so it knows the exact minute the next slot opens — and it deliberately over-counts rather than under-counts when a race is possible, because a short wait is cheaper than a hard `Quota Exceeded`.
+
+## Submitting URLs
+
+Google has no API for Request Indexing that a tool like this can use, so submission goes through **your own browser**: the bridge extension, loaded into the profile you paired during `gsc_setup`, clicks Request Indexing in a real Search Console session. That has three consequences worth knowing before you spend anything.
+
+**It is slow, and the slowness is the feature.** Submissions are paced 130–180 seconds apart. That gap is not a placeholder and not a bug report — it is the interval proven not to draw a throttle over long runs. Five URLs is therefore up to fifteen minutes of wall clock, and the tool that does it blocks for all of it.
+
+**Quota is per property and small.** Roughly eleven slots per property, on a rolling 24-hour window — each slot frees 24 hours and a minute after its own use, not at midnight. Properties are independent budgets. Call `gsc_quota` first and act on `spendable_free`, not `free`: `spendable_free` subtracts the `daily_reserve` you set aside in config. A spent slot is unrecoverable; there is no undo.
+
+**One job at a time.** The bridge drives a single browser tab in your real profile, so a second `gsc_start_indexing_job` while one is running is refused outright rather than queued.
+
+### Which tool
+
+| You have | Use | Because |
+|---|---|---|
+| One to five URLs, and you can wait | `gsc_request_indexing` | Synchronous. Returns the outcome of every URL. **Hard-capped at five** — `sync_submit_cap` in config can lower that, never raise it. |
+| More than five, or you want your session back | `gsc_start_indexing_job` | Returns a `job_id` immediately; the run continues in the background. No cap. |
+| A job in flight | `gsc_job_status` | Progress, per-URL results, and whether a worker is still on it. Called with no argument it reports the most recent job. |
+| A job you want to end | `gsc_stop_job` | Stops after the URL in flight, never mid-URL: a submission already sent has spent its slot and its ledger row has to settle with the real outcome. |
+
+### What a run does when things go wrong
+
+A run **stops early** rather than burning the rest of the batch against a server that is already refusing: a `quota_exceeded`, a captcha, a rate limit, or a signed-out session ends it. `stopped_early` and `stop_reason` in the result say so, and the URLs never attempted keep their slots. A job that ended this way lands in state `stopped_throttled`; one you stopped by hand lands in `stopped_user`.
+
+URLs that could not be routed to any known property come back as `no_property`, and ones that found no spendable slot as `no_quota`. Neither reached the browser and neither cost anything — they are reported apart from failures on purpose, because the fixes are different: run `gsc_list_sites` for the first, wait for the second.
+
+If the server is restarted while a job is running, that job's row is closed out as `failed` at the next startup, and any submission row left open is settled against the property's ledger. Nothing is silently resumed — a background worker does not survive the process that owns it.
+
+### Before your first submission
+
+The extension must be loaded in the browser profile you paired, and the browser must be one this server can drive. `gsc_setup` walks both; `gsc_doctor` re-checks them. If the browser is closed, `auto_launch_browser` (on by default) opens it. The first run of all pairs the extension to the bridge, which needs the browser window in front of you.
 
 ## Requirements
 
@@ -298,8 +329,10 @@ again from the new folder, exactly as in step 4.
 
 **A green `extension` check means registered, not running.** It says the
 extension is loaded into that profile at that version. Whether its MV3
-background service worker is alive needs a live connection from the bridge,
-and that check arrives with Milestone 3B.
+background service worker is alive is a separate question, and only the
+bridge can answer it: at submission time it waits for a connection, wakes
+an evicted worker if none arrives, and fails with `extension_not_connected`
+if that does not work either. `gsc_doctor` still reports registration only.
 
 ## Development
 
@@ -341,11 +374,12 @@ Nothing in the tool opens these files for writing. No address is ever returned b
 Stated plainly, because they are the things a reviewer should look at first:
 
 - No test proves `icacls` actually applied an ACL on Windows — the Windows test only observes that the call was made, so `_harden` could no-op there and the suite would stay green. The POSIX equivalents now execute on Linux and macOS on every push, so this gap is Windows-only.
-- **The sign-in path now exists and is testable; the submission path still does not.** `gsc_setup`, `gsc_detect_browsers` and the two new `gsc_doctor` checks make it possible to walk from a clean install to a signed-in, extension-loaded machine. Nothing yet submits a URL for indexing — `gsc_request_indexing` and the job tools land in Milestone 3B.
+- **The submission path exists in code and has never submitted a URL.** Every layer of it — the extension bridge, the pacing, the quota reservation, the run loop, the job worker — is exercised against fakes only. No browser has been driven, no Request Indexing button has been clicked, and no slot has been spent by this code. The states a fake cannot reach are the submission pass in [docs/manual-smoke.md](docs/manual-smoke.md); until someone walks it, "it submits URLs" is a claim the test suite cannot support.
 - **No real Google account has authenticated against this code.** Every OAuth path is exercised against fakes; the live path is [docs/manual-smoke.md](docs/manual-smoke.md), and that checklist has not yet been run for real. Until it has, "you can sign in" is a claim the test suite cannot support.
+- **The bridge port is fixed at 8765 with no collision handling.** A second `gsc-mcp` process, or anything else already on that port, fails to bind and the submission tool reports it as an unexpected error. Making the port dynamic needs a matching extension change.
 - macOS and Linux browser detection has only ever run against fixtures, never on real hardware, here or in CI. The first person to run the smoke checklist on a Mac or a Linux box is performing that test.
 - `gsc_detect_browsers` reports `matches_authorised_account` as `null` on every real machine today. The flag reads an `account_email` key from the stored token, and nothing writes it: the current scope set returns no identity claim and the consent step does not record the authorising account. The plumbing is correct and inert. Treat the field as "unknown", not as "does not match".
-- The `extension` check reports whether the extension is **registered**, not whether it is working. MV3 worker-liveness detection needs a live bridge connection and arrives with 3B.
+- The `extension` check reports whether the extension is **registered**, not whether it is working. Only the bridge learns whether the MV3 worker is alive, and only at submission time.
 - Google OAuth verification for the sensitive `webmasters` scope has not started.
 - No OAuth client is embedded yet, so users must supply their own Google Cloud credentials (see Install above).
 - `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright — confirmed directly against the 2.0 wheel, which has no `fastmcp` module at all — so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to whatever construction API replaced it.

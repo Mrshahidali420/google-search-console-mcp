@@ -38,7 +38,8 @@ runlog.init()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliberate
 
-from . import deps, onboarding, tools_browsers, tools_submit  # noqa: E402 — import order is deliberate
+# noqa: E402 on the import below — import order is deliberate, see above.
+from . import deps, onboarding, tools_browsers, tools_submit  # noqa: E402
 
 log = runlog.get(__name__)
 
