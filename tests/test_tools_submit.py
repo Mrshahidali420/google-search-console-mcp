@@ -33,19 +33,6 @@ PROFILE_EMAIL = "owner@example.net"
 PROFILE_PATH = "/home/secret-operator/browser/Profile 1"
 
 
-@pytest.fixture()
-def home(tmp_path, monkeypatch):
-    """Point config, database and logs at a throwaway directory."""
-    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
-    return tmp_path
-
-
-@pytest.fixture()
-def store_conn(home):
-    with store.session() as conn:
-        yield conn
-
-
 class _Clock:
     """A stand-in for the `time` module that records instead of waiting."""
 
