@@ -495,6 +495,44 @@ def test_discovery_attributes_a_url_the_way_api_persist_does(store_conn):
     assert store.get_urls(store_conn, other) == []
 
 
+# Two HOSTS, deliberately, and the owning one listed second. Under
+# OVERLAPPING above, routing.resolve_property returns OVERLAPPING[0] --
+# resolve_property matches on host and ignores paths entirely -- so
+# "attributed by routing" and "attributed by properties[0]" name the same
+# string there, and that fixture cannot tell the invariant from the bug.
+# Here routing answers TWO_HOSTS[1] while both properties[0] and the
+# caller's own `property` argument are TWO_HOSTS[0], so all three rules
+# give different answers and only the right one passes.
+TWO_HOSTS = ["https://example.net/", "https://example.com/"]
+
+
+def test_attribution_follows_routing_not_the_first_property_in_the_list(
+        store_conn):
+    """The distinguishing case for the test above.
+
+    A URL is written under the property routing places it in, which is
+    neither the caller's `property` argument nor whichever property
+    happens to be first in the list. Both of those wrong rules would file
+    an example.com URL under an example.net property, where api._persist
+    would then move it back on the next inspection.
+    """
+    from gsc_core import routing
+
+    url = "https://example.com/blog/post"
+    fetch = _fetch_returning([url])
+    check, _ = _check_returning([])
+
+    discovery.find_unindexed(
+        store_conn, TWO_HOSTS[0], provider=object(),
+        properties=TWO_HOSTS, source="sitemap", _fetch=fetch, _check=check,
+        _sitemap_urls=["https://example.com/sitemap.xml"])
+
+    routed = routing.resolve_property(url, TWO_HOSTS)
+    assert routed == TWO_HOSTS[1] != TWO_HOSTS[0]
+    assert [row["url"] for row in store.get_urls(store_conn, routed)] == [url]
+    assert store.get_urls(store_conn, TWO_HOSTS[0]) == []
+
+
 def test_a_sitemap_url_no_property_covers_is_not_written(store_conn):
     """api._persist writes only routed targets, so a URL routing cannot
     place has no property to be written under. Inventing one would put a
