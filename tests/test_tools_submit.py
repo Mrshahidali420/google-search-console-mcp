@@ -158,14 +158,50 @@ def test_config_may_lower_the_cap(monkeypatch, store_conn):
 
 def test_config_may_not_raise_the_cap_above_the_hard_ceiling(monkeypatch,
                                                              store_conn):
-    """A blocking tool that waits half an hour is a hung client, not a feature."""
+    """A blocking tool that waits half an hour is a hung client, not a feature.
+
+    Pinned by CONSEQUENCE, and every part of the wiring is a working happy
+    path: a resolvable browser, a bridge that would yield, a sender with six
+    "submitted" replies ready. Everything needed for six real submissions is
+    in place, so the only thing that can stop them is the ceiling.
+
+    target.resolve is a SPY, not a raiser. A raiser turns "the ceiling is
+    gone" into a refusal of its own, and an assertion on the refusal then
+    holds whatever the cap does — which is precisely how the earlier version
+    of this test survived `max(1, configured)` with the min() deleted.
+    """
     paths.config_path().write_text(json.dumps({"sync_submit_cap": 50}),
                                    encoding="utf-8")
-    monkeypatch.setattr(tools_submit.target, "resolve", _boom)
+    _seed_site(store_conn)
+
+    resolved: list[int] = []
+    monkeypatch.setattr(tools_submit.target, "resolve",
+                        lambda *a, **k: resolved.append(1) or _target())
+    opened: list[int] = []
+    sender = _Sender(["submitted"] * 6)
+
+    @contextmanager
+    def session(chosen, cfg):
+        opened.append(1)
+        yield sender
+
+    monkeypatch.setattr(tools_submit.bridge, "bridge_session", session)
+    monkeypatch.setattr(tools_submit, "time", _Clock())
+
     result = tools_submit.request_indexing([f"https://example.com/{i}"
                                             for i in range(6)])
+
     assert result["ok"] is False
-    assert "50" not in result["detail"]
+    # The number the caller is held to is the hard one, not their config's.
+    assert "at most 5" in result["detail"]
+    # Refused whole and refused early: no browser looked for, no bridge
+    # opened, nothing sent.
+    assert resolved == []
+    assert opened == []
+    assert sender.calls == []
+    # And nothing reached the ledger — no open row, and no spent slot.
+    assert _count(store_conn, "submissions") == 0
+    assert _count(store_conn, "quota_slots") == 0
     assert tools_submit.HARD_SYNC_CAP == 5
 
 
