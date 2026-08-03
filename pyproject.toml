@@ -43,6 +43,12 @@ dependencies = [
     # under mcp.server.mcpserver with a different construction API. Pinned
     # below that break until this server is ported to the new shape.
     "mcp>=1.2,<2.0",
+    # >=13: the bridge server uses the THREADING (sync) implementation,
+    # which landed in 12.0 — but its recv() only grew a `timeout` argument
+    # in 13.0, and the handshake read depends on that timeout to hang up on
+    # a client that connects and then says nothing. 12.x would import fine
+    # and fail at the first connection, so the floor is 13, not 12.
+    "websockets>=13",
 ]
 
 [project.scripts]
