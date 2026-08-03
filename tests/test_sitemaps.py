@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import gzip
 
-import pytest
-
 from gsc_core import sitemaps
 
 INDEX = """<?xml version="1.0" encoding="UTF-8"?>
@@ -185,6 +183,114 @@ def test_a_loc_that_is_not_http_is_dropped_from_the_url_set():
     result = sitemaps.fetch_urls("https://example.com/s.xml", session)
 
     assert result.urls == ["https://example.com/ok"]
+
+
+def test_a_urlset_without_a_namespace_still_yields_its_urls():
+    body = b"<urlset><url><loc>https://example.com/a</loc></url></urlset>"
+    session = _FakeSession({"https://example.com/s.xml": _Resp(body)})
+
+    result = sitemaps.fetch_urls("https://example.com/s.xml", session)
+
+    assert result.urls == ["https://example.com/a"]
+    assert result.failures == []
+
+
+def test_a_sitemapindex_in_a_foreign_namespace_is_still_followed():
+    body = (
+        b'<sitemapindex xmlns="urn:example:not-the-sitemaps-namespace">'
+        b"<sitemap><loc>https://example.com/sitemap-1.xml</loc></sitemap>"
+        b"</sitemapindex>"
+    )
+    session = _FakeSession({
+        "https://example.com/index.xml": _Resp(body),
+        "https://example.com/sitemap-1.xml": _Resp(LEAF.encode()),
+    })
+
+    result = sitemaps.fetch_urls("https://example.com/index.xml", session)
+
+    assert result.urls == ["https://example.com/a", "https://example.com/b"]
+    assert result.failures == []
+
+
+def test_an_unrecognized_root_element_is_a_reported_failure_not_an_empty_sitemap():
+    body = b"<rss><channel><title>not a sitemap</title></channel></rss>"
+    session = _FakeSession({"https://example.com/feed.xml": _Resp(body)})
+
+    result = sitemaps.fetch_urls("https://example.com/feed.xml", session)
+
+    assert result.urls == []
+    assert [f.reason for f in result.failures] == ["unparseable"]
+
+
+def test_a_gzip_bomb_is_capped_before_full_expansion():
+    # ~5MB of a single repeated byte compresses to well under 6000 bytes,
+    # so the outer (compressed) byte cap does not catch it -- only a bound
+    # on the decompressed read can.
+    payload = gzip.compress(b"a" * 5_000_000)
+    assert len(payload) < 6000
+    session = _FakeSession({
+        "https://example.com/bomb.xml.gz": _Resp(payload),
+    })
+
+    result = sitemaps.fetch_urls("https://example.com/bomb.xml.gz", session,
+                                 max_bytes=6000)
+
+    assert result.urls == []
+    assert [f.reason for f in result.failures] == ["too_large"]
+
+
+def test_a_metadata_endpoint_host_is_refused_without_fetching():
+    class _NeverCalled:
+        def get(self, url: str, **kwargs: object):
+            raise AssertionError("must not fetch the metadata endpoint")
+
+    result = sitemaps.fetch_urls("http://169.254.169.254/sitemap.xml", _NeverCalled())
+
+    assert [f.reason for f in result.failures] == ["blocked_host"]
+
+
+def test_a_private_10_address_is_refused_without_fetching():
+    class _NeverCalled:
+        def get(self, url: str, **kwargs: object):
+            raise AssertionError("must not fetch a private address")
+
+    result = sitemaps.fetch_urls("http://10.0.0.5/sitemap.xml", _NeverCalled())
+
+    assert [f.reason for f in result.failures] == ["blocked_host"]
+
+
+def test_a_private_192_168_address_is_refused_without_fetching():
+    class _NeverCalled:
+        def get(self, url: str, **kwargs: object):
+            raise AssertionError("must not fetch a private address")
+
+    result = sitemaps.fetch_urls("http://192.168.1.1/sitemap.xml", _NeverCalled())
+
+    assert [f.reason for f in result.failures] == ["blocked_host"]
+
+
+def test_a_404_status_is_a_reported_http_error_failure():
+    session = _FakeSession({
+        "https://example.com/missing.xml": _Resp(b"", status=404),
+    })
+
+    result = sitemaps.fetch_urls("https://example.com/missing.xml", session)
+
+    assert [f.reason for f in result.failures] == ["http_error"]
+
+
+def test_redirects_are_capped_and_do_not_loop_forever():
+    routes = {}
+    for i in range(50):
+        routes[f"https://example.com/r{i}.xml"] = _Resp(
+            b"", status=302,
+            headers={"Location": f"https://example.com/r{i + 1}.xml"})
+    session = _FakeSession(routes)
+
+    result = sitemaps.fetch_urls("https://example.com/r0.xml", session)
+
+    assert [f.reason for f in result.failures] == ["http_error"]
+    assert len(session.asked) == sitemaps.MAX_REDIRECTS + 1
 
 
 def test_every_failure_reason_is_in_the_closed_vocabulary():
