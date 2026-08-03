@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import traceback
 from pathlib import Path
 
@@ -371,6 +372,79 @@ def test_a_failing_check_always_carries_a_fix(check_fn, surveyed):
     check = check_fn()
     assert check["ok"] is False
     assert check["fix"].strip()
+
+
+# ---------------------------------------------------------------------------
+# No absolute path may leave in a check result
+#
+# A doctor result travels into an MCP client nobody here controls, to be
+# retained, logged or synced. On Windows an absolute path under the config
+# directory carries the operator's account name inside it, so a `fix` that
+# says "select C:\Users\<name>\..." exports the username to third-party
+# storage. gsc_setup solves this by naming the folder in `next.path` and
+# referring to it by name; the doctor must not undo that.
+# ---------------------------------------------------------------------------
+
+#: `C:\`, `D:/`, ... — the shape that carries a username on this platform.
+#: The lookbehind is load-bearing: without it this matches the `e:/` inside
+#: `chrome://extensions`, which every fix string legitimately names.
+_DRIVE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
+
+
+def _assert_no_path(check, ext_dir, tmp_path):
+    text = check["detail"] + " " + check["fix"]
+    assert str(ext_dir) not in text, text
+    # Every path this test can reach lives under tmp_path, so this catches a
+    # POSIX absolute path too, where there is no drive letter to match on.
+    assert str(tmp_path) not in text, text
+    assert not _DRIVE.search(text), text
+
+
+def test_the_extension_fix_names_no_absolute_path_when_not_installed(
+        tmp_path, surveyed):
+    """The regression this test exists for.
+
+    `_absent` used to interpolate the extraction directory straight into
+    its fix string. This is the reachable state a first-time user is most
+    likely to hit, so it is the one most likely to be pasted somewhere.
+    """
+    surveyed([_candidate(tmp_path, brand_key="chrome")])
+    ext_dir = pairing.extension_dir()  # extracted, but never loaded
+
+    check = onboarding.check_extension()
+
+    assert check["ok"] is False
+    assert "not installed" in check["detail"]
+    assert "gsc_setup()" in check["fix"]  # how the user finds the folder
+    _assert_no_path(check, ext_dir, tmp_path)
+
+
+@pytest.mark.parametrize("state", ["absent", "unreadable", "mismatch",
+                                   "present"])
+def test_no_extension_check_state_returns_an_absolute_path(state, tmp_path,
+                                                           surveyed):
+    """Every reachable state, not just the one that leaked."""
+    candidate = _candidate(tmp_path, brand_key="chrome")
+    surveyed([candidate])
+    ext_dir = pairing.extension_dir()
+    if state == "absent":
+        pass  # nothing recorded the extension
+    elif state == "unreadable":
+        for name in ("Preferences", "Secure Preferences"):
+            (Path(candidate.profile.path) / name).write_text(
+                "{ not json", encoding="utf-8")
+    elif state == "mismatch":
+        _write_prefs(candidate, ext_dir, version="0.0.1-not-the-packaged-one")
+    else:
+        _write_prefs(candidate, ext_dir, version=_packaged_version())
+
+    _assert_no_path(onboarding.check_extension(), ext_dir, tmp_path)
+
+
+def test_the_browser_check_returns_no_absolute_path(tmp_path, surveyed):
+    surveyed([_candidate(tmp_path, brand_key="chrome")])
+    _assert_no_path(onboarding.check_browser(), pairing.extension_dir(),
+                    tmp_path)
 
 
 @pytest.mark.parametrize("check_fn", [onboarding.check_browser,

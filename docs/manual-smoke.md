@@ -220,21 +220,56 @@ diagnostics, and the diagnostics are most of what shipped.
 - [ ] Its `detail` says it is **not installed**.
 - [ ] Its `fix` names your browser's extensions page and tells you to use
       Developer mode and Load unpacked.
+- [ ] Its `fix` points you at `gsc_setup()` for the folder to select rather
+      than spelling out a path. **No absolute path appears anywhere in the
+      doctor's output** — a doctor result is retained by your MCP client,
+      and on Windows a path under the config directory contains your
+      account name. If you see one, that is a finding.
 
 Load it again and confirm the check goes green.
 
-**7b. Force a version mismatch.** Edit the `version` field in the
-`manifest.json` inside the extracted directory (`next.path` from step 6) to
-something obviously different, e.g. `"99.0.0"`, without reloading the
-extension in the browser. Call `gsc_doctor()`.
+**7b. Force a version mismatch.** This reproduces the one situation the
+mismatch state exists for: you upgraded gsc-mcp, the extracted copy moved
+on, and the browser is still running the build it loaded last week.
+
+> **Edit the *packaged* manifest, not the extracted one.** Editing the
+> extracted copy does nothing: `extension_dir()` compares it against the
+> packaged version on every call, sees they differ, and silently
+> re-extracts *before* the check compares anything. The check comes back
+> green and you learn nothing. This is the same fact that makes the state
+> detectable at all — what the browser recorded at load time is the only
+> number that can go stale.
+
+Find the packaged manifest:
+
+```sh
+python -c "import gsc_mcp, pathlib; print(pathlib.Path(gsc_mcp.__file__).parent / 'extension' / 'manifest.json')"
+```
+
+Note its current `version` so you can put it back. Change it to something
+obviously different, e.g. `"99.0.0"`. Do **not** reload the extension in
+the browser. Call `gsc_doctor()`.
 
 - [ ] The `extension` check is `ok: false`.
-- [ ] Its `detail` names both versions.
+- [ ] Its `detail` names **both** numbers — the one the browser loaded and
+      the one now on disk.
 - [ ] Its `fix` tells you to click **Reload**, and does *not* tell you to
       Load unpacked again.
 
-Click Reload in the browser, confirm the check goes green, then restore the
-version — or just re-run step 1 with a fresh `GSC_MCP_HOME`.
+Then click Reload in the browser and confirm the check goes green.
+
+**Put the packaged manifest back** when you are done. If you are running
+from a checkout, `git checkout -- src/gsc_mcp/extension/manifest.json` is
+the reliable way — restoring the version field by hand can still leave the
+file reformatted. `git diff` should be empty before you report. Re-running
+step 1 with a fresh `GSC_MCP_HOME` will *not* undo this edit; only
+restoring the file will.
+
+For reference, this sequence has been walked end to end without a browser,
+with the Preferences entry written by hand. The extracted version tracks
+the packaged one to `99.0.0` while the recorded one stays behind, and the
+check reports `loaded at version <old>, but the copy on disk is now version
+99.0.0` with a Reload fix. If you see anything else, that is a finding.
 
 ## 8. `gsc_list_sites()` — real properties
 

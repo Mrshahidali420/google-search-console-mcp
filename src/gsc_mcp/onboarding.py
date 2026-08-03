@@ -562,16 +562,25 @@ def _extension_check(name: str) -> dict:
     lookup = pairing.look_up_extension(best.installed, best.profile,
                                        ext_dir=ext_dir)
     if lookup.extension_id is None:
-        return _absent(name, best, ext_dir, where, lookup.complete)
+        return _absent(name, best, where, lookup.complete)
     return _present(name, best, ext_dir, where, lookup.version)
 
 
-def _absent(name: str, best: profiles.Candidate, ext_dir, where: str,
+def _absent(name: str, best: profiles.Candidate, where: str,
             complete: bool) -> dict:
-    """Not found — and whether that is an answer or a shrug."""
+    """Not found — and whether that is an answer or a shrug.
+
+    The extraction directory is deliberately NOT interpolated here, even
+    though this function knows it. A doctor result travels into an MCP
+    client we do not control, to be retained, logged or synced; an absolute
+    path on this platform carries the operator's account name with it.
+    gsc_setup() already names the folder in ``next.path``, so the fix points
+    there instead — see ``_where``.
+    """
     url = best.installed.brand.extensions_url
-    install = (f"open {url}, enable Developer mode, choose Load unpacked, "
-               f"and select {ext_dir}.")
+    install = (f"call gsc_setup(), then open {url}, enable Developer mode, "
+               f"choose Load unpacked, and select the folder gsc_setup() "
+               f"names in next.path.")
     if complete:
         return _check(name, False,
                       f"the gsc-mcp bridge extension is not installed in "
