@@ -1,6 +1,6 @@
 // GSC Indexer Bridge — content script. Runs ONLY on search.google.com.
 // Executes: inspect URL -> (already indexed?) -> Test Live URL ->
-// Request Indexing -> outcome. Mirrors indexer_core.py signal matching.
+// Request Indexing -> outcome. Mirrors the server's signal matching.
 
 const QUOTA_SIGNALS = [
   "exceeded your daily quota", "reached your daily quota",
@@ -122,7 +122,7 @@ function findClickable(texts) {
 // True ONLY for a real, interactive reCAPTCHA challenge (the image-grid
 // "bframe"). GSC embeds an invisible background reCAPTCHA on EVERY page —
 // its mere presence is NOT a challenge (matching it made every submission
-// look like a captcha). Mirror _captcha_visible() in indexer_core.py.
+// look like a captcha). Mirrors the server's captcha detection.
 function captchaVisible() {
   const frames = document.querySelectorAll(
     "iframe[src*='recaptcha'][src*='bframe'], iframe[title*='recaptcha challenge' i]");
@@ -285,7 +285,7 @@ async function awaitSubmission(id) {
 //   "off"   (default) — click path only, nothing recorded
 //   "learn" — click path plus the recorder, to study GSC's rpc traffic
 //   "probe" — inspect and record, then STOP before the click (costs no quota)
-// There is no replay mode; see RPC-HANDOFF.md §4d for why it was removed.
+// There is no replay mode; see the comment at the click site for why.
 // ---------------------------------------------------------------------------
 const RPC_FLAG = "__gscrpc__";
 
@@ -393,7 +393,7 @@ async function runJob(id, url, authuser) {
     // PROBE: inspect, record, and stop before the click. Costs no quota — only
     // the submission does — so the inspection response can be studied for the
     // tokens Fj3Owf needs without spending slots. Finishes "skipped" because
-    // indexer_core consumes a slot on exactly "submitted" and nothing else.
+    // The server consumes a quota slot on exactly "submitted", nothing else.
     if (probing) {
       const h = await rpcHarvest();
       for (const r of (h && h.responses) || []) {
@@ -406,7 +406,7 @@ async function runJob(id, url, authuser) {
     // THERE IS NO REPLAY PATH. Removed 2026-07-25 after it was proven
     // unbuildable: the submission rpc (Fj3Owf) takes a ~1,100-char argument the
     // page serializes client-side, which appears in no response and therefore
-    // cannot be learned by watching traffic. See RPC-HANDOFF.md §4d.
+    // cannot be learned by watching traffic.
     //
     // The click below is the only submission mechanism. `learn` and `probe`
     // remain as read-only diagnostics; neither changes how a URL is submitted.

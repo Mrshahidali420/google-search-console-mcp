@@ -19,7 +19,7 @@
 //
 // WHAT THIS DOES NOT DO
 // It does not raise the quota. Request Indexing is capped per Google account
-// (~11 on a rolling 24h window, per quota.py); that cap is enforced server
+// (~11 on a rolling 24h window); that cap is enforced server
 // side and applies identically to a click and to this request. This removes
 // the fragility, not the ceiling. Keep using the quota ledger.
 //

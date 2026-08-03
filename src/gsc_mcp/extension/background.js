@@ -107,7 +107,7 @@ function pairSelf(port, done) {
   catch (e) { finish(false, String(e && e.message || e)); return; }
   giveUp = setTimeout(() => {
     try { sock.close(); } catch {}
-    finish(false, `no tool listening on port ${port} — start a job, or run \`python cli.py pair\``);
+    finish(false, `nothing listening on port ${port} — start a job, or run \`gsc_setup\` again`);
   }, 6000);
   sock.onopen = () => sock.send(JSON.stringify(
     { type: "pair_request", extension_id: chrome.runtime.id, version: VERSION }));

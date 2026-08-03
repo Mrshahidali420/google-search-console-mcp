@@ -2,8 +2,8 @@ const $ = (id) => document.getElementById(id);
 
 // --- pairing by URL fragment (fallback) --------------------------------------
 // The extension now pairs itself over the socket, so this path only runs when
-// `python cli.py pair` is used deliberately — e.g. to hand the token to an
-// extension loaded from a folder the tool cannot verify. A fragment is never
+// a token is pasted in deliberately — e.g. to hand one to an extension
+// loaded from a folder the server cannot verify. A fragment is never
 // sent to a server and this is a chrome-extension:// page, so the token stays
 // local; it is stripped from history the moment it is read.
 function applyPairingFragment() {
