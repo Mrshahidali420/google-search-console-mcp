@@ -1,4 +1,4 @@
-// GSC Indexer Bridge — service worker.
+// GSC MCP Bridge — service worker.
 // Holds the WS connection to the local tool, owns ONE dedicated GSC tab,
 // relays submit jobs to the content script and results back to the bridge.
 

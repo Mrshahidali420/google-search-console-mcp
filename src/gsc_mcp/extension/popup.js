@@ -1,4 +1,4 @@
-// GSC Indexer Bridge — popup controller.
+// GSC MCP Bridge — popup controller.
 // Live status panel + recent-activity feed + inline bridge settings.
 const $ = (id) => document.getElementById(id);
 

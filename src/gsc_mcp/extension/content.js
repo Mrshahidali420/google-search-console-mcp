@@ -1,4 +1,4 @@
-// GSC Indexer Bridge — content script. Runs ONLY on search.google.com.
+// GSC MCP Bridge — content script. Runs ONLY on search.google.com.
 // Executes: inspect URL -> (already indexed?) -> Test Live URL ->
 // Request Indexing -> outcome. Mirrors the server's signal matching.
 
