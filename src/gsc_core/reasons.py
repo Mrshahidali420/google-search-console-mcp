@@ -21,13 +21,23 @@ from __future__ import annotations
 # Statuses api.classify() emits that mean the page IS in the index.
 INDEXED_STATUSES = frozenset({"indexed"})
 
+# Statuses that mean the URL was never looked at, so there is nothing to
+# classify. api._rows (api.py:666-668) mints "skipped_quota" for every URL
+# the inspection gate refused; with roughly eleven slots per property that
+# is the everyday path on any site larger than a dozen URLs, not an edge
+# case. Kept as its own name because "we looked and could not tell" and
+# "we never got to look" call for opposite actions -- the second is simply
+# "run again tomorrow" -- even though both are undetermined.
+NOT_INSPECTED_STATUSES = frozenset({"skipped_quota"})
+
 # Statuses that are not an answer either way. "unknown" is classify's
 # verdict fallback; "error" is an inspection that failed; "no_property" is
 # a URL no Search Console property covers (and which therefore cost no
 # quota). None is evidence of absence, so none may enter the unindexed set
 # -- reporting one as "unindexed, reason unknown" would be a fabricated
 # finding.
-UNDETERMINED_STATUSES = frozenset({"unknown", "error", "no_property"})
+UNDETERMINED_STATUSES = (frozenset({"unknown", "error", "no_property"})
+                         | NOT_INSPECTED_STATUSES)
 
 # The map. Keys are api.classify() statuses; values are the ten codes.
 REASON_BY_STATUS: dict[str, str] = {

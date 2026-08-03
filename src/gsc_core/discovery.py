@@ -17,10 +17,12 @@ burst may have silently degraded, and persists. A second loop would
 recreate the burst-degradation failure api.py:238-265 documents as the
 most expensive lie this tool could tell.
 
-WHY UNDETERMINED IS A SEPARATE ARRAY. "unknown", "error" and "no_property"
-are not evidence that a page is missing from the index. Putting them in
-`unindexed` with a null reason would report a failed HTTP call as a
-finding about someone's website.
+WHY UNDETERMINED IS A SEPARATE ARRAY. "unknown", "error", "no_property"
+and "skipped_quota" are not evidence that a page is missing from the
+index. Putting them in `unindexed` with a null reason would report a
+failed HTTP call as a finding about someone's website. Each row keeps its
+`status`, because "we looked and could not tell" and "we never got to
+look" ask the caller for opposite things.
 """
 from __future__ import annotations
 
@@ -88,18 +90,23 @@ def find_unindexed(
     inspect_now = stale if limit is None else stale[:limit]
 
     quota: dict = {}
+    checked = 0
+    skipped_quota: list[dict] = []
     fresh_results: dict[str, dict] = {}
     if inspect_now:
         outcome = check(conn, inspect_now, provider, properties,
                         concurrency=concurrency, now=moment, session=session)
         quota = outcome.get("quota", {})
+        checked = outcome.get("checked", 0)
+        skipped_quota = list(outcome.get("skipped_quota", []))
         for row in outcome.get("rows", []):
             fresh_results[row["url"]] = row
 
     return _classify(
         conn=conn, property=property, source=source, candidates=candidates,
         inspected=inspect_now, fresh_results=fresh_results, stale=stale,
-        limit=limit, read=read, failures=failures, quota=quota)
+        limit=limit, read=read, failures=failures, quota=quota,
+        checked=checked, skipped_quota=skipped_quota)
 
 
 def _record_discovery(conn: sqlite3.Connection, property: str,
@@ -141,7 +148,8 @@ def _classify(*, conn: sqlite3.Connection, property: str, source: str,
               fresh_results: dict[str, dict], stale: list[str],
               limit: int | None, read: list[str],
               failures: list[sitemaps.SitemapFailure],
-              quota: dict) -> dict:
+              quota: dict, checked: int,
+              skipped_quota: list[dict]) -> dict:
     """Sort every candidate into unindexed / undetermined / indexed."""
     stored = {row["url"]: row for row in store.get_urls(conn, property)}
     unindexed: list[dict] = []
@@ -156,12 +164,18 @@ def _classify(*, conn: sqlite3.Connection, property: str, source: str,
             status = record.get("status")
             detail = record.get("reason") or ""
             checked_at = record.get("checked_at")
-            unverified = None
+            unverified = False
         else:
             status = row.get("status")
             detail = row.get("detail") or ""
             checked_at = stored.get(url, {}).get("checked_at")
-            unverified = row.get("unverified")
+            # bool(), and TRUTHINESS below rather than `is not None`.
+            # api._rows (api.py:660-676) puts "unverified" on every row and
+            # sets it to False for every row nothing doubted -- which on a
+            # healthy run is all of them. `False is not None` sent every
+            # freshly inspected URL to `undetermined`, so `unindexed` came
+            # back empty on every live run.
+            unverified = bool(row.get("unverified"))
 
         if status is None:
             # Never inspected and not inspected this run -- the `limit`
@@ -170,7 +184,12 @@ def _classify(*, conn: sqlite3.Connection, property: str, source: str,
         if status in reasons.INDEXED_STATUSES:
             indexed += 1
             continue
-        if unverified is not None or status in reasons.UNDETERMINED_STATUSES:
+        if unverified or status in reasons.UNDETERMINED_STATUSES:
+            # "skipped_quota" arrives here deliberately, via
+            # reasons.NOT_INSPECTED_STATUSES, and not through the fallback
+            # below: a URL the gate refused is a routine outcome, and the
+            # `status` it carries is what lets a caller tell "run again
+            # tomorrow" apart from a genuine unknown.
             undetermined.append({"url": url, "status": status,
                                  "detail": detail, "unverified": unverified})
             continue
@@ -178,12 +197,17 @@ def _classify(*, conn: sqlite3.Connection, property: str, source: str,
         code = reasons.reason_for(status)
         if code is None:
             # A status api.classify() can emit that reasons.py does not
-            # know. tests/test_reasons.py makes this unreachable; if it
-            # ever fires, reporting it as undetermined is the honest
-            # answer rather than guessing a reason.
+            # know. test_reasons.py sweeps api.COVERAGE_MAP only, and
+            # "skipped_quota" was minted outside that map -- so this branch
+            # was NOT unreachable, as an earlier version of this comment
+            # claimed, and every quota skip on every large site came
+            # through here logged as an internal inconsistency. Kept as
+            # correct defensive code for a status nobody anticipated;
+            # reporting it as undetermined is the honest answer rather
+            # than guessing a reason.
             log.info("unmapped inspection status in discovery")
             undetermined.append({"url": url, "status": status,
-                                 "detail": detail, "unverified": None})
+                                 "detail": detail, "unverified": unverified})
             continue
 
         unindexed.append({**reasons.describe(code), "url": url,
@@ -196,6 +220,12 @@ def _classify(*, conn: sqlite3.Connection, property: str, source: str,
         "source": source,
         "candidates_total": len(candidates),
         "inspected": len(inspected),
+        # `inspected` is what was handed to api.check_status; `checked` is
+        # what actually reached the API, and `skipped_quota` accounts for
+        # the difference. Discarding those two left a caller unable to see
+        # that a run answered less than it was asked to.
+        "checked": checked,
+        "skipped_quota": skipped_quota,
         "limited": limit is not None and len(stale) > len(inspected),
         "limit": limit,
         "indexed": indexed,

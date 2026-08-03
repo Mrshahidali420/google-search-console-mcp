@@ -29,15 +29,29 @@ def test_every_status_the_classifier_can_produce_has_exactly_one_home():
         assert sum(homes) == 1, f"{status} has {sum(homes)} homes, want 1"
 
 
-def test_the_three_non_answers_are_undetermined_not_reasons():
+def test_the_non_answers_are_undetermined_not_reasons():
     # "unknown" is classify's verdict fallback, "error" is a failed
-    # inspection, "no_property" is a URL outside every property. None of
-    # them is evidence that a page is not indexed, so none may appear in
-    # the unindexed set.
+    # inspection, "no_property" is a URL outside every property, and
+    # "skipped_quota" is one the inspection gate refused. None of them is
+    # evidence that a page is not indexed, so none may appear in the
+    # unindexed set.
     assert reasons.UNDETERMINED_STATUSES == frozenset(
-        {"unknown", "error", "no_property"})
+        {"unknown", "error", "no_property", "skipped_quota"})
     for status in reasons.UNDETERMINED_STATUSES:
         assert reasons.reason_for(status) is None
+
+
+def test_a_quota_skip_is_undetermined_but_named_apart_from_a_real_unknown():
+    # api._rows (api.py:666-668) mints "skipped_quota" outside
+    # api.COVERAGE_MAP, which is why the sweep above cannot see it. It is
+    # undetermined -- but "we never got to look" is answered by running
+    # again tomorrow, and "we looked and could not tell" is not, so the two
+    # stay distinguishable by name.
+    assert reasons.NOT_INSPECTED_STATUSES == frozenset({"skipped_quota"})
+    assert reasons.NOT_INSPECTED_STATUSES <= reasons.UNDETERMINED_STATUSES
+    assert not (reasons.NOT_INSPECTED_STATUSES & reasons.INDEXED_STATUSES)
+    assert not (reasons.NOT_INSPECTED_STATUSES
+                & set(reasons.REASON_BY_STATUS))
 
 
 def test_submitting_helps_only_where_google_has_not_looked_yet():
@@ -63,6 +77,7 @@ def test_every_reason_has_a_non_empty_action():
 
 def test_needs_site_access_is_a_subset_of_the_reasons():
     assert reasons.NEEDS_SITE_ACCESS <= reasons.REASONS
+
 
 
 def test_a_reason_that_needs_site_access_is_never_one_submitting_helps():
