@@ -72,6 +72,10 @@ Properties are independent, so eight properties means eight independent budgets.
 
 - Python 3.11 or newer
 - A Google account with Search Console properties
+- A Chromium browser — Chrome, Brave, Edge, Vivaldi, Opera or Chromium. `gsc_setup`
+  loads a browser extension into one of your existing profiles, and there
+  is no way to complete setup without one. Firefox and Safari are not
+  Chromium and will not work.
 - Your own Google OAuth client (see Install below) — **this package does not embed one yet**
 
 ## Install
@@ -91,10 +95,57 @@ never be committed to a public repository — so `EMBEDDED_CLIENT_ID` and
 `EMBEDDED_CLIENT_SECRET` in `gsc_mcp/deps.py` are empty strings by design.
 Until a verified app ships, every install needs its own:
 
-1. In [Google Cloud Console](https://console.cloud.google.com/), create a
-   project, enable the **Search Console API**, and create an **OAuth 2.0
-   Client ID** (Desktop app type).
-2. Set the two environment variables below before starting the server.
+All of this happens in [Google Cloud Console](https://console.cloud.google.com/),
+free, and takes about five minutes. Do the steps in order — step 4 is the
+one people skip, and skipping it fails at the very end.
+
+1. **Create a project.** Use the project dropdown in the top bar →
+   **New project**. Any name. Wait for it to be created, then make sure it
+   is the project selected in that dropdown; everything below applies to
+   the selected project only.
+
+2. **Enable the Search Console API.** Search "Search Console API" in the
+   console's search bar, open it, and click **Enable**. Without this, every
+   call returns a 403 that mentions the API being disabled.
+
+3. **Configure the OAuth consent screen.** In the left menu: **APIs &
+   Services → OAuth consent screen**.
+   - User type: **External**. ("Internal" only exists on Workspace
+     accounts and restricts the app to your own organisation.)
+   - App name: anything — you are the only user who will see it.
+   - User support email and developer contact email: your own address.
+   - You do **not** need to add scopes here. This server requests its
+     scope at sign-in time, and adding it on this screen does not change
+     what you are granted.
+   - Save through to the end.
+
+4. **Add yourself as a Test user.** Still on the OAuth consent screen,
+   find **Test users** (on newer consoles: **Audience → Test users**) and
+   add the Google address that owns your Search Console properties.
+
+   This step is not optional and it is the one that fails late. The
+   Search Console scope (`webmasters`) is a **sensitive scope**, so while
+   your app sits in **Testing** status — which is where every new app
+   starts — Google will only let listed test users sign in. Everyone else
+   gets `403: access_denied` on the consent screen, *after* creating the
+   project, enabling the API, creating the client, setting the environment
+   variables, and running `gsc_setup`. Nothing earlier warns you.
+
+   You do not need to publish the app or submit it for verification. A
+   Testing app with you as a test user works indefinitely for your own
+   account; the only cost is that the refresh token expires every 7 days
+   and you sign in again.
+
+5. **Create the OAuth client.** **APIs & Services → Credentials → Create
+   credentials → OAuth client ID**, application type **Desktop app**.
+   Copy the client ID and client secret it shows you — the secret is
+   shown once, though you can always create another client.
+
+   Desktop app is the right type: this server signs you in over a
+   loopback redirect on `127.0.0.1`, which is what that type allows. Do
+   not pick "Web application" and do not add a redirect URI by hand.
+
+6. Set the two environment variables below before starting the server.
    Without them, any tool that needs to talk to Google returns
    `{"ok": false, "error": "not_configured", ...}` rather than doing
    anything — `gsc_list_sites`, `gsc_check_status`, `gsc_performance`, and
