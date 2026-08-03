@@ -213,6 +213,30 @@ def test_a_url_that_was_never_sent_is_never_reported_as_a_timeout(session):
                           "0", timeout=30, reconnect_grace=1) == "error"
 
 
+def test_a_send_that_raised_and_then_expired_is_an_error_not_a_timeout(session):
+    """`sent` must be written AFTER conn.send() returns, not before.
+
+    A connection that is live but whose send() raises never put a frame on
+    the wire. Moving `sent = True` one line earlier passes every other test
+    in this file and turns this case into "timeout" — which charges a quota
+    slot for a URL Google never saw. The send is slowed so the budget
+    expires before the resend count does, forcing the expiry path rather
+    than the resends-exhausted one.
+    """
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+
+    def _slow_failing_send(_frame: str) -> None:
+        time.sleep(0.3)
+        raise OSError("the socket went away")
+
+    session._conn.send = _slow_failing_send
+    assert session.submit("sc-domain:example.com", "https://example.com/a",
+                          "0", timeout=1, reconnect_grace=6,
+                          max_resends=50) == "error"
+    conn.close()
+
+
 def test_a_sent_command_whose_verdict_never_arrives_is_a_timeout(session):
     """The other half of the same distinction: this one DOES spend a slot."""
     conn = _hello(session)
@@ -350,6 +374,67 @@ def test_a_stopped_session_no_longer_reports_an_extension(session):
     session.stop()
     assert session.wait_for_extension(0.1) is False
     conn.close()
+
+
+class _GatedEvent(threading.Event):
+    """An Event whose set() parks until the test lets it through.
+
+    The only way to hold a handler thread at one exact statement. It
+    records when it reaches set() and when clear() runs, so the test
+    sequences on those rather than on sleeps.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+        self.cleared = threading.Event()
+
+    def set(self) -> None:
+        self.entered.set()
+        self.gate.wait(SETTLE)
+        super().set()
+
+    def clear(self) -> None:
+        self.cleared.set()
+        super().clear()
+
+
+def test_a_hello_landing_as_stop_runs_leaves_the_session_looking_dead():
+    """The publish-then-signal window, held open on purpose.
+
+    `_conn` and `_connected` have to be published together. While
+    `_connected.set()` sat outside the lock, a handler parked in the gap
+    when stop() ran re-set the flag after stop() had cleared it, and
+    wait_for_extension() then answered True for a session whose socket was
+    already closed — the caller's next URL walks straight into it.
+    """
+    sess = bridge.BridgeSession(port=0, token=TOKEN, connect_timeout=SETTLE)
+    connected = _GatedEvent()
+    sess._connected = connected
+    server = threading.Thread(target=sess.start, daemon=True)
+    server.start()
+    assert sess.ready.wait(SETTLE)
+    try:
+        conn = _hello(sess)
+        assert connected.entered.wait(SETTLE), "the handler never signalled"
+
+        stopper = threading.Thread(target=sess.stop, daemon=True)
+        stopper.start()
+        # Unguarded, stop() clears straight away and this returns at once;
+        # guarded, it is blocked on the lock the handler holds and this
+        # waits out its bound. Either way the gate opens next, so the
+        # assertion — not the timing — is what tells the two apart.
+        connected.cleared.wait(1.0)
+        connected.gate.set()
+        stopper.join(SETTLE)
+
+        assert sess.wait_for_extension(0.05) is False
+        conn.close()
+    finally:
+        connected.gate.set()
+        sess.stop()
+        server.join(SETTLE)
 
 
 def test_stopping_does_not_log_the_misleading_reconnect_warning(session):

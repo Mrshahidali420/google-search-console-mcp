@@ -262,15 +262,31 @@ class BridgeSession:
         * "timeout" — a submit command WAS put on the wire and no verdict
           came back in time. A click may well have reached Google, so the
           slot has to be assumed spent.
-        * "error" — nothing was sent at all (no connection was live within
-          `reconnect_grace`, the whole `timeout` expired before one
-          appeared, the resends ran out, or the run was stopped or
-          cancelled). No slot was spent.
+        * "error" — the URL could not be seen through to a verdict: no
+          connection was live within `reconnect_grace`, the whole `timeout`
+          expired before one appeared, the resends ran out, or the run was
+          stopped or cancelled.
 
-        So "timeout" is never returned for a URL that never left this
-        machine: against a per-property budget of roughly eleven a day,
-        charging a slot for a URL Google never saw is a bug the user pays
-        for. Anything that changes these two returns has to change the
+        The invariant that holds, and the ONLY one, is:
+
+            "timeout"  =>  a submit frame reached the socket.
+
+        The converse does NOT hold. "error" does not prove that nothing
+        reached Google: stop(), cancel() and an exhausted resend count are
+        all reachable after a send has already gone out, and a send that
+        went out may have landed a click before the connection died — the
+        same window the resend caveat below describes. Treating "error" as
+        no-slot-spent is therefore a deliberate accepted risk, not a
+        guarantee: it under-counts quota in a narrow, already-degraded case
+        (a run the user aborted, or a connection that kept failing) rather
+        than over-counting it on the common paths. The reverse bias would
+        burn slots on every cancelled run.
+
+        What "error" DOES guarantee is the direction that matters most: a
+        URL that never left this machine is never reported as "timeout".
+        Against a per-property budget of roughly eleven a day, charging a
+        slot for a URL Google never saw is a bug the user pays for.
+        Anything that changes these two returns has to change the
         disposition table with it.
 
         Caveat, deliberate: re-sending can submit the same URL twice in the
@@ -436,8 +452,14 @@ class BridgeSession:
         with self._conn_cv:
             self._conn = conn
             self._gen += 1
+            # Inside the lock, with the _conn publication it belongs to.
+            # Set outside it, a handler parked in the gap while stop() runs
+            # re-set this flag AFTER stop() had cleared it, leaving
+            # wait_for_extension() answering True for a dead session. The
+            # ordering is strictly _conn_lock -> Event and never the
+            # reverse, so there is no deadlock to trade for it.
+            self._connected.set()
             self._conn_cv.notify_all()
-        self._connected.set()
         log.info("bridge: extension connected")
 
         try:
