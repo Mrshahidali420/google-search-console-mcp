@@ -39,8 +39,8 @@ runlog.init()
 from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliberate
 
 # noqa: E402 on the import below — import order is deliberate, see above.
-from . import (deps, jobs, onboarding, tools_audit, tools_browsers,  # noqa: E402
-               tools_submit)
+from . import (deps, envelopes, jobs, onboarding, tools_audit,  # noqa: E402
+               tools_browsers, tools_submit)
 from . import __version__  # noqa: E402 — import order is deliberate, see above
 
 log = runlog.get(__name__)
@@ -58,58 +58,14 @@ mcp = FastMCP("gsc-mcp")
 # version silently.
 mcp._mcp_server.version = __version__
 
-_FIX_OAUTH_CLIENT = (
-    "No OAuth client is configured. Run gsc_setup() to download the bundled "
-    "client, or set GSC_MCP_CLIENT_ID and GSC_MCP_CLIENT_SECRET to use your own."
-)
-_FIX_TOKEN = "Not signed in. Run the consent flow to authorise Search Console access."
-_FIX_PROPERTIES = (
-    "This account has no Search Console properties, or the token lacks "
-    "the webmasters scope."
-)
-_FIX_API = (
-    "Search Console refused the call. Run gsc_doctor, and confirm the "
-    "signed-in account can see this property in Search Console."
-)
-_FIX_UNEXPECTED = (
-    "Something failed unexpectedly. Run gsc_doctor to check the setup and "
-    "retry; the log file records what happened."
-)
-
-
-def _api_fix(status: int | None) -> str:
-    """403 is almost always a missing webmasters scope or a property this
-    account cannot read, and that has a more useful next step than the
-    generic one."""
-    return _FIX_PROPERTIES if status == 403 else _FIX_API
-
-
-def _api_error(tool: str, exc: api.ApiError) -> dict:
-    log.warning("%s: Search Console returned HTTP %s", tool, exc.status)
-    return {"ok": False, "error": "api_error", "status": exc.status,
-            "fix": _api_fix(exc.status)}
-
-
-def _unexpected(tool: str, exc: Exception) -> dict:
-    """The catch-all that keeps the {ok, error, fix} contract whole.
-
-    Without this an unmodelled failure — an expired token meeting a
-    transiently failing token endpoint raises a plain RuntimeError out of
-    the eager probe in gsc_check_status, for one — escapes the tool.
-    FastMCP does turn that into `isError: true` rather than killing the
-    session, but the caller loses the structured `fix` this module
-    promises, and gets a stringified exception to parse instead.
-
-    Only the exception's TYPE NAME is recorded, never its message, for the
-    same reason gsc_doctor does the same: a message here can carry a
-    truncated response body (perf.PerfError does exactly that), a
-    credentialed URL, or a bearer token. That is fine to return to the
-    caller from the one place that already does it deliberately; it is not
-    fine in a log file.
-    """
-    log.warning("%s: unexpected %s", tool, type(exc).__name__)
-    return {"ok": False, "error": "unexpected", "detail": type(exc).__name__,
-            "fix": _FIX_UNEXPECTED}
+# The refusal envelope and its remedy strings live in envelopes.py, shared
+# with tools_audit and tools_submit — see that module for why they are not
+# defined here any more. The tools below use them via `envelopes.`; nothing
+# in this file re-exports them, so there is no second name for one string.
+#
+# api_error's third argument is the 403 remedy. Every tool here that can
+# raise ApiError takes no `site`, so a 403 cannot mean "wrong property" —
+# it means no properties or a missing scope, hence FIX_PROPERTIES.
 
 
 def _host_of_property(site_url: str) -> str:
@@ -125,7 +81,7 @@ def _host_of_property(site_url: str) -> str:
 
 
 def _auth_required() -> dict:
-    return {"ok": False, "error": "auth_required", "fix": _FIX_TOKEN}
+    return {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
 
 
 @mcp.tool()
@@ -181,14 +137,15 @@ def gsc_list_sites() -> list[dict] | dict:
     except deps.NotConfigured:
         log.info("gsc_list_sites: no OAuth client configured; "
                  "reporting not_configured")
-        return {"ok": False, "error": "not_configured", "fix": _FIX_OAUTH_CLIENT}
+        return {"ok": False, "error": "not_configured",
+                "fix": envelopes.FIX_OAUTH_CLIENT}
     except gauth.AuthRequired:
         log.info("gsc_list_sites: no usable token; reporting auth_required")
         return _auth_required()
     except api.ApiError as exc:
-        return _api_error("gsc_list_sites", exc)
+        return envelopes.api_error("gsc_list_sites", exc, envelopes.FIX_PROPERTIES)
     except Exception as exc:  # noqa: BLE001 — see _unexpected
-        return _unexpected("gsc_list_sites", exc)
+        return envelopes.unexpected("gsc_list_sites", exc)
 
     return sorted(sites, key=lambda site: site["property"])
 
@@ -200,7 +157,7 @@ def _check_oauth_client() -> dict:
     except Exception as exc:  # noqa: BLE001 — see gsc_doctor docstring
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,
-                "fix": _FIX_OAUTH_CLIENT}
+                "fix": envelopes.FIX_OAUTH_CLIENT}
     return {"name": name, "ok": True, "detail": "configured", "fix": ""}
 
 
@@ -211,10 +168,10 @@ def _check_token() -> dict:
     except Exception as exc:  # noqa: BLE001 — see gsc_doctor docstring
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,
-                "fix": _FIX_TOKEN}
+                "fix": envelopes.FIX_TOKEN}
     if token is None:
         return {"name": name, "ok": False, "detail": "no token file",
-                "fix": _FIX_TOKEN}
+                "fix": envelopes.FIX_TOKEN}
     return {"name": name, "ok": True, "detail": "token file present", "fix": ""}
 
 
@@ -264,7 +221,7 @@ def _check_properties() -> dict:
     except deps.NotConfigured as exc:
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,
-                "fix": _FIX_OAUTH_CLIENT}
+                "fix": envelopes.FIX_OAUTH_CLIENT}
     except gauth.AuthRequired as exc:
         # Distinct from the generic branch below: "the token was rejected"
         # and "you may be missing a scope" have different next steps, and
@@ -272,14 +229,14 @@ def _check_properties() -> dict:
         # a refused call as an account with no properties.
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,
-                "fix": _FIX_TOKEN}
+                "fix": envelopes.FIX_TOKEN}
     except Exception as exc:  # noqa: BLE001 — see gsc_doctor docstring
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,
-                "fix": _FIX_PROPERTIES}
+                "fix": envelopes.FIX_PROPERTIES}
     if not properties:
         return {"name": name, "ok": False, "detail": "0 properties",
-                "fix": _FIX_PROPERTIES}
+                "fix": envelopes.FIX_PROPERTIES}
     return {"name": name, "ok": True, "detail": f"{len(properties)} propert"
             f"{'y' if len(properties) == 1 else 'ies'}", "fix": ""}
 
@@ -437,19 +394,20 @@ def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
     except deps.NotConfigured:
         log.info("gsc_check_status: no OAuth client configured; "
                  "reporting not_configured")
-        return {"ok": False, "error": "not_configured", "fix": _FIX_OAUTH_CLIENT}
+        return {"ok": False, "error": "not_configured",
+                "fix": envelopes.FIX_OAUTH_CLIENT}
     except gauth.AuthRequired:
         log.info("gsc_check_status: no usable token; reporting auth_required")
         return _auth_required()
     except api.ApiError as exc:
-        return _api_error("gsc_check_status", exc)
+        return envelopes.api_error("gsc_check_status", exc, envelopes.FIX_PROPERTIES)
     except Exception as exc:  # noqa: BLE001 — see _unexpected
         # The eager probe above raises a plain RuntimeError when a stored
         # token is expired AND Google's token endpoint is transiently
         # failing — neither NotConfigured nor AuthRequired. Without this
         # branch that leaves the tool via FastMCP as an isError with no
         # structured fix attached.
-        return _unexpected("gsc_check_status", exc)
+        return envelopes.unexpected("gsc_check_status", exc)
 
 
 def _submission_report(
@@ -554,7 +512,7 @@ def gsc_quota() -> list[dict] | dict:
                     "binding": _quota_binding(verdict, inspection_verdict),
                 })
     except Exception as exc:  # noqa: BLE001 — see _unexpected
-        return _unexpected("gsc_quota", exc)
+        return envelopes.unexpected("gsc_quota", exc)
     return report
 
 
@@ -665,14 +623,15 @@ def gsc_performance(
     except deps.NotConfigured:
         log.info("gsc_performance: no OAuth client configured; "
                  "reporting not_configured")
-        return {"ok": False, "error": "not_configured", "fix": _FIX_OAUTH_CLIENT}
+        return {"ok": False, "error": "not_configured",
+                "fix": envelopes.FIX_OAUTH_CLIENT}
     except gauth.AuthRequired:
         log.info("gsc_performance: no usable token; reporting auth_required")
         return _auth_required()
     except (perf.PerfError, ValueError) as exc:
         return {"ok": False, **window, "note": str(exc)}
     except Exception as exc:  # noqa: BLE001 — see _unexpected
-        return {**_unexpected("gsc_performance", exc), **window}
+        return {**envelopes.unexpected("gsc_performance", exc), **window}
 
     return result
 
@@ -798,7 +757,7 @@ def gsc_submit_sitemaps(sitemaps: list[str] | None = None) -> dict | list[dict]:
     try:
         return _submit_sitemaps(sitemaps)
     except Exception as exc:  # noqa: BLE001 — see _unexpected
-        return _unexpected("gsc_submit_sitemaps", exc)
+        return envelopes.unexpected("gsc_submit_sitemaps", exc)
 
 
 def _submit_sitemaps(sitemaps: list[str] | None) -> dict | list[dict]:
@@ -819,7 +778,8 @@ def _submit_sitemaps(sitemaps: list[str] | None) -> dict | list[dict]:
         except deps.NotConfigured:
             log.info("gsc_submit_sitemaps: no OAuth client configured; "
                      "reporting not_configured")
-            return {"ok": False, "error": "not_configured", "fix": _FIX_OAUTH_CLIENT}
+            return {"ok": False, "error": "not_configured",
+                "fix": envelopes.FIX_OAUTH_CLIENT}
 
         results: list[dict] = []
         succeeded: dict[str, list[str]] = {}

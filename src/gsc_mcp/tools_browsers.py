@@ -59,6 +59,8 @@ from pathlib import Path
 
 from gsc_core import gauth, pairing, profiles, runlog
 
+from . import envelopes
+
 log = runlog.get(__name__)
 
 _NOTE_NONE_FOUND = (
@@ -79,10 +81,12 @@ def detect_browsers() -> dict:
     """The tool body. Never raises — see the module docstring."""
     try:
         return _report()
-    except Exception as exc:  # noqa: BLE001 — mirrors server._unexpected
-        log.warning("gsc_detect_browsers: unexpected %s", type(exc).__name__)
-        return {"ok": False, "error": "unexpected",
-                "detail": type(exc).__name__, "fix": _FIX_UNEXPECTED}
+    except Exception as exc:  # noqa: BLE001 — the tool must never raise
+        # Its own fix string, passed in rather than copied into a fourth
+        # envelope: browser detection's next step is genuinely not "run
+        # gsc_doctor and retry".
+        return envelopes.unexpected("gsc_detect_browsers", exc,
+                                    _FIX_UNEXPECTED)
 
 
 def _report() -> dict:

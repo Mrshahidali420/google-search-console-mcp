@@ -1,7 +1,7 @@
 import pytest
 
 from gsc_core import store
-from gsc_mcp import server
+from gsc_mcp import envelopes, server
 
 
 @pytest.fixture()
@@ -143,7 +143,7 @@ def test_doctor_properties_check_blames_the_oauth_client_when_not_configured(
     out = server.gsc_doctor()
     properties_check = next(c for c in out["checks"] if c["name"] == "properties")
     assert properties_check["detail"] == "NotConfigured"
-    assert properties_check["fix"] == server._FIX_OAUTH_CLIENT
+    assert properties_check["fix"] == envelopes.FIX_OAUTH_CLIENT
 
 
 def test_doctor_continues_after_a_failing_check(home, monkeypatch):

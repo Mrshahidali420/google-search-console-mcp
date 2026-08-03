@@ -15,7 +15,7 @@ import pytest
 import requests
 
 from gsc_core import gauth, perf, store
-from gsc_mcp import server
+from gsc_mcp import envelopes, server
 
 
 class _SignedOutProvider:
@@ -112,7 +112,7 @@ def test_performance_signed_out_returns_auth_required_not_zeros(home, monkeypatc
     provider.access_token() raises before any HTTP call is attempted."""
     monkeypatch.setattr(server.deps, "provider", lambda: _SignedOutProvider())
     out = server.gsc_performance(site="example.com")
-    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+    assert out == {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
 
 
 def test_performance_signed_out_portfolio_path_also_refuses(home, monkeypatch):
@@ -121,7 +121,7 @@ def test_performance_signed_out_portfolio_path_also_refuses(home, monkeypatch):
     AuthRequired is not swallowed there either."""
     monkeypatch.setattr(server.deps, "provider", lambda: _SignedOutProvider())
     out = server.gsc_performance()
-    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+    assert out == {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
 
 
 def test_performance_signed_out_query_dimension_path_also_refuses(home, monkeypatch):
@@ -129,7 +129,7 @@ def test_performance_signed_out_query_dimension_path_also_refuses(home, monkeypa
     left untested by the first two signed-out tests."""
     monkeypatch.setattr(server.deps, "provider", lambda: _SignedOutProvider())
     out = server.gsc_performance(site="example.com", dim="query")
-    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+    assert out == {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
 
 
 def test_performance_signed_out_multi_property_portfolio_forces_the_thread_pool(
@@ -146,7 +146,7 @@ def test_performance_signed_out_multi_property_portfolio_forces_the_thread_pool(
                           "siteOwner", [])
     monkeypatch.setattr(server.deps, "provider", lambda: _SignedOutProvider())
     out = server.gsc_performance()
-    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+    assert out == {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
 
 
 def test_performance_not_configured_returns_a_setup_answer(home, monkeypatch):
@@ -156,7 +156,7 @@ def test_performance_not_configured_returns_a_setup_answer(home, monkeypatch):
     monkeypatch.setattr(server.deps, "provider", boom)
     out = server.gsc_performance(site="example.com")
     assert out == {"ok": False, "error": "not_configured",
-                   "fix": server._FIX_OAUTH_CLIENT}
+                   "fix": envelopes.FIX_OAUTH_CLIENT}
 
 
 # ---------------------------------------------------------- gsc_submit_sitemaps
@@ -285,7 +285,7 @@ def test_submit_sitemaps_signed_out_returns_auth_required_and_submits_nothing(
     that is what raises here."""
     monkeypatch.setattr(server.deps, "provider", lambda: _SignedOutProvider())
     out = server.gsc_submit_sitemaps(["https://example.com/sitemap.xml"])
-    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+    assert out == {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
     with store.session() as conn:
         assert store.get_sites(conn)[0]["sitemaps"] == []
 
@@ -297,7 +297,7 @@ def test_submit_sitemaps_not_configured_returns_a_setup_answer(home, monkeypatch
     monkeypatch.setattr(server.deps, "provider", boom)
     out = server.gsc_submit_sitemaps(["https://example.com/sitemap.xml"])
     assert out == {"ok": False, "error": "not_configured",
-                   "fix": server._FIX_OAUTH_CLIENT}
+                   "fix": envelopes.FIX_OAUTH_CLIENT}
 
 
 # ------------------------------- gsc_submit_sitemaps: forgetting a submission
@@ -371,7 +371,7 @@ def test_a_token_dying_mid_loop_keeps_what_already_succeeded(home, monkeypatch):
     out = server.gsc_submit_sitemaps(["https://example.com/first.xml",
                                       "https://example.com/second.xml"])
 
-    assert out == {"ok": False, "error": "auth_required", "fix": server._FIX_TOKEN}
+    assert out == {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
     with store.session() as conn:
         assert store.get_sites(conn)[0]["sitemaps"] == [
             "https://example.com/first.xml"]

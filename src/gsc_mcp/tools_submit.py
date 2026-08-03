@@ -22,7 +22,7 @@ import time
 
 from gsc_core import bridge, config, runlog, store, submit
 
-from . import deps, jobs, target
+from . import deps, envelopes, jobs, target
 
 log = runlog.get(__name__)
 
@@ -45,8 +45,6 @@ _FIX_NO_EXTENSION = ("open the browser and load the GSC MCP Bridge extension; "
 _FIX_BAD_CAP = (f"set sync_submit_cap in the config file to a whole number "
                 f"between 1 and {HARD_SYNC_CAP}, or remove it to use the "
                 f"default")
-_FIX_UNEXPECTED = ("check the log file for the failure type, then try again; "
-                   "gsc_doctor reports on the setup as a whole")
 _FIX_NO_JOB_URLS = "pass a list of absolute URLs, at least one"
 _FIX_JOB_RUNNING = ("stop it with gsc_stop_job, or wait for it to finish — "
                     "the bridge drives one browser tab and cannot run two")
@@ -119,10 +117,6 @@ def _cap(cfg: dict) -> int | None:
     return max(1, min(configured, HARD_SYNC_CAP))
 
 
-def _refuse(error: str, detail: str, fix: str) -> dict:
-    return {"ok": False, "error": error, "detail": detail, "fix": fix}
-
-
 def _notes_for(outcomes: set[str | None]) -> list[str]:
     """The guidance a set of outcomes earns. Additive: never a replacement
     for the counts, because a note explains a number rather than standing
@@ -174,28 +168,29 @@ def request_indexing(urls: list[str]) -> dict:
         # message is authored in jobs.py, it names a job id at most, and
         # without it the caller cannot tell "something else has the browser"
         # from "the extension is broken".
-        return _refuse("job_already_running", str(exc), _FIX_JOB_RUNNING)
+        return envelopes.refuse("job_already_running", str(exc), _FIX_JOB_RUNNING)
     except Exception as exc:  # noqa: BLE001 — a tool never raises
         # TYPE NAME only, in the log and in the result: an unauthored
         # message can carry a filesystem path holding the operator's
         # account name, or the bridge token.
         log.warning("gsc_request_indexing: unexpected %s", type(exc).__name__)
-        return _refuse("unexpected", type(exc).__name__, _FIX_UNEXPECTED)
+        return envelopes.refuse("unexpected", type(exc).__name__,
+                                envelopes.FIX_UNEXPECTED)
 
 
 def _request_indexing(urls: list[str]) -> dict:
     cfg = config.load()
     cap = _cap(cfg)
     if cap is None:
-        return _refuse("bad_config",
+        return envelopes.refuse("bad_config",
                        "sync_submit_cap is not a whole number", _FIX_BAD_CAP)
     if not urls:
-        return _refuse("no_urls", "no URLs were given", _FIX_NO_URLS)
+        return envelopes.refuse("no_urls", "no URLs were given", _FIX_NO_URLS)
     if len(urls) > cap:
         # Refused whole, before a browser is resolved or a row is opened.
         # Truncating instead would spend quota on a list the caller never
         # agreed to cut.
-        return _refuse("too_many_urls",
+        return envelopes.refuse("too_many_urls",
                        f"{len(urls)} URLs given; this tool takes at most {cap}",
                        _FIX_TOO_MANY)
 
@@ -211,14 +206,14 @@ def _request_indexing(urls: list[str]) -> dict:
     with jobs.claim_bridge():
         chosen = target.resolve()
         if chosen is None:
-            return _refuse("no_browser",
+            return envelopes.refuse("no_browser",
                            "no Chromium browser profile was found",
                            _FIX_NO_BROWSER)
 
         with deps.connection() as conn:
             properties = _properties(conn)
             if not properties:
-                return _refuse("no_properties",
+                return envelopes.refuse("no_properties",
                                "no Search Console properties are known yet",
                                _FIX_NO_PROPERTIES)
             try:
@@ -243,7 +238,7 @@ def _request_indexing(urls: list[str]) -> dict:
                 # RuntimeError load_or_create_token raises for an unwritable
                 # config directory, falls through to request_indexing's
                 # type-name-only handler.
-                return _refuse("extension_not_connected", str(exc),
+                return envelopes.refuse("extension_not_connected", str(exc),
                                _FIX_NO_EXTENSION)
     return _tally(result)
 
@@ -264,7 +259,8 @@ def start_indexing_job(urls: list[str]) -> dict:
     """
     try:
         if not urls:
-            return _refuse("no_urls", "no URLs were given", _FIX_NO_JOB_URLS)
+            return envelopes.refuse("no_urls", "no URLs were given",
+                                    _FIX_NO_JOB_URLS)
 
         # Checked here rather than left to the run: with no properties every
         # URL would report no_property, so the job would open a browser, a
@@ -272,7 +268,7 @@ def start_indexing_job(urls: list[str]) -> dict:
         # nothing and says the same thing sooner.
         with deps.connection() as conn:
             if not _properties(conn):
-                return _refuse("no_properties",
+                return envelopes.refuse("no_properties",
                                "no Search Console properties are known yet",
                                _FIX_NO_PROPERTIES)
 
@@ -284,11 +280,12 @@ def start_indexing_job(urls: list[str]) -> dict:
         # exemption: it is authored in jobs.start(), it names the running
         # job id and nothing else, and without that id "stop it" is not
         # something the caller can act on.
-        return _refuse("job_already_running", str(exc), _FIX_JOB_RUNNING)
+        return envelopes.refuse("job_already_running", str(exc), _FIX_JOB_RUNNING)
     except Exception as exc:  # noqa: BLE001 — a tool never raises
         log.warning("gsc_start_indexing_job: unexpected %s",
                     type(exc).__name__)
-        return _refuse("unexpected", type(exc).__name__, _FIX_UNEXPECTED)
+        return envelopes.refuse("unexpected", type(exc).__name__,
+                                envelopes.FIX_UNEXPECTED)
 
 
 def job_status(job_id: str | None = None) -> dict:
@@ -302,14 +299,14 @@ def job_status(job_id: str | None = None) -> dict:
             if job_id is None:
                 known = store.list_jobs(conn)
                 if not known:
-                    return _refuse("no_jobs",
+                    return envelopes.refuse("no_jobs",
                                    "no submission job has run yet",
                                    _FIX_NO_JOBS)
                 job = known[-1]        # list_jobs orders by started_at
             else:
                 job = store.get_job(conn, job_id)
                 if job is None:
-                    return _refuse("unknown_job", "no job with that id",
+                    return envelopes.refuse("unknown_job", "no job with that id",
                                    _FIX_UNKNOWN_JOB)
 
         progress = job.get("progress") or {}
@@ -330,7 +327,8 @@ def job_status(job_id: str | None = None) -> dict:
                 "live": jobs.is_running(job["id"])}
     except Exception as exc:  # noqa: BLE001 — a tool never raises
         log.warning("gsc_job_status: unexpected %s", type(exc).__name__)
-        return _refuse("unexpected", type(exc).__name__, _FIX_UNEXPECTED)
+        return envelopes.refuse("unexpected", type(exc).__name__,
+                                envelopes.FIX_UNEXPECTED)
 
 
 def stop_job(job_id: str) -> dict:
@@ -349,7 +347,7 @@ def stop_job(job_id: str) -> dict:
         with deps.connection() as conn:
             job = store.get_job(conn, job_id)
         if job is None:
-            return _refuse("unknown_job", "no job with that id",
+            return envelopes.refuse("unknown_job", "no job with that id",
                            _FIX_UNKNOWN_JOB)
         # Already finished is not a failure: the caller wanted it stopped
         # and it is stopped. Refusing here would read as "still running".
@@ -357,4 +355,5 @@ def stop_job(job_id: str) -> dict:
                 "note": _NOTE_JOB_FINISHED}
     except Exception as exc:  # noqa: BLE001 — a tool never raises
         log.warning("gsc_stop_job: unexpected %s", type(exc).__name__)
-        return _refuse("unexpected", type(exc).__name__, _FIX_UNEXPECTED)
+        return envelopes.refuse("unexpected", type(exc).__name__,
+                                envelopes.FIX_UNEXPECTED)

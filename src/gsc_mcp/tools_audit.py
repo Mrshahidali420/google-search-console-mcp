@@ -17,65 +17,23 @@ from __future__ import annotations
 
 from gsc_core import api, audit as audit_core, config, discovery, gauth, runlog
 
-from . import deps
+from . import deps, envelopes
 
 log = runlog.get(__name__)
 
-# NOT "run gsc_setup". deps.NotConfigured (deps.py:41) means there is no
-# OAuth client to sign in WITH, and onboarding.setup catches that same
-# exception and answers with this env-var advice itself — so pointing at
-# gsc_setup would send the caller round a circle to be told this anyway.
-_FIX_OAUTH_CLIENT = ("no OAuth client is configured — set GSC_MCP_CLIENT_ID "
-                     "and GSC_MCP_CLIENT_SECRET, or install a release build "
-                     "with an embedded client")
-_FIX_TOKEN = "run gsc_setup to sign in again"
+# Only the strings unique to these two tools live here. The rest — and the
+# envelope helpers that were copied into this file — are in envelopes.py.
 _FIX_BAD_SOURCE = ('source must be one of "sitemap", "store", or "both" '
                    "(the default)")
 _FIX_BAD_LIMIT = ("limit must be a whole number of at least 1, or omitted "
                   "to inspect everything that has gone stale")
-_FIX_UNKNOWN_PROPERTY = ("run gsc_list_sites to see the properties this "
-                         "account can reach, and pass one of them exactly "
-                         "as listed")
-_FIX_API = ("Search Console refused the call. Run gsc_doctor, and confirm "
-            "the signed-in account can see this property in Search Console.")
-_FIX_UNEXPECTED = ("check the log file for the failure type, then try "
-                   "again; gsc_doctor reports on the setup as a whole")
 
-
-def _api_fix(status: int | None) -> str:
-    """403 is almost always a missing webmasters scope or a property this
-    account cannot read, and that has a more useful next step than the
-    generic one.
-
-    Deliberately NOT a mirror of server._api_fix, despite the same shape
-    and the same `error` code: that one answers 403 with _FIX_PROPERTIES
-    ("this account has no properties, or the token lacks the scope"), this
-    one with _FIX_UNKNOWN_PROPERTY. Both tools here take a `site` the
-    caller chose, so the likelier 403 is a property this account cannot
-    read, and "list them and pass one exactly as listed" is the step that
-    resolves it. Not imported from server.py in any case: server.py imports
-    this module, not the other way round.
-    """
-    return _FIX_UNKNOWN_PROPERTY if status == 403 else _FIX_API
-
-
-def _api_error(tool: str, exc: api.ApiError) -> dict:
-    log.warning("%s: Search Console returned HTTP %s", tool, exc.status)
-    return {"ok": False, "error": "api_error", "status": exc.status,
-            "fix": _api_fix(exc.status)}
-
-
-def _unexpected(tool: str, exc: Exception) -> dict:
-    """The catch-all that keeps the {ok, error, fix} contract whole.
-
-    Only the exception's TYPE NAME is recorded, never its message. An
-    OSError raised opening the store carries an absolute path containing
-    the operator's account name; repeating it here would put that name in
-    a log file AND in a transcript.
-    """
-    log.warning("%s: unexpected %s", tool, type(exc).__name__)
-    return {"ok": False, "error": "unexpected", "detail": type(exc).__name__,
-            "fix": _FIX_UNEXPECTED}
+# The 403 remedy passed to envelopes.api_error throughout this module. Both
+# tools here take a `site` the caller chose, so the likelier 403 is a
+# property this account cannot read — "list them and pass one exactly as
+# listed" is the step that resolves it. server.py's tools take no site and
+# pass FIX_PROPERTIES for the same status; see envelopes.api_fix.
+_FORBIDDEN = envelopes.FIX_UNKNOWN_PROPERTY
 
 
 def _bad_limit(limit: object) -> bool:
@@ -123,7 +81,7 @@ def find_unindexed(site: str, source: str = "both",
         properties = api.list_properties(provider)
         if site not in properties:
             return {"ok": False, "error": "unknown_property",
-                    "fix": _FIX_UNKNOWN_PROPERTY}
+                    "fix": envelopes.FIX_UNKNOWN_PROPERTY}
 
         settings = config.load()
         with deps.connection() as conn:
@@ -134,18 +92,18 @@ def find_unindexed(site: str, source: str = "both",
     except deps.NotConfigured:
         log.info("gsc_find_unindexed: no OAuth client configured")
         return {"ok": False, "error": "not_configured",
-                "fix": _FIX_OAUTH_CLIENT}
+                "fix": envelopes.FIX_OAUTH_CLIENT}
     except gauth.AuthRequired:
         log.info("gsc_find_unindexed: no usable token")
-        return {"ok": False, "error": "auth_required", "fix": _FIX_TOKEN}
+        return {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
     except api.ApiError as exc:
-        return _api_error("gsc_find_unindexed", exc)
+        return envelopes.api_error("gsc_find_unindexed", exc, _FORBIDDEN)
     except Exception as exc:  # noqa: BLE001 — see _unexpected
         # Exception, never RuntimeError: deps.NotConfigured subclasses
         # RuntimeError (deps.py:41), as do gauth.AuthRequired and
         # api.ApiError, so catching the base class here would shadow all
         # three arms above and report each of them as "unexpected".
-        return _unexpected("gsc_find_unindexed", exc)
+        return envelopes.unexpected("gsc_find_unindexed", exc)
 
 
 def audit(site: str) -> dict:
@@ -166,7 +124,7 @@ def audit(site: str) -> dict:
         properties = api.list_properties(provider)
         if site not in properties:
             return {"ok": False, "error": "unknown_property",
-                    "fix": _FIX_UNKNOWN_PROPERTY}
+                    "fix": envelopes.FIX_UNKNOWN_PROPERTY}
 
         settings = config.load()
         with deps.connection() as conn:
@@ -175,11 +133,11 @@ def audit(site: str) -> dict:
     except deps.NotConfigured:
         log.info("gsc_audit: no OAuth client configured")
         return {"ok": False, "error": "not_configured",
-                "fix": _FIX_OAUTH_CLIENT}
+                "fix": envelopes.FIX_OAUTH_CLIENT}
     except gauth.AuthRequired:
         log.info("gsc_audit: no usable token")
-        return {"ok": False, "error": "auth_required", "fix": _FIX_TOKEN}
+        return {"ok": False, "error": "auth_required", "fix": envelopes.FIX_TOKEN}
     except api.ApiError as exc:
-        return _api_error("gsc_audit", exc)
+        return envelopes.api_error("gsc_audit", exc, _FORBIDDEN)
     except Exception as exc:  # noqa: BLE001 — see _unexpected
-        return _unexpected("gsc_audit", exc)
+        return envelopes.unexpected("gsc_audit", exc)

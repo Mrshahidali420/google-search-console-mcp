@@ -99,21 +99,22 @@ def test_find_unindexed_refuses_when_no_oauth_client_is_configured(
     assert out["fix"]
 
 
-def test_the_not_configured_fix_does_not_send_the_caller_round_a_circle(
+def test_the_not_configured_fix_names_the_tool_that_resolves_it(
         home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # deps.NotConfigured means there is no OAuth client to sign in WITH,
-    # and onboarding.setup catches the same exception and answers with the
-    # env-var advice. Pointing at gsc_setup would send a signed-out caller
-    # to the one tool that will tell them to do something else.
-    # `assert out["fix"]` alone is truthy-only and cannot see this.
+    # deps.NotConfigured means there is no OAuth client to sign in WITH.
+    # gsc_setup is the answer: onboarding._setup catches this same exception
+    # and downloads the bundled client (onboarding.py:243-248), so the caller
+    # is not being sent round a circle. The env vars stay named as the
+    # alternative for anyone using their own client.
+    # `assert out["fix"]` alone is truthy-only and cannot see either half.
     monkeypatch.setattr(deps, "oauth_client",
                         lambda: (_ for _ in ()).throw(deps.NotConfigured()))
 
     for out in (tools_audit.find_unindexed(PROPERTY),
                 tools_audit.audit(PROPERTY)):
+        assert "gsc_setup" in out["fix"]
         assert "GSC_MCP_CLIENT_ID" in out["fix"]
         assert "GSC_MCP_CLIENT_SECRET" in out["fix"]
-        assert "gsc_setup" not in out["fix"]
 
 
 def test_find_unindexed_probes_the_token_before_fetching_a_sitemap(

@@ -31,8 +31,9 @@ from a TLS failure. Replacing the message with a bare constant would make
 every network failure look identical to whoever has to debug one.
 
 This lives in its own module rather than in either client because both
-need it and neither imports the other. Copying it into both is how
-gsc_mcp._api_fix ended up with two versions that disagreed.
+need it and neither imports the other. Copying it into both is how the
+refusal-envelope helpers ended up with two versions that disagreed, which
+is why they now live in gsc_mcp/envelopes.py for the same reason.
 """
 from __future__ import annotations
 
