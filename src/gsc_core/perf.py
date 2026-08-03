@@ -48,6 +48,7 @@ import requests
 
 from . import routing, runlog
 from .gauth import TokenProvider
+from .transport import transport_failure
 
 log = runlog.get(__name__)
 
@@ -310,7 +311,9 @@ def post_query(property: str, body: dict, provider: TokenProvider,
             )
         except requests.RequestException as exc:
             if attempt == max_retries - 1:
-                raise PerfError(f"request failed: {exc}") from exc
+                log.warning("post_query: transport failure (%s)",
+                            type(exc).__name__)
+                raise PerfError(transport_failure(exc)) from exc
             sleep(2 ** attempt)
             continue
 
@@ -495,7 +498,17 @@ def hourly(site: str, properties: list[str], provider: TokenProvider,
 def _zero_row(property: str, start_date: str, end_date: str, exc: Exception) -> dict:
     """A failed property's placeholder — same shape as a real totals() row,
     zeroed out, carrying why it failed rather than raising and sinking the
-    whole portfolio run."""
+    whole portfolio run.
+
+    str(exc) is kept in full here, and that is safe only because of what
+    can reach it: every PerfError message is either our own words or
+    Google's own response body, since post_query stopped interpolating
+    transport exceptions (see transport.transport_failure). Reduce this to
+    a fixed classification and the row stops explaining itself — a zeroed
+    row with an opaque error is indistinguishable from a property that
+    genuinely has no data, which is the silent-empty failure this codebase
+    is written to avoid. Re-introduce an interpolated str(exc) upstream and
+    the leak reappears HERE, one layer from where it was written."""
     return {"site": property, "start": start_date, "end": end_date,
            "clicks": 0, "impressions": 0, "ctr": 0.0, "position": 0.0,
            "error": str(exc)}

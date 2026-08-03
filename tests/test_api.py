@@ -137,7 +137,39 @@ def test_transport_exception_on_last_attempt_returns_error():
                                      max_retries=4, sleep=lambda _: None)
     assert status == "error"
     assert "request failed" in detail
-    assert "boom" in detail
+    # The exception's TYPE is named; its MESSAGE is not. See
+    # test_a_transport_failure_does_not_leak_the_exception_message.
+    assert "ConnectionError" in detail
+    assert "boom" not in detail
+
+
+def test_a_transport_failure_does_not_leak_the_exception_message():
+    """requests composes that message, and it is not ours to hand out.
+
+    requests reads HTTPS_PROXY from the environment, and a ProxyError's
+    message contains the proxy URL it tried -- credentials and all, since
+    https://user:password@proxy.invalid:8080 is an ordinary way to write
+    that variable. Interpolating str(exc) put that in the note field of a
+    status row, which goes to the calling model and into its transcript.
+    Internal hostnames and IPs arrive by the same route from DNS and
+    connection failures.
+
+    The type name is kept deliberately: it is a class name from requests,
+    a closed vocabulary that cannot contain user data, and it is the one
+    thing that tells a proxy misconfiguration from a timeout.
+    """
+    secret_proxy = "https://user:hunter2@proxy.internal.invalid:8080"
+    session = FakeSession(*[requests.exceptions.ProxyError(
+        f"HTTPSConnectionPool: Max retries exceeded with url: /v1/urlInspection "
+        f"(Caused by ProxyError('Cannot connect to proxy.', "
+        f"NewConnectionError('{secret_proxy}: Failed to establish a new connection')))")
+        for _ in range(4)])
+    _, detail = api.inspect_url("https://example.com/a", "sc-domain:example.com",
+                                FakeProvider(), session=session,
+                                max_retries=4, sleep=lambda _: None)
+    for fragment in ("hunter2", "user:", "proxy.internal.invalid", "8080"):
+        assert fragment not in detail
+    assert "ProxyError" in detail
 
 
 def test_error_detail_is_truncated_to_200_characters():

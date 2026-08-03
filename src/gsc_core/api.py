@@ -37,6 +37,7 @@ from urllib.parse import quote
 import requests
 
 from . import quota, routing, runlog, store
+from .transport import transport_failure
 from . import gauth
 from .gauth import AuthRequired, TokenProvider
 
@@ -168,8 +169,9 @@ def inspect_url(url: str, property: str, provider: TokenProvider,
     - Any other status -> return an error immediately; retrying a 403 or a
       404 just gets the same answer.
     - A transport exception (timeout, connection error) backs off with
-      2 ** attempt seconds and retries, reporting the exception text only
-      on the final attempt.
+      2 ** attempt seconds and retries, reporting on the final attempt --
+      the exception's type name, never its message. See
+      transport.transport_failure for what that message can contain.
     """
     client = session or _session
     body = {"inspectionUrl": url, "siteUrl": property}
@@ -184,7 +186,9 @@ def inspect_url(url: str, property: str, provider: TokenProvider,
             )
         except requests.RequestException as exc:
             if attempt == max_retries - 1:
-                return "error", f"request failed: {exc}"
+                log.warning("inspect_url: transport failure (%s)",
+                            type(exc).__name__)
+                return "error", transport_failure(exc)
             sleep(2 ** attempt)
             continue
 

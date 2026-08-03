@@ -78,6 +78,51 @@ def test_transport_exception_backs_off_and_retries():
     assert slept == [1]
 
 
+def test_a_transport_failure_does_not_leak_the_exception_message():
+    """Parity with api.inspect_url; see that test for the proxy scenario.
+
+    This site is the worse of the two: post_query builds its uri with the
+    property encoded into the path, so a connection error's message names
+    the caller's own domain as well as whatever the proxy contributed --
+    and PerfError's message reaches the caller through gsc_performance and,
+    via _zero_row, through every portfolio row.
+    """
+    secret_proxy = "https://user:hunter2@proxy.internal.invalid:8080"
+    session = FakeSession(*[requests.exceptions.ProxyError(
+        f"Cannot connect to proxy: {secret_proxy}") for _ in range(4)])
+    with pytest.raises(perf.PerfError) as exc_info:
+        perf.post_query("sc-domain:example.com", {}, FakeProvider(),
+                        session=session, sleep=lambda _: None)
+    message = str(exc_info.value)
+    for fragment in ("hunter2", "user:", "proxy.internal.invalid", "8080"):
+        assert fragment not in message
+    assert "ProxyError" in message
+
+
+def test_a_transport_failure_reaches_a_portfolio_row_without_the_message():
+    """_zero_row's str(exc) is safe only because post_query's is.
+
+    The row's "error" field is the only signal a caller gets about why one
+    property in a portfolio came back zeroed, so it keeps the full PerfError
+    text -- including a truncated Google response body, which is deliberate.
+    That is sound precisely because every PerfError message is now either
+    our own words or Google's response. This test is what holds that true:
+    re-introduce an interpolated str(exc) upstream and the leak reappears
+    here, one layer removed from the test that guards it.
+    """
+    secret_proxy = "https://user:hunter2@proxy.internal.invalid:8080"
+    session = FakeSession(*[requests.exceptions.ProxyError(
+        f"Cannot connect to proxy: {secret_proxy}") for _ in range(4)])
+    rows = perf.portfolio(["sc-domain:example.com"], FakeProvider(),
+                          session=session, sleep=lambda _: None)
+    assert rows[0]["clicks"] == 0
+    for fragment in ("hunter2", "user:", "proxy.internal.invalid", "8080"):
+        assert fragment not in rows[0]["error"]
+    # Still says something useful about WHY -- a zeroed row with an opaque
+    # error is indistinguishable from a property that genuinely has no data.
+    assert "ProxyError" in rows[0]["error"]
+
+
 def test_401_consumes_no_sleep():
     """Parity with api.inspect_url: an expired token is not a rate-limit
     signal, so retrying past a 401 must not spend a backoff sleep."""
