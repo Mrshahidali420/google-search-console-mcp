@@ -467,3 +467,45 @@ def test_fresh_says_this_run_did_not_inspect_it(store_conn):
     assert fresh_by_url == {"https://example.com/a-stale": False,
                             "https://example.com/b-recent": True}
 
+OVERLAPPING = ["https://example.com/", "https://example.com/blog/"]
+
+
+def test_discovery_attributes_a_url_the_way_api_persist_does(store_conn):
+    """Two writers, one answer. api._persist attributes by
+    routing.route_all and store.upsert_url overwrites `property` on
+    conflict, so a discovery pass that attributed by its `property`
+    argument instead made the two flip the same rows back and forth --
+    and gsc_audit's per-property counts moved depending on which tool ran
+    last.
+    """
+    from gsc_core import routing
+
+    url = "https://example.com/blog/post"
+    fetch = _fetch_returning([url])
+    check, _ = _check_returning([])
+
+    discovery.find_unindexed(
+        store_conn, OVERLAPPING[1], provider=object(),
+        properties=OVERLAPPING, source="sitemap", _fetch=fetch, _check=check,
+        _sitemap_urls=["https://example.com/blog/sitemap.xml"])
+
+    routed = routing.resolve_property(url, OVERLAPPING)
+    assert [row["url"] for row in store.get_urls(store_conn, routed)] == [url]
+    other = next(p for p in OVERLAPPING if p != routed)
+    assert store.get_urls(store_conn, other) == []
+
+
+def test_a_sitemap_url_no_property_covers_is_not_written(store_conn):
+    """api._persist writes only routed targets, so a URL routing cannot
+    place has no property to be written under. Inventing one would put a
+    foreign host's URL into this account's counts.
+    """
+    fetch = _fetch_returning(["https://elsewhere.invalid/page"])
+    check, _ = _check_returning([])
+
+    discovery.find_unindexed(
+        store_conn, PROPERTY, provider=object(), properties=PROPERTIES,
+        source="sitemap", _fetch=fetch, _check=check,
+        _sitemap_urls=["https://example.com/sitemap.xml"])
+
+    assert store.get_urls(store_conn, PROPERTY) == []

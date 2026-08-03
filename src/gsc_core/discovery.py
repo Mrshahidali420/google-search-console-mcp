@@ -32,7 +32,7 @@ from typing import Any, Callable
 
 import requests
 
-from . import api, reasons, runlog, sitemaps, store
+from . import api, reasons, routing, runlog, sitemaps, store
 
 log = runlog.get(__name__)
 
@@ -81,7 +81,7 @@ def find_unindexed(
             read.extend(result.sitemaps_read)
             failures.extend(result.failures)
             from_sitemap.extend(result.urls)
-        _record_discovery(conn, property, from_sitemap, moment)
+        _record_discovery(conn, from_sitemap, properties)
 
     candidates = _candidates(conn, property, source, from_sitemap)
     known = set(candidates)
@@ -109,20 +109,34 @@ def find_unindexed(
         checked=checked, skipped_quota=skipped_quota)
 
 
-def _record_discovery(conn: sqlite3.Connection, property: str,
-                      urls: list[str], moment: datetime) -> None:
-    """Write newly seen URLs with no status.
+def _record_discovery(conn: sqlite3.Connection, urls: list[str],
+                      properties: list[str]) -> None:
+    """Write newly seen URLs with no status, under the property that owns them.
+
+    ATTRIBUTED BY ROUTING, not by the property whose sitemap the URL came
+    out of. api._persist (api.py:611-635) writes by routing.route_all, and
+    store.upsert_url sets `property = excluded.property` on conflict, so
+    two writers using different rules do not merely disagree once -- they
+    flip the same rows back and forth, and gsc_audit's per-property counts
+    move depending on which tool ran last. With overlapping properties in
+    one account (an ordinary setup) that is the everyday case, not a
+    corner. A URL routing cannot place is SKIPPED for the same reason:
+    api._persist only ever writes routed targets, so there is no property
+    to write it under and inventing one would file a foreign host's URL in
+    this account's counts.
 
     store.upsert_url's contract (store.py:297-307) reserves
     status/reason/checked_at of None for exactly this: a discovery pass
     carries no inspection result, so None means "no new information" and
     an existing status survives untouched. One transaction for the batch.
     """
-    if not urls:
+    routed = [(url, owner) for url, owner in routing.route_all(urls, properties)
+              if owner is not None]
+    if not routed:
         return
     with store.tx(conn):
-        for url in urls:
-            store.upsert_url(conn, url, property, None, None, None)
+        for url, owner in routed:
+            store.upsert_url(conn, url, owner, None, None, None)
 
 
 def _candidates(conn: sqlite3.Connection, property: str, source: str,
