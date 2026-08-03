@@ -43,12 +43,15 @@ dependencies = [
     # under mcp.server.mcpserver with a different construction API. Pinned
     # below that break until this server is ported to the new shape.
     "mcp>=1.2,<2.0",
-    # >=13: the bridge server uses the THREADING (sync) implementation,
-    # which landed in 12.0 — but its recv() only grew a `timeout` argument
-    # in 13.0, and the handshake read depends on that timeout to hang up on
-    # a client that connects and then says nothing. 12.x would import fine
-    # and fail at the first connection, so the floor is 13, not 12.
-    "websockets>=13",
+    # >=12: the release that introduced the THREADING (sync) implementation
+    # the bridge server is built on. Everything bridge.py touches is present
+    # in 12.0 as shipped -- serve(), Server.serve_forever(), Server.shutdown(),
+    # Server.socket, and Connection.recv(timeout=...). The bridge deliberately
+    # does not depend on Server.shutdown() closing established connections:
+    # on 13.0-16.x it only closes the LISTENING socket (verified in review),
+    # so the read loop polls with a bounded recv() instead and teardown works
+    # the same on every release from 12 up.
+    "websockets>=12",
 ]
 
 [project.scripts]

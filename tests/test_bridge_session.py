@@ -14,14 +14,19 @@ than a failing one:
 * `session.ready` rather than a connect-poll loop. The server sets it once
   the socket is bound; waiting on it is exact and costs no retries.
 * The fixture stops the session in a `finally`, so a failing assertion
-  still tears the server down. `Server.shutdown()` joins the handler
-  threads, which are NOT daemon threads — a leaked one keeps pytest alive.
+  still tears the server down, and joins the server thread. `websockets`
+  handler threads are NOT daemon threads, and only 17.0 makes
+  `Server.shutdown()` close established connections as well as the
+  listening socket — which is why the read loop polls with a bounded
+  `recv()` rather than trusting shutdown to unblock it.
 * Every helper thread a test starts is joined before the test returns.
 """
 from __future__ import annotations
 
 import json
+import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -175,6 +180,21 @@ def test_submit_with_no_extension_gives_up_after_the_grace_period(session):
                           "0", timeout=30, reconnect_grace=1) == "error"
 
 
+def test_submit_never_overruns_its_own_timeout(session):
+    """`timeout` is the ceiling on the WHOLE call, not on one attempt.
+
+    With the grace period longer than the timeout, waiting the full grace
+    before consulting the deadline overran the budget by up to
+    reconnect_grace x (max_resends + 1) — here, 6s against a 1s ceiling.
+    """
+    started = time.monotonic()
+    outcome = session.submit("sc-domain:example.com", "https://example.com/a",
+                             "0", timeout=1, reconnect_grace=6)
+    elapsed = time.monotonic() - started
+    assert outcome == "timeout"
+    assert elapsed < 3, f"submit overran its 1s timeout by {elapsed:.2f}s"
+
+
 def test_progress_and_ping_frames_do_not_disturb_an_in_flight_submit(session):
     conn = _hello(session)
     assert session.wait_for_extension(SETTLE) is True
@@ -288,6 +308,38 @@ def test_stop_is_safe_to_call_twice(session):
     session.stop()
 
 
+def test_a_stopped_session_no_longer_reports_an_extension(session):
+    """stop() nulls _conn, so the handler cannot clear this signal itself.
+
+    Left to the handler, wait_for_extension() keeps answering True for a
+    session that is already shut down, and the caller's next loop iteration
+    walks into a dead socket.
+    """
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+    session.stop()
+    assert session.wait_for_extension(0.1) is False
+    conn.close()
+
+
+def test_stopping_does_not_log_the_misleading_reconnect_warning(session):
+    """"no extension connection within Ns" is a diagnosis, not a shutdown.
+
+    Emitting it when the operator stopped the run sends whoever reads the
+    log hunting a WebSocket fault that never happened.
+    """
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+    with Captured(bridge.log) as records:
+        stopper = threading.Timer(0.5, session.stop)
+        stopper.start()
+        assert session.submit("sc-domain:example.com", "https://example.com/a",
+                              "0", timeout=600, reconnect_grace=5) == "error"
+        stopper.join(SETTLE)
+    assert "no extension connection" not in records.text
+    conn.close()
+
+
 # ------------------------------------------------------------------- pairing
 
 def test_pairing_is_refused_when_no_target_was_supplied(session):
@@ -342,6 +394,40 @@ def test_a_denied_pair_request_never_leaks_the_token(monkeypatch):
         thread.join(SETTLE)
 
 
+def test_a_denial_reason_carrying_a_home_path_never_reaches_the_log(monkeypatch):
+    """The commonest denial quotes extension_dir() — an absolute path.
+
+    On Windows that path contains the user's account name, and this
+    logger writes to a file that outlives the session and gets pasted
+    into bug reports. The reason still goes to the extension, which shows
+    it to the one person who already knows the path.
+    """
+    reason = ("that is not the extension in this profile — load the one in "
+              "C:\\Users\\a-real-person\\AppData\\Roaming\\gsc-mcp\\extension")
+    monkeypatch.setattr(bridge.pairing, "verify_pair_request",
+                        lambda *a, **k: (False, reason))
+    sess = bridge.BridgeSession(port=0, token=TOKEN,
+                                target=SimpleNamespace(installed=object(),
+                                                       profile=object()))
+    thread = threading.Thread(target=sess.start, daemon=True)
+    thread.start()
+    assert sess.ready.wait(SETTLE)
+    try:
+        with Captured(bridge.log) as records:
+            conn = ws_connect(f"ws://127.0.0.1:{sess.port}")
+            conn.send(json.dumps({"type": "pair_request",
+                                  "extension_id": "a" * 32}))
+            reply = conn.recv()
+        assert records, "a denied pairing should have been logged at all"
+        assert "a-real-person" not in records.text
+        assert "AppData" not in records.text
+        # The extension is still told why, or the user cannot act on it.
+        assert "a-real-person" in reply
+    finally:
+        sess.stop()
+        thread.join(SETTLE)
+
+
 # ------------------------------------------------------ ensure_browser_open
 
 def _target(exe_path: str = "C:/x/chrome.exe"):
@@ -389,9 +475,28 @@ def test_ensure_browser_open_survives_a_launch_failure(monkeypatch):
     assert "a-real-person" not in records.text
 
 
-def test_browser_running_is_false_when_the_probe_is_unavailable(monkeypatch):
-    """No psutil, or a process table that refuses to be read: never fatal."""
-    assert bridge._browser_running(_target()) in (True, False)
+def test_browser_running_is_false_when_psutil_is_absent(monkeypatch):
+    """psutil is optional and deliberately undeclared: absence is not an error."""
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    assert bridge._browser_running(_target()) is False
+
+
+def test_browser_running_is_false_when_the_process_table_refuses(monkeypatch):
+    """A probe, never fatal — and the failure must not name a path."""
+    fake = SimpleNamespace(process_iter=_explode_with_path)
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+    with Captured(bridge.log) as records:
+        assert bridge._browser_running(_target()) is False
+    assert "a-real-person" not in records.text
+
+
+def test_browser_running_matches_on_the_executable_name(monkeypatch):
+    """Case-insensitively, and on the BASENAME — not the full path."""
+    running = SimpleNamespace(name=lambda: "CHROME.EXE")
+    fake = SimpleNamespace(process_iter=lambda attrs=None: [running])
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+    assert bridge._browser_running(_target()) is True
+    assert bridge._browser_running(_target("D:/other/firefox.exe")) is False
 
 
 # ---------------------------------------------------------- bridge_session

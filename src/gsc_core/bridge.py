@@ -170,11 +170,16 @@ class BridgeSession:
         with self._conn_lock:
             conn, self._conn = self._conn, None
             self._conn_cv.notify_all()
+        # Cleared here, not left to the handler: stop() has just nulled
+        # _conn, so the handler's `if self._conn is conn` guard is False and
+        # it will not clear this itself. Without it wait_for_extension()
+        # keeps answering True for a session that is already shut down.
+        self._connected.clear()
         self._resolve_all("error")
         # The server may not have finished binding yet, in which case
-        # self._server is still None and shutdown() would be skipped —
-        # leaving non-daemon handler threads alive. A short wait closes
-        # that window; it is bounded so stop() can never hang a caller.
+        # self._server is still None and shutdown() would be skipped. A
+        # short wait closes that window; it is bounded so stop() can never
+        # hang a caller.
         self.ready.wait(5)
         for closer in (lambda: conn and conn.close(),
                        lambda: self._server and self._server.shutdown()):
@@ -255,8 +260,22 @@ class BridgeSession:
         resends = 0
         try:
             while True:
-                conn, gen = self._wait_for_conn(reconnect_grace)
+                # `timeout` is the ceiling on the WHOLE call, so the grace
+                # period is clipped to whatever is left of it. Waiting the
+                # full grace on every attempt overran `timeout` by up to
+                # reconnect_grace x (max_resends + 1) — a 60s budget could
+                # sit here for eight minutes.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.warning("bridge: no result within %ss", timeout)
+                    return "timeout"
+                conn, gen = self._wait_for_conn(min(reconnect_grace, remaining))
                 if conn is None:
+                    if self._stopped:
+                        return "error"
+                    if time.monotonic() >= deadline:
+                        log.warning("bridge: no result within %ss", timeout)
+                        return "timeout"
                     log.warning("bridge: no extension connection within %ss "
                                 "— giving up on this URL", reconnect_grace)
                     return "error"
@@ -325,11 +344,18 @@ class BridgeSession:
                 self.target.installed, self.target.profile, claimed, origin)
 
         if allowed:
-            log.info("bridge: paired extension %s (%s)", claimed, reason)
+            log.info("bridge: paired extension %s", claimed)
             reply = {"type": "pair_ok", "token": self.token}
         else:
-            log.warning("bridge: pair_request from %r DENIED — %s",
-                        claimed, reason)
+            # `reason` is NOT logged. verify_pair_request's commonest denial
+            # quotes extension_dir(), an absolute path under the user's home
+            # — i.e. their account name — and this logger writes to a file.
+            # The reason still travels on the wire, where the extension shows
+            # it to the user who already owns that path; a log file is the
+            # copy that outlives the session and gets pasted into bug
+            # reports, so it gets the fixed string.
+            log.warning("bridge: pair_request from %r DENIED "
+                        "(reason sent to the extension, not logged)", claimed)
             reply = {"type": "pair_denied", "reason": reason}
         for step in (lambda: conn.send(json.dumps(reply)), conn.close):
             try:
@@ -378,7 +404,19 @@ class BridgeSession:
 
         try:
             while not self._stopped:
-                message = parse_message(conn.recv())
+                # BOUNDED, deliberately. An untimed recv() parks this thread
+                # until the socket closes, and websockets' handler threads
+                # are not daemons — so on any release before 17.0, where
+                # Server.shutdown() only closes the LISTENING socket and does
+                # not touch established connections, a superseded connection
+                # would keep the interpreter alive after stop(). Polling
+                # _stopped once a second makes teardown independent of which
+                # websockets release is installed.
+                try:
+                    raw = conn.recv(timeout=1.0)
+                except TimeoutError:
+                    continue
+                message = parse_message(raw)
                 if message is None:
                     continue
                 self._dispatch(conn, message)
