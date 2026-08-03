@@ -265,6 +265,11 @@ def test_reserve_is_atomic_against_a_concurrent_writer(conn, tmp_path):
     for thread in threads:
         thread.join(timeout=60)
 
+    # Every racer reported before the assertions below mean anything: a
+    # thread still alive at the join timeout leaves `results` short, and a
+    # single winner among four arrivals satisfies "exactly one" just as
+    # happily as one among six.
+    assert len(results) + len(errors) == 6
     assert errors == []
     assert sum(1 for r in results if r is not None) == 1
     # And the store agrees: the losers wrote nothing.
