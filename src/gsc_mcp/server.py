@@ -41,10 +41,22 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliber
 # noqa: E402 on the import below — import order is deliberate, see above.
 from . import (deps, jobs, onboarding, tools_audit, tools_browsers,  # noqa: E402
                tools_submit)
+from . import __version__  # noqa: E402 — import order is deliberate, see above
 
 log = runlog.get(__name__)
 
 mcp = FastMCP("gsc-mcp")
+
+# FastMCP takes no version argument, and the lowlevel Server it wraps falls
+# back to importlib.metadata.version("mcp") when its own version is unset --
+# so an unstamped server introduces itself with the SDK's version number.
+# That is worse than a blank field: it is a plausible number that is not
+# ours, and it is the number a bug report will quote. Assigning the
+# attribute the SDK already reads is the only route FastMCP leaves open;
+# test_server_identity.py pins the result at the handshake, so a future SDK
+# that renames the attribute reddens there rather than shipping the wrong
+# version silently.
+mcp._mcp_server.version = __version__
 
 _FIX_OAUTH_CLIENT = (
     "No OAuth client is configured. Set GSC_MCP_CLIENT_ID and "
