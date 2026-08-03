@@ -59,6 +59,12 @@ def test_find_unindexed_probes_the_token_before_fetching_a_sitemap(
     # api.check_status never raises AuthRequired -- a 401 becomes an
     # "error" row. Without an eager probe a signed-out caller gets a
     # normal-shaped result full of fabricated rows.
+    #
+    # api.list_properties is stubbed to SUCCEED here on purpose. Left real
+    # it would call access_token() itself and raise, so the test would go
+    # green whether or not the eager probe exists -- it would pin the
+    # ladder, not the ordering. With it stubbed, the only thing standing
+    # between a signed-out caller and the sitemap fetch is the probe.
     fetched: list[str] = []
 
     class _Provider:
@@ -67,6 +73,7 @@ def test_find_unindexed_probes_the_token_before_fetching_a_sitemap(
 
     monkeypatch.setattr(deps, "oauth_client", lambda: ("id", "secret"))
     monkeypatch.setattr(deps, "provider", lambda: _Provider())
+    monkeypatch.setattr(api, "list_properties", lambda provider: [PROPERTY])
     monkeypatch.setattr(
         tools_audit.discovery, "find_unindexed",
         lambda *a, **k: fetched.append("fetched") or {})
