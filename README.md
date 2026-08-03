@@ -356,6 +356,8 @@ if that does not work either. `gsc_doctor` still reports registration only.
 | `gsc_core/browsers.py` | Which Chromium browsers are installed, and where they keep their state |
 | `gsc_core/profiles.py` | Which profiles each browser has, and which Google account is signed into each |
 | `gsc_core/pairing.py` | Where the bridge extension is extracted to, and what ID Chromium gave it |
+| `gsc_core/bridge.py` | The localhost WebSocket server the browser extension connects back to |
+| `gsc_core/submit.py` | The per-URL submission loop: routing, atomic quota reservation, outcomes |
 
 ## Privacy
 
@@ -368,6 +370,8 @@ That read is entirely local. The address is used in memory to show you which pro
 - it is never written to the log, at any level — failures reading these files are logged by exception type name only, precisely so that neither an address nor a path containing your Windows username can end up in a log file you might attach to a bug report.
 
 Nothing in the tool opens these files for writing. No address is ever returned by a tool either, in either direction — not one found in a profile, and not your own authorised address. A tool result is rendered into a transcript and retained by whatever MCP client is driving the server, none of which this project controls, so a profile is identified by browser and profile directory and nothing else.
+
+One path is the exception, and it is deliberate. When `gsc_setup` finds the bridge extension is not loaded yet, its result carries the directory the extension was unpacked to — on Windows, `C:\Users\<your username>\AppData\Roaming\gsc-mcp\extension`. On most machines that path contains your operating-system account name. It is returned because "Load unpacked" in Chrome asks you to pick that exact folder, and a set-up instruction you cannot follow is not a privacy win. It is the only path any tool returns, it appears only in the one step that needs it, and it is never written to the log. If your account name is something you would rather not have in a transcript, run that step, then clear the transcript.
 
 ## Known gaps
 
