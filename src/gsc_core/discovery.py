@@ -122,9 +122,11 @@ def _candidates(conn: sqlite3.Connection, property: str, source: str,
                 from_sitemap: list[str]) -> list[str]:
     """The URL set this run considers, in a stable order.
 
-    Sitemap order first, then anything else the store already knows.
-    Stable because `limit` truncates this list: a caller who runs the same
-    query twice should get the same prefix.
+    Sitemap order first, then anything else the store already knows, each
+    URL once. This order is what the returned findings are reported in, so
+    a caller reads the sitemap's own priority first. It is NOT the order
+    inspection happens in: `limit` truncates the stale list, which
+    store.stale_urls (store.py:338) returns in its own order.
     """
     if source == "sitemap":
         return list(dict.fromkeys(from_sitemap))

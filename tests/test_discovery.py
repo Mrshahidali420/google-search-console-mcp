@@ -230,6 +230,36 @@ def test_both_unions_sitemap_and_store_with_sitemap_order_first(store_conn):
                         "https://example.com/stored"]
 
 
+def test_both_reports_sitemap_urls_before_store_only_urls(store_conn):
+    # What the union order actually governs is the order of the FINDINGS:
+    # the inspection order follows store.stale_urls, which sorts by url. So
+    # the URLs here are chosen so alphabetical order is the REVERSE of
+    # sitemap-first order -- with names that happen to sort the right way,
+    # this assertion would pass under either union order and pin nothing.
+    with store.tx(store_conn):
+        store.upsert_url(store_conn, "https://example.com/z-sitemap", PROPERTY,
+                         None, None, None)
+        store.upsert_url(store_conn, "https://example.com/a-stored", PROPERTY,
+                         None, None, None)
+    fetch = _fetch_returning(["https://example.com/z-sitemap"])
+    check, _ = _check_returning([
+        {"url": "https://example.com/a-stored", "status": "noindex",
+         "detail": ""},
+        {"url": "https://example.com/z-sitemap", "status": "noindex",
+         "detail": ""},
+    ])
+
+    out = discovery.find_unindexed(
+        store_conn, PROPERTY, provider=object(), properties=PROPERTIES,
+        source="both", _fetch=fetch, _check=check,
+        _sitemap_urls=["https://example.com/sitemap.xml"])
+
+    assert [row["url"] for row in out["unindexed"]] == [
+        "https://example.com/z-sitemap", "https://example.com/a-stored"]
+    # z-sitemap is in both the sitemap and the store; the union counts it once.
+    assert out["candidates_total"] == 2
+
+
 def test_an_unknown_source_is_refused():
     with pytest.raises(ValueError):
         discovery.find_unindexed(
