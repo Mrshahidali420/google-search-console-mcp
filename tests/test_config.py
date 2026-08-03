@@ -110,6 +110,30 @@ def test_validate_rejects_boolean_slots():
     assert "property_slots must be a positive integer" in config.validate(broken)
 
 
+def test_a_non_positive_inspection_ttl_is_rejected():
+    problems = config.validate({**config.DEFAULTS, "inspection_ttl_days": 0})
+    assert any("inspection_ttl_days" in p for p in problems)
+
+
+def test_a_non_integer_inspection_ttl_is_rejected():
+    problems = config.validate(
+        {**config.DEFAULTS, "inspection_ttl_days": "weekly"})
+    assert any("inspection_ttl_days" in p for p in problems)
+
+
+def test_a_boolean_inspection_ttl_is_rejected():
+    """bool subclasses int: `true` would otherwise validate as a one-day
+    TTL, silently re-inspecting — and re-charging for — everything daily."""
+    problems = config.validate({**config.DEFAULTS, "inspection_ttl_days": True})
+    assert any("inspection_ttl_days" in p for p in problems)
+
+
+def test_a_sensible_inspection_ttl_is_accepted():
+    assert not [p for p in config.validate(
+        {**config.DEFAULTS, "inspection_ttl_days": 7})
+        if "inspection_ttl_days" in p]
+
+
 def test_invalid_slots_does_not_produce_a_fabricated_reserve_message(tmp_path):
     broken = {**config.DEFAULTS, "property_slots": "foo", "daily_reserve": 99}
     problems = config.validate(broken)

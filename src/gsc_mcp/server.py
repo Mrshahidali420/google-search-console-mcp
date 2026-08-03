@@ -39,7 +39,8 @@ runlog.init()
 from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliberate
 
 # noqa: E402 on the import below — import order is deliberate, see above.
-from . import deps, jobs, onboarding, tools_browsers, tools_submit  # noqa: E402
+from . import (deps, jobs, onboarding, tools_audit, tools_browsers,  # noqa: E402
+               tools_submit)
 
 log = runlog.get(__name__)
 
@@ -1015,6 +1016,64 @@ def gsc_stop_job(job_id: str) -> dict:
     must settle with the real outcome.
     """
     return tools_submit.stop_job(job_id)
+
+
+@mcp.tool()
+def gsc_find_unindexed(site: str, source: str = "both",
+                       limit: int | None = None) -> dict:
+    """Which of a property's URLs are not in Google's index, and why.
+
+    `source` chooses where candidate URLs come from: "sitemap" fetches and
+    parses the property's registered sitemaps fresh, "store" uses only
+    URLs already seen, "both" (the default) unions them.
+
+    `limit` caps how many URLs are INSPECTED, not how many are returned —
+    inspection spends a daily budget, so a cap that only trimmed the
+    output would pay full price for an answer it threw away. Which URLs a
+    capped run reaches follows the store's url ordering (alphabetical),
+    not staleness: a capped run is a sample, not a worst-first sweep. The
+    result reports `candidates_total`, `inspected` and `limited` so you
+    can tell a truncated answer from a complete one.
+
+    Only URLs whose last inspection is older than `inspection_ttl_days`
+    are re-inspected; fresher ones are reported from their stored status
+    and marked `"fresh": true`. A second call the same day therefore costs
+    no budget and still answers in full.
+
+    Each unindexed row carries `reason` (one of ten codes), `action`,
+    `submitting_helps` and `needs_site_access`. Act on
+    `submitting_helps` before calling gsc_request_indexing: submitting a
+    404, a redirect, a noindex, or a page Google crawled and declined
+    wastes an unrecoverable quota slot. URLs whose state could not be
+    established — a failed inspection, or a result the burst re-verify
+    pass could not confirm — are in `undetermined`, never in `unindexed`.
+    A refusal is `{"ok": False, "error", "fix"}`.
+    """
+    return tools_audit.find_unindexed(site, source, limit)
+
+
+@mcp.tool()
+def gsc_audit(site: str) -> dict:
+    """The current indexation position for one property, as structured data.
+
+    Reads the local store only: no network call, no quota spent. It
+    reports what the last inspection found, which is why the payload
+    carries `as_at` — run gsc_find_unindexed first if the picture is
+    stale, and check the `stale` count to see how much of it is.
+
+    Point-in-time by design. There are no movement numbers — nothing
+    "moved to indexed", nothing "de-indexed" — because the store keeps no
+    status history, and a zero in a field like that would read as a
+    measurement that found no change rather than as an absence of data.
+    `basis` says so in the payload.
+
+    Returns counts (`total_known`, `checked`, `indexed`, `unindexed`,
+    `undetermined`, `never_checked`, `stale`), `indexed_pct` (null when
+    nothing has been checked), a `by_reason` histogram over the ten reason
+    codes, and the `submittable` / `needs_site_access` / `no_action_needed`
+    split. Rendering it — prose, table, chart — is yours to do.
+    """
+    return tools_audit.audit(site)
 
 
 def _reconcile_at_startup() -> None:

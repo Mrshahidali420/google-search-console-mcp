@@ -24,9 +24,9 @@ Twelve tools are registered on the server and covered by a wire-level smoke test
 | 2. MCP surface | The tools below, exposed over MCP | **Done** |
 | 3A. Onboarding | Guided sign-in, browser/profile detection, the bridge extension | **Done** |
 | 3B. Submission | Browser-driven Request Indexing, job control | **Code complete, unverified** |
-| 4. Reporting | Indexation audits, discovery loops, bulk runs | Planned |
+| 4. Reporting | Indexation discovery and audits | **Code complete, unverified** |
 
-Watch or star the repo if you want to know when Milestone 4 ships.
+Watch or star the repo if you want to know when the milestones above are verified against live properties.
 
 ## Tools
 
@@ -46,15 +46,8 @@ Shipped and registered on the MCP server today:
 | `gsc_start_indexing_job` | Queue a background submission run over any number of URLs; returns at once |
 | `gsc_job_status` | Progress and state for one submission job, or the most recent |
 | `gsc_stop_job` | Ask a running submission job to stop after the URL in flight |
-
-### Planned
-
-Not yet built — tracked for future milestones:
-
-| Tool | What it does | Milestone |
-|---|---|---|
-| `gsc_find_unindexed` | Find URLs Google has not indexed | 4 |
-| `gsc_audit` | Bulk indexation audit across a property | 4 |
+| `gsc_find_unindexed` | Find which of a property's URLs are not indexed, and why — see [Finding what is not indexed](#finding-what-is-not-indexed) |
+| `gsc_audit` | The current indexation position for a property, read from the local store; spends no quota |
 
 ## Why quota accounting is the hard part
 
@@ -67,6 +60,33 @@ Most tools in this space get Google's limits wrong, then get throttled and blame
 | URL Inspection | 600 per minute per property | Rate limit |
 
 Properties are independent, so eight properties means eight independent budgets. This server tracks slots individually rather than counting a daily total, so it knows the exact minute the next slot opens — and it deliberately over-counts rather than under-counts when a race is possible, because a short wait is cheaper than a hard `Quota Exceeded`.
+
+## Finding what is not indexed
+
+`gsc_find_unindexed` collects candidate URLs — from the property's registered sitemaps, from URLs already in the local store, or both — inspects the ones whose last inspection has gone stale, and reports each unindexed URL with a reason. `limit` caps how many URLs are **inspected**, not how many come back: an inspection spends budget, and a cap that only trimmed the output would pay full price for an answer it discarded. Which URLs a capped run reaches follows the store's own URL ordering (alphabetical), not staleness, so a capped run is a sample rather than a worst-first sweep.
+
+`gsc_audit` answers the same question from the store alone — no HTTP inspection, no budget spent. It is point-in-time: it reports what the last inspection found, and carries `as_at` and a `stale` count so you can tell how old that picture is. There are deliberately no movement numbers.
+
+### Reason codes
+
+There are **ten** of them. `submitting_helps` on each row is the one to act on before calling `gsc_request_indexing`:
+
+| Reason | `submitting_helps` | What it means |
+|---|---|---|
+| `discovered-not-indexed` | yes | Google knows the URL but has not crawled it |
+| `unknown-to-google` | yes | Google has never seen the URL |
+| `crawled-not-indexed` | no | Google crawled it and chose not to index it |
+| `404` | no | The URL returns not-found |
+| `redirect` | no | The URL redirects elsewhere |
+| `noindex` | no | A noindex directive on the page or its response |
+| `soft-404` | no | Returns 200 but reads as an error or empty page |
+| `robots-blocked` | no | robots.txt blocks the URL |
+| `duplicate` | no | Google chose a different canonical |
+| `alt-canonical` | no | An alternate page pointing at its own canonical — no action |
+
+If you have read the eight-code list in the design notes and counted ten here, the extra two are `discovered-not-indexed` and `unknown-to-google`, kept separate from `crawled-not-indexed` on purpose. They are the only states where submitting a URL changes anything: Google has not judged the page yet, it just has not fetched it. Folding them into `crawled-not-indexed` — a page Google *has* judged, and declined — would invert the advice and spend unrecoverable slots on URLs that cannot benefit.
+
+A URL whose state could not be established — a failed inspection, or a result a re-check could not confirm — is reported as `undetermined`, never as unindexed. Absence of evidence is not a finding.
 
 ## Submitting URLs
 

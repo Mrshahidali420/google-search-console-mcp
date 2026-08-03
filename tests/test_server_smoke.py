@@ -30,6 +30,8 @@ EXPECTED = {
     # Plan 3, browser-driven submission — registered in its final task.
     "gsc_request_indexing", "gsc_start_indexing_job",
     "gsc_job_status", "gsc_stop_job",
+    # Plan 4, discovery and audit — registered in its final task.
+    "gsc_find_unindexed", "gsc_audit",
 }
 
 

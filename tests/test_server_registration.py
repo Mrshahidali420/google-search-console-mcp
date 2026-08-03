@@ -126,6 +126,98 @@ def test_no_wrapper_swallows_the_bodys_refusal(
 
 
 # ---------------------------------------------------------------------------
+# Discovery and audit
+# ---------------------------------------------------------------------------
+
+DISCOVERY_TOOLS = ("gsc_find_unindexed", "gsc_audit")
+
+
+def test_the_discovery_tools_are_registered() -> None:
+    assert set(DISCOVERY_TOOLS) <= set(registered())
+
+
+@pytest.mark.parametrize("name", DISCOVERY_TOOLS)
+def test_every_discovery_tool_documents_itself(name: str) -> None:
+    """Same reason as the submission tools: FastMCP ships the docstring as
+    the description, and it is the only thing a calling model reads before
+    deciding whether spending inspection budget is worth it."""
+    tool = {t.name: t for t in server.mcp._tool_manager.list_tools()}[name]
+    assert tool.description and len(tool.description) > 100
+
+
+#: (tool name, tools_audit function name, args, what the body should see).
+_DISCOVERY_DELEGATIONS = [
+    ("gsc_find_unindexed", "find_unindexed",
+     ("https://example.com/", "sitemap", 25),
+     ("https://example.com/", "sitemap", 25)),
+    ("gsc_audit", "audit", ("https://example.com/",), ("https://example.com/",)),
+]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "body_name", "args", "want_args"),
+    _DISCOVERY_DELEGATIONS,
+    ids=[row[0] for row in _DISCOVERY_DELEGATIONS],
+)
+def test_the_discovery_wrapper_delegates_and_returns_the_body_result(
+    tool_name: str, body_name: str, args: tuple, want_args: tuple,
+    monkeypatch: pytest.MonkeyPatch, home,
+) -> None:
+    """Arguments in, result out, untouched.
+
+    Identity on the sentinel rather than equality: a wrapper that rebuilt
+    the dict — renaming a key, adding a default, dropping a field — would
+    pass an equality check while silently changing the tool's contract,
+    and it would be putting result-shaping logic in the one file this
+    milestone is not allowed to grow.
+
+    Positional `want_args` is the point of the `limit` row: a wrapper that
+    accepted `limit` and never forwarded it would inspect every stale URL
+    in the store, spending unrecoverable quota slots the caller explicitly
+    capped.
+    """
+    sentinel: dict = {"ok": True, "sentinel": object()}
+    seen: list[tuple] = []
+
+    def spy(*a: Any, **k: Any) -> dict:
+        seen.append((a, k))
+        return sentinel
+
+    monkeypatch.setattr(server.tools_audit, body_name, spy)
+    result = registered()[tool_name](*args)
+
+    assert seen == [(want_args, {})]
+    assert result is sentinel
+
+
+def test_find_unindexed_keeps_its_documented_defaults(
+    monkeypatch: pytest.MonkeyPatch, home,
+) -> None:
+    """`source="both"` and no limit are the documented one-argument call.
+    Required parameters here would make it a schema error the model never
+    sees the reason for."""
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        server.tools_audit, "find_unindexed",
+        lambda site, source, limit: seen.append((site, source, limit))
+        or {"ok": True})
+
+    assert registered()["gsc_find_unindexed"]("https://example.com/")["ok"]
+    assert seen == [("https://example.com/", "both", None)]
+
+
+def test_no_discovery_wrapper_swallows_the_bodys_refusal(
+    monkeypatch: pytest.MonkeyPatch, home,
+) -> None:
+    """The four-arm refusal ladder lives in tools_audit. A try/except in a
+    wrapper would rewrite its envelope and lose the `fix` string."""
+    refusal = {"ok": False, "error": "bad_source", "fix": "use both"}
+    monkeypatch.setattr(server.tools_audit, "find_unindexed",
+                        lambda *a, **k: refusal)
+    assert registered()["gsc_find_unindexed"]("https://example.com/") is refusal
+
+
+# ---------------------------------------------------------------------------
 # The startup sweep
 # ---------------------------------------------------------------------------
 
