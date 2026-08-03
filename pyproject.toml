@@ -56,6 +56,11 @@ dependencies = [
     # survives that one, but a public package should not silently adopt a
     # major it has never been run against.
     "websockets>=12,<18",
+    # Sitemaps are remote, third-party XML. defusedxml is the entity-expansion
+    # and external-entity defence; there is deliberately no stdlib fallback,
+    # because silently downgrading to an unsafe parser is worse than a
+    # missing dependency. Pure-Python and stable; no upper bound needed.
+    "defusedxml>=0.7",
 ]
 
 [project.scripts]

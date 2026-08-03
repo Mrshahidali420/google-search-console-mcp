@@ -108,6 +108,8 @@ _TOOL_ARGS = {
     "gsc_start_indexing_job": ((["https://example.com/a"],), {}),
     "gsc_job_status": ((), {}),
     "gsc_stop_job": (("no-such-job",), {}),
+    "gsc_find_unindexed": (("sc-domain:example.com",), {}),
+    "gsc_audit": (("sc-domain:example.com",), {}),
 }
 
 _SWEPT = sorted(registered_tools())
