@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from gsc_core import audit, store
+from gsc_core import audit, reasons, store
 
 PROPERTY = "https://example.com/"
 NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
 
 
-def _seed(conn, rows: list[tuple[str, str | None, str | None, int | None]]):
+def _seed(conn: sqlite3.Connection,
+          rows: list[tuple[str, str | None, str | None, int | None]]) -> None:
     with store.tx(conn):
         for url, status, reason, days_ago in rows:
             checked = None if days_ago is None else store.utc_iso(
@@ -46,15 +48,21 @@ def test_counts_split_across_indexed_unindexed_and_undetermined(store_conn):
 
 
 def test_the_reason_histogram_uses_the_ten_code_vocabulary(store_conn):
+    # One URL per classifier status that maps to a distinct reason code --
+    # not just the handful a smaller fixture would exercise. A bucket that
+    # silently stops being counted (e.g. "duplicate" dropped from
+    # by_reason) must fail this test; a fixture covering only 2-4 of the
+    # ten codes cannot detect that regression.
     _seed(store_conn, [
-        ("https://example.com/a", "noindex", "noindex", 1),
-        ("https://example.com/b", "discovered_not_indexed", "", 1),
-        ("https://example.com/c", "discovered_not_indexed", "", 1),
+        (f"https://example.com/{status}", status, "", 1)
+        for status in reasons.REASON_BY_STATUS
     ])
 
     out = audit.audit(store_conn, PROPERTY, now=NOW)
 
-    assert out["by_reason"] == {"noindex": 1, "discovered-not-indexed": 2}
+    expected = {code: 1 for code in reasons.REASON_BY_STATUS.values()}
+    assert out["by_reason"] == expected
+    assert set(out["by_reason"]) == reasons.REASONS
 
 
 def test_submittable_counts_only_where_submitting_helps(store_conn):
