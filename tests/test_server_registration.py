@@ -216,3 +216,41 @@ def test_main_reconciles_before_it_starts_serving(
     server.main()
 
     assert order == ["reconcile", "run"]
+
+
+def test_main_shuts_a_running_job_down_before_it_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client going away must not leave a worker mid-URL. Serving ends,
+    then the workers are stopped and waited out — bounded."""
+    order: list[str] = []
+    monkeypatch.setattr(server, "_reconcile_at_startup", lambda: None)
+    monkeypatch.setattr(server.mcp, "run", lambda: order.append("run"))
+    monkeypatch.setattr(server.jobs, "shutdown",
+                        lambda timeout: order.append(("shutdown", timeout)))
+
+    server.main()
+
+    assert order == ["run", ("shutdown", server.jobs.SHUTDOWN_TIMEOUT)]
+
+
+def test_main_shuts_jobs_down_even_when_serving_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stdio transport ends by exception as often as by return — Ctrl-C
+    and a closed pipe both arrive that way. A shutdown that only ran on the
+    clean path would miss the case it was written for."""
+    called: list[float] = []
+    monkeypatch.setattr(server, "_reconcile_at_startup", lambda: None)
+
+    def die() -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(server.mcp, "run", die)
+    monkeypatch.setattr(server.jobs, "shutdown",
+                        lambda timeout: called.append(timeout))
+
+    with pytest.raises(KeyboardInterrupt):
+        server.main()
+
+    assert called == [server.jobs.SHUTDOWN_TIMEOUT]

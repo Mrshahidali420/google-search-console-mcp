@@ -467,7 +467,9 @@ def test_pairing_is_refused_when_no_target_was_supplied(session):
 
 def test_a_verified_pair_request_hands_the_token_over(monkeypatch):
     monkeypatch.setattr(bridge.pairing, "verify_pair_request",
-                        lambda *a, **k: (True, "installed in this profile"))
+                        lambda *a, **k: bridge.pairing.Verdict(
+                            True, "installed in this profile",
+                            bridge.pairing.PairCode.OK))
     sess = bridge.BridgeSession(port=0, token=TOKEN,
                                 target=SimpleNamespace(installed=object(),
                                                        profile=object()))
@@ -487,7 +489,9 @@ def test_a_verified_pair_request_hands_the_token_over(monkeypatch):
 
 def test_a_denied_pair_request_never_leaks_the_token(monkeypatch):
     monkeypatch.setattr(bridge.pairing, "verify_pair_request",
-                        lambda *a, **k: (False, "not that extension"))
+                        lambda *a, **k: bridge.pairing.Verdict(
+                            False, "not that extension",
+                            bridge.pairing.PairCode.ID_MISMATCH))
     sess = bridge.BridgeSession(port=0, token=TOKEN,
                                 target=SimpleNamespace(installed=object(),
                                                        profile=object()))
@@ -520,7 +524,9 @@ def test_a_denial_reason_carrying_a_home_path_never_reaches_the_log(monkeypatch)
     reason = ("that is not the extension in this profile — load the one in "
               "C:\\Users\\a-real-person\\AppData\\Roaming\\gsc-mcp\\extension")
     monkeypatch.setattr(bridge.pairing, "verify_pair_request",
-                        lambda *a, **k: (False, reason))
+                        lambda *a, **k: bridge.pairing.Verdict(
+                            False, reason,
+                            bridge.pairing.PairCode.ID_MISMATCH))
     sess = bridge.BridgeSession(port=0, token=TOKEN,
                                 target=SimpleNamespace(installed=object(),
                                                        profile=object()))
@@ -536,6 +542,8 @@ def test_a_denial_reason_carrying_a_home_path_never_reaches_the_log(monkeypatch)
         assert records, "a denied pairing should have been logged at all"
         assert "a-real-person" not in records.text
         assert "AppData" not in records.text
+        # What the log gets INSTEAD: the rule that fired, as a code.
+        assert bridge.pairing.PairCode.ID_MISMATCH.value in records.text
         # The extension is still told why, or the user cannot act on it.
         assert "a-real-person" in reply
     finally:

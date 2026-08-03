@@ -424,26 +424,32 @@ class BridgeSession:
         claimed = str(message.get("extension_id") or "")
 
         if self.target is None:
-            allowed, reason = False, ("this bridge was started without a "
-                                      "browser target — run gsc_setup first")
+            verdict = pairing.Verdict(
+                False,
+                "this bridge was started without a browser target — "
+                "run gsc_setup first",
+                pairing.PairCode.NO_TARGET,
+            )
         else:
-            allowed, reason = pairing.verify_pair_request(
+            verdict = pairing.verify_pair_request(
                 self.target.installed, self.target.profile, claimed, origin)
 
-        if allowed:
+        if verdict.allowed:
             log.info("bridge: paired extension %s", claimed)
             reply = {"type": "pair_ok", "token": self.token}
         else:
-            # `reason` is NOT logged. verify_pair_request's commonest denial
-            # quotes extension_dir(), an absolute path under the user's home
-            # — i.e. their account name — and this logger writes to a file.
-            # The reason still travels on the wire, where the extension shows
-            # it to the user who already owns that path; a log file is the
-            # copy that outlives the session and gets pasted into bug
-            # reports, so it gets the fixed string.
-            log.warning("bridge: pair_request from %r DENIED "
-                        "(reason sent to the extension, not logged)", claimed)
-            reply = {"type": "pair_denied", "reason": reason}
+            # `verdict.reason` is NOT logged, only `verdict.code`.
+            # verify_pair_request's commonest denial quotes extension_dir(),
+            # an absolute path under the user's home — i.e. their account
+            # name — and this logger writes to a file. The reason still
+            # travels on the wire, where the extension shows it to the user
+            # who already owns that path; a log file is the copy that
+            # outlives the session and gets pasted into bug reports, so it
+            # gets the closed-vocabulary code, which cannot be built out of
+            # anything and so cannot carry anything.
+            log.warning("bridge: pair_request from %r DENIED (%s)",
+                        claimed, verdict.code.value)
+            reply = {"type": "pair_denied", "reason": verdict.reason}
         for step in (lambda: conn.send(json.dumps(reply)), conn.close):
             try:
                 step()
