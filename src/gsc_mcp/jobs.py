@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -38,6 +39,12 @@ log = runlog.get(__name__)
 
 #: Job states with a live worker behind them, or about to have one.
 ACTIVE_STATES = frozenset({"pending", "running"})
+
+#: How long shutdown() waits for a stopped worker to write its terminal
+#: state. Long enough for a send already in flight to come back off the
+#: bridge, short enough that closing the server stays a thing that happens
+#: rather than a thing the operator waits out.
+SHUTDOWN_TIMEOUT = 15.0
 
 # Three different ways to run out of road, one state. The operator's next
 # move is the same for all three — wait for the rolling window to move —
@@ -180,6 +187,58 @@ def join(job_id: str, timeout: float | None = None) -> bool:
         return True
     thread.join(timeout)
     return not thread.is_alive()
+
+
+def shutdown(timeout: float) -> bool:
+    """Stop every live worker and wait, briefly, for it to settle.
+
+    True if nothing is left running. False if a worker outlasted the
+    timeout — the honest answer, not a promise: the server is closing
+    because its client went away, and a worker inside a send cannot be
+    hurried. An unbounded wait is not the alternative it looks like, since
+    sends are paced 130-180 seconds apart and a long job would hold the
+    process open for hours.
+
+    What the wait buys is the terminal state being written by the run
+    itself. A worker killed mid-URL leaves one open submission row for
+    store.reconcile() to charge conservatively at the next startup — one
+    over-counted slot out of a property's ~11 a day. Stopping first costs
+    nothing at all: submit.run re-checks should_stop after the gap and
+    BEFORE reserve().
+
+    The claim goes back on both paths, including the timeout. A job claim
+    would in principle heal itself — _current_holder re-derives liveness
+    from the thread — but releasing it here is what keeps that healing from
+    being needed, and the release is conditional (_release_locked), so a
+    claim since taken by someone else is left alone. A synchronous claim is
+    NOT touched: it belongs to a thread this cannot join, and clearing it
+    would hand a job the browser tab that run is still driving.
+    """
+    with _lock:
+        live = [(job_id, thread) for job_id, thread in _threads.items()
+                if thread.is_alive()]
+        for job_id, _thread in live:
+            event = _stop_events.get(job_id)
+            if event is not None:
+                event.set()
+    if not live:
+        return True
+
+    # One deadline across all of them, not one timeout each: the caller
+    # asked for a bound on the shutdown, not on each worker in turn.
+    deadline = time.monotonic() + max(timeout, 0.0)
+    settled = True
+    for job_id, thread in live:
+        thread.join(max(deadline - time.monotonic(), 0.0))
+        if thread.is_alive():
+            settled = False
+            log.warning("job %s did not settle within the shutdown timeout; "
+                        "its open row will be reconciled at the next start",
+                        job_id)
+    with _lock:
+        for job_id, _thread in live:
+            _release_locked(job_id)
+    return settled
 
 
 def start(urls: list[str], cfg: dict) -> str:
