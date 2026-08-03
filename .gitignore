@@ -10,3 +10,6 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# Superpowers-created worktrees live here; they are checkouts, not content.
+.worktrees/

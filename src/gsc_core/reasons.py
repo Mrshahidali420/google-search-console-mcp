@@ -6,12 +6,17 @@ gsc_audit ask: given that state, is the page missing from the index, why,
 and would spending a quota slot on it help?
 
 TEN codes, not the eight the product spec lists. The spec's eight are all
-here; the additions are discovered-not-indexed and unknown-to-google, both
-of which are states where Request Indexing genuinely helps. Folding
-discovered-not-indexed into crawled-not-indexed -- the nearest spec code --
-would tell a caller to resubmit a page Google has already crawled and
-declined, which is the one piece of advice this tool must never give. A
-deviation from an eight-item list costs less than inverted advice.
+here; the additions are discovered-not-indexed and unknown-to-google. All
+three of those states -- plus crawled-not-indexed -- are ones where
+Request Indexing genuinely helps, but they need different work first, so
+they stay separate codes rather than collapsing into the nearest spec
+code. Discovered means Google has the URL and has not fetched it: a
+submission is the whole remedy. Crawled means it fetched the page and
+passed on it: a re-crawl can reverse that verdict, but a resubmission of
+byte-identical content usually re-crawls to the same one, so the advice is
+improve the page, THEN submit. Same answer to "does submitting help",
+different answer to "what do I do first" -- which is what a caller acts
+on. A deviation from an eight-item list costs less than collapsed advice.
 
 This module is pure data plus three total functions. No I/O, no logging,
 no clock.
@@ -55,10 +60,21 @@ REASON_BY_STATUS: dict[str, str] = {
 
 REASONS = frozenset(REASON_BY_STATUS.values())
 
-# The two states where Google has not yet judged the page: it knows the
-# URL but has not crawled it, or does not know it at all. These are the
-# only ones where a submission changes anything.
-SUBMITTING_HELPS = frozenset({"discovered-not-indexed", "unknown-to-google"})
+# The three states a submission can move. Two are pages Google has not
+# judged yet -- it knows the URL but has not fetched it, or does not know
+# it at all. The third is crawled-not-indexed: Google fetched it and
+# passed, but that verdict is not permanent, and a re-crawl after the page
+# improves can reverse it. Submitting is how you ask for that re-crawl.
+#
+# Membership here means "a quota slot can change the outcome", not "spend
+# a slot now". Slots are roughly eleven per property per rolling day and
+# unrecoverable, and crawled-not-indexed is usually the largest bucket on
+# a real site, so ACTION_BY_REASON carries the ordering: fix first, then
+# submit. A caller that submits this bucket unchanged will re-crawl to the
+# same verdict and have spent the day's budget doing it.
+SUBMITTING_HELPS = frozenset({
+    "discovered-not-indexed", "unknown-to-google", "crawled-not-indexed",
+})
 
 # Reasons that need a change to the site itself, not a tool action. Kept
 # separate from SUBMITTING_HELPS because "no point submitting" and "you
@@ -74,8 +90,10 @@ ACTION_BY_REASON: dict[str, str] = {
     "noindex": "remove the noindex directive from the page or its response "
                "header",
     "crawled-not-indexed": "Google crawled it and chose not to index it — "
-                           "resubmitting will not help; improve the page or "
-                           "its internal links",
+                           "improve the page or its internal links, then "
+                           "submit it; a fresh crawl can reverse the "
+                           "verdict, but resubmitting it unchanged will "
+                           "not",
     "discovered-not-indexed": "Google knows the URL but has not crawled it — "
                               "submit it for indexing",
     "unknown-to-google": "Google has never seen the URL — confirm it is in a "

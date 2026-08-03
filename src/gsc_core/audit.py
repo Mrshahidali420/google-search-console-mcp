@@ -83,9 +83,12 @@ def audit(conn: sqlite3.Connection, property: str, *, ttl_days: int = 7,
         elif code in reasons.NEEDS_SITE_ACCESS:
             needs_access += 1
         else:
-            # crawled-not-indexed and alt-canonical: neither a submission
-            # nor a site edit is the remedy. reasons.describe carries what
-            # each one actually calls for.
+            # alt-canonical is the only code in neither set: it is working
+            # as intended, so there is nothing to do. Named explicitly
+            # rather than folded into a bare `else` so that a reason code
+            # added without a bucket lands in none of the three -- visible
+            # as buckets that no longer sum to unindexed -- instead of
+            # being silently reported as needing no action.
             if code == "alt-canonical":
                 no_action += 1
 
