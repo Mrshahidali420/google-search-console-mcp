@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import io
 
 from gsc_core import sitemaps
 
@@ -30,6 +31,25 @@ class _Resp:
 
     def close(self) -> None:
         pass
+
+
+class _CountingBytesIO(io.BytesIO):
+    """A BytesIO that records how much of itself was actually read.
+
+    GzipFile pulls from its fileobj lazily, so a bounded read touches only
+    as much compressed input as it needs. gzip.decompress consumes the
+    whole buffer. Counting the reads is what tells those two apart -- the
+    reported failure reason cannot, since both end in too_large.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.bytes_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = super().read(size)
+        self.bytes_read += len(chunk)
+        return chunk
 
 
 class _FakeSession:
@@ -237,6 +257,25 @@ def test_a_gzip_bomb_is_capped_before_full_expansion():
 
     assert result.urls == []
     assert [f.reason for f in result.failures] == ["too_large"]
+
+
+def test_the_gzip_cap_stops_reading_the_compressed_source_early():
+    # A reported "too_large" is identical whether the decompression was
+    # bounded or whether the process fully expanded the payload first and
+    # noticed afterwards. Only the amount of *compressed* input actually
+    # consumed tells those two apart -- which requires a compressed source
+    # bigger than gzip's own internal read buffer (128KB); a smaller one
+    # gets read whole in a single underlying read() regardless of how the
+    # cap is enforced, and the two implementations would be indistinguishable.
+    payload = gzip.compress(b"a" * 100_000_000, compresslevel=1)
+    assert len(payload) > 2 * 131_072
+    counting = _CountingBytesIO(payload)
+
+    data, over = sitemaps._gunzip_capped_fileobj(counting, 6000)
+
+    assert data is None
+    assert over is True
+    assert counting.bytes_read < len(payload) // 2
 
 
 def test_a_metadata_endpoint_host_is_refused_without_fetching():

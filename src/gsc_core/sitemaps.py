@@ -261,18 +261,32 @@ def _fall_back_to_plain_text(payload: bytes) -> tuple[list[str], list[str], str 
 def _gunzip_capped(payload: bytes, max_bytes: int) -> tuple[bytes | None, bool]:
     """Decompress a gzip body, stopping one byte past the ceiling.
 
+    Thin wrapper around `_gunzip_capped_fileobj` that owns the `BytesIO`
+    wrapping of `payload`. Split out so tests can hand `_gunzip_capped_fileobj`
+    a fileobj that records how much of the compressed source was actually
+    read -- the one thing that distinguishes a bounded read from
+    `gzip.decompress` when both end in the same reported failure.
+    """
+    return _gunzip_capped_fileobj(io.BytesIO(payload), max_bytes)
+
+
+def _gunzip_capped_fileobj(fileobj: object, max_bytes: int) -> tuple[bytes | None, bool]:
+    """Decompress a gzip stream, stopping one byte past the ceiling.
+
     `gzip.decompress` on the raw payload materialises the full expansion
     before any check could reject it: a compression bomb sized just under
     `max_bytes` compressed can expand to orders of magnitude more once
     decompressed. Reading through `GzipFile` with a bounded `.read()` call
     caps the allocation instead, the same way `_read_capped` bounds the
-    network read.
+    network read -- and, because `GzipFile` pulls from `fileobj` lazily,
+    stops consuming the compressed source itself once the cap is hit
+    rather than reading it to the end first.
 
     Returns (decompressed bytes or None, exceeded ceiling). `None` with
     `False` means the stream itself was not valid gzip.
     """
     try:
-        with gzip.GzipFile(fileobj=io.BytesIO(payload)) as gz:
+        with gzip.GzipFile(fileobj=fileobj) as gz:
             data = gz.read(max_bytes + 1)
     except Exception as exc:  # noqa: BLE001 — type name only
         log.info("sitemap gunzip failed: %s", type(exc).__name__)
