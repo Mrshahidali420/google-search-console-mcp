@@ -1,5 +1,11 @@
 """The MCP server shell: tool registration — `gsc_list_sites`, `gsc_doctor`,
-`gsc_check_status`, `gsc_quota`.
+`gsc_check_status`, `gsc_quota`, `gsc_detect_browsers`, `gsc_setup`.
+
+The last two keep their bodies in their own modules (`tools_browsers`,
+`onboarding`) and appear here as a docstring and a one-line delegate: this
+file is already at its size ceiling, and a tool's docstring is its entire
+interface to a model, so the docstring is the part that belongs beside the
+registration.
 
 Import order is load-bearing. `runlog.init()` runs before `FastMCP` is
 constructed, and before anything else in this module can log a line —
@@ -32,7 +38,7 @@ runlog.init()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliberate
 
-from . import deps  # noqa: E402 — import order is deliberate
+from . import deps, onboarding, tools_browsers  # noqa: E402 — import order is deliberate
 
 log = runlog.get(__name__)
 
@@ -268,18 +274,26 @@ def _check_properties() -> dict:
 def gsc_doctor() -> dict:
     """Diagnose whether gsc-mcp is set up to talk to Search Console.
 
-    Runs five checks in order — oauth_client, token, config, store,
-    properties — and reports all of them even if one raises. A check that
-    raises is recorded as `ok: False` with the exception's TYPE NAME only
-    in `detail`; the message is never included, because it can carry a
-    bearer token, a credentialed URL, or a raw response body. Every
-    failing check carries a non-empty `fix` string with a concrete next
-    step; this tool diagnoses, it does not repair anything itself.
+    Runs seven checks in order — oauth_client, token, config, store,
+    properties, browser, extension — and reports all of them even if one
+    raises. A check that raises is recorded as `ok: False` with the
+    exception's TYPE NAME only in `detail`; the message is never included,
+    because it can carry a bearer token, a credentialed URL, a raw response
+    body, or a filesystem path holding your account name. Every failing
+    check carries a non-empty `fix` string with a concrete next step; this
+    tool diagnoses, it does not repair anything itself.
+
+    The last two are the local setup for browser-driven submission, and
+    they come last because they cost nothing and the first five establish
+    whether anything works at all. `browser` names the profile to use;
+    `extension` reports whether the bridge extension is REGISTERED in that
+    profile — a green check does not mean its background worker is
+    running, which needs a live connection and arrives with Milestone 3B.
+    "Could not be checked" is reported as such, never as "not installed".
 
     Costs at most one Search Console API call (`sites.list`, for the
-    `properties` check) — zero network calls if an earlier check already
-    shows the client or token is unusable and a caller stops before
-    reaching it, though this implementation always runs all five.
+    `properties` check); the browser and extension checks are local file
+    reads and make none.
 
     Returns `{"ok": bool, "checks": [{"name", "ok", "detail", "fix"}, ...]}`;
     `ok` is true only when every check passed.
@@ -290,6 +304,8 @@ def gsc_doctor() -> dict:
         _check_config(),
         _check_store(),
         _check_properties(),
+        onboarding.check_browser(),
+        onboarding.check_extension(),
     ]
     return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
@@ -845,6 +861,103 @@ def _submit_sitemaps(sitemaps: list[str] | None) -> dict | list[dict]:
             return _auth_required()
 
         return results
+
+
+@mcp.tool()
+def gsc_detect_browsers() -> dict:
+    """List the Chromium browser profiles on this machine and recommend one.
+
+    Local-only: reads the browsers' own state files, makes no network call,
+    spends no quota, and needs no token — safe to call before signing in.
+    Answers "which browser profile should I drive?", nothing else; it opens
+    no browser and changes no setting.
+
+    PRIVACY: no email address is returned, in either direction. Not the
+    account signed in to a profile, not the account that authorised this
+    server, and not a profile display name that is itself an address. No
+    filesystem path is returned either — a profile path carries the
+    operator's account name. What identifies a profile here is its browser
+    and its profile directory.
+
+    Returns `{"ok": True, "profiles": [...], "recommended": <one of them or
+    None>, "reasons": [...]}`. `profiles` is a FLAT list across every
+    browser, ranked-flag included, not grouped by browser — the question is
+    which single profile to use, so each entry carries its own brand
+    context (`browser`, `browser_key`, `extensions_url`) and stands alone.
+    Each profile is `{"browser", "browser_key", "extensions_url",
+    "profile", "display_name", "signed_in", "account_discoverable",
+    "matches_authorised_account", "has_extension", "recommended"}`.
+
+    `extensions_url` is where that browser's extensions page lives
+    (`chrome://extensions`, `brave://extensions`, ...). Use the value given;
+    do not build one from the browser key, since Chromium registers no
+    chromium:// scheme and uses chrome://extensions.
+
+    `has_extension` is TRI-STATE: true means the pairing extension is
+    installed in that profile, false means every preferences file was read
+    and it was not among them, and null means the check could not be
+    PERFORMED — an unreadable preferences file, or no unpacked extension
+    directory to match against. Read null as "not detected", never as "not
+    installed"; telling a user with a working install to reinstall it is
+    the one wrong answer this flag exists to avoid.
+
+    `signed_in` says a Google account was found in that profile's files.
+    `account_discoverable` is a fact about the BRAND: Brave, Vivaldi, Opera
+    and plain Chromium record no Google account at all, so `signed_in:
+    false` there means "not discoverable", NOT "nobody is signed in".
+    `matches_authorised_account` is true, false, or NULL — null means the
+    question could not be asked (nothing has authorised yet, or the brand
+    records nothing), and must not be read as "no". `reasons` explains the
+    recommendation in plain sentences.
+
+    A machine with no Chromium browser installed returns `ok: true` with an
+    empty `profiles` list, `recommended: null`, and a `note` saying what to
+    install; that is an ordinary state, not a failure. Only an unexpected
+    fault returns `{"ok": False, "error": "unexpected", "detail":
+    <exception type>, "fix": ...}`.
+    """
+    return tools_browsers.detect_browsers()
+
+
+@mcp.tool()
+def gsc_setup(open_browser: bool = True) -> dict:
+    """Set this server up, one step at a time. Call it, do what it says,
+    call it again — repeat until `ok` is true.
+
+    IDEMPOTENT and SAFE TO CALL REPEATEDLY. It spends no Search Console
+    indexing quota and makes at most one API call (verifying the stored
+    sign-in still works). Every call re-reports the whole state from
+    scratch, so there is no session to resume and no order to get wrong: if
+    you have lost track of where setup got to, just call it again.
+
+    There are four steps, checked in order: `oauth_client` (credentials to
+    sign in with), `consent` (the user approves Google's consent screen),
+    `browser` (a Chromium browser with a profile exists), `extension` (the
+    gsc-mcp bridge extension is loaded in the profile this server
+    recommends). The FIRST unsatisfied step is returned as `next` and the
+    call stops there — later steps are meaningless until it is done.
+
+    Returns `{"ok": bool, "done": [step], "pending": [step], "next":
+    {"step", "action", "url"?, "path"?} | None}`. `ok` is true, and `next`
+    is null, only when all four steps are satisfied. `next.action` is a
+    plain-English instruction to relay to the user. `next.url`, when
+    present, is the Google consent URL to open. `next.path`, when present,
+    is the folder to choose in the browser's "Load unpacked" dialog.
+
+    `open_browser` (default true) opens the consent URL in the user's
+    default browser when a NEW consent is started. A repeat call while one
+    is already pending returns the SAME url and opens nothing — the pending
+    consent screen is the only one whose redirect will be accepted, so
+    never assume a second call means a second link.
+
+    PRIVACY: no email address, no token field, no PKCE verifier and no
+    authorization code is ever returned. The only filesystem path returned
+    is `next.path`, which is this server's own extension directory.
+
+    Never raises. An unexpected fault comes back as `next.step:
+    "unexpected"` with an action to retry.
+    """
+    return onboarding.setup(open_browser)
 
 
 def main() -> None:

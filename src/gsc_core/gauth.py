@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -33,6 +34,13 @@ log = runlog.get(__name__)
 SCOPE = "https://www.googleapis.com/auth/webmasters"
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+
+# The one owner of this URL. api.py already imports from this module (it
+# takes a TokenProvider), so importing api here would be a circular import —
+# but api.py can and does import THIS constant (as api.SITES_URI = gauth.
+# SITES_ENDPOINT) rather than restating the literal, which would have let
+# the two drift.
+SITES_ENDPOINT = "https://www.googleapis.com/webmasters/v3/sites"
 
 _VERIFIER_BYTES = 64
 
@@ -198,8 +206,8 @@ def _decode_token_response(response) -> dict:
     if error in _REAUTH_ERRORS:
         raise AuthRequired(
             f"Google rejected the stored credentials ({error}). "
-            "Authorise again: run gsc_doctor for what is missing, then "
-            "re-run the consent flow."
+            "Authorise again: run gsc_setup() and follow the step it "
+            "returns."
         )
     detail = body.get("error_description", "")
     raise RuntimeError(
@@ -269,8 +277,8 @@ class TokenProvider:
         stored = load_token(self._path)
         if not stored or "refresh_token" not in stored:
             raise AuthRequired(
-                "No stored credentials. Run gsc_doctor to see what the setup "
-                "is missing, then complete the consent flow to sign in.")
+                "No stored credentials. Run gsc_setup() and follow the step "
+                "it returns to sign in.")
         return stored
 
     def access_token(self) -> str:
@@ -343,6 +351,56 @@ class ConsentFailed(RuntimeError):
     """The consent round trip did not produce a usable authorization code."""
 
 
+def verify_token(token: dict, *, session=None) -> int:
+    """Prove a fresh token actually reaches Search Console. Returns the
+    number of properties it can see.
+
+    Three distinct failures, three distinct messages, because the fixes
+    differ: no refresh token means re-consent and approve fully; a non-200
+    (or a 200 with a body that is not JSON) means the grant or the API is
+    wrong; zero properties almost always means the user signed in with the
+    wrong Google account, which is otherwise indistinguishable from success.
+
+    Never includes the access token in any message it raises — this
+    exception text reaches an MCP client. It also never leaves `token` or
+    `response` alive in a raising frame: both are the same live secret
+    material `_post_token` deletes before it can raise, for the same reason
+    — a --showlocals traceback or a locals-capturing log handler must not
+    be able to dump the access token, the refresh token, or `response`'s own
+    record of the Authorization header it sent.
+    """
+    if not token.get("refresh_token"):
+        del token
+        raise ConsentFailed(
+            "Google returned no refresh token; approve every requested "
+            "permission on the consent screen and try again")
+    http = session or requests
+    response = http.get(
+        SITES_ENDPOINT,
+        headers={"Authorization": f"Bearer {token['access_token']}"},
+        timeout=30)
+    if response.status_code != 200:
+        status = response.status_code
+        del token, response
+        raise ConsentFailed(
+            f"Search Console rejected the new token (HTTP {status})")
+    try:
+        body = response.json()
+    except ValueError:
+        del token, response
+        raise ConsentFailed(
+            "Search Console returned a response that was not valid JSON"
+        ) from None
+    count = len(body.get("siteEntry") or [])
+    if count == 0:
+        del token, response
+        raise ConsentFailed(
+            "the token works but sees no Search Console properties — you "
+            "probably signed in with a different Google account than the "
+            "one that owns your sites")
+    return count
+
+
 class _LoopbackServer(HTTPServer):
     """An ephemeral port never needs SO_REUSEADDR, and allowing it would let
     another local process race to bind the same 127.0.0.1:port for the
@@ -368,27 +426,81 @@ class LoopbackReceiver:
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True
         )
+        self._started = False
+        self._closed = False
+        # Guards _started/_closed together with the calls that act on them.
+        # Without it, start() setting _started True after _thread.start()
+        # races a concurrent close(): close() can read _started as False,
+        # skip shutdown(), and call server_close() on a socket the serving
+        # thread is still selecting on — the thread never exits, and a
+        # second close() can return early while the first is still
+        # mid-shutdown(). start()/close() are public API held across
+        # separate tool calls, so a second caller racing the first is a
+        # real scenario, not a hypothetical one.
+        self._lifecycle_lock = threading.Lock()
 
     @property
     def redirect_uri(self) -> str:
         return f"http://127.0.0.1:{self._server.server_address[1]}"
 
+    def start(self) -> None:
+        """Begin serving. Separate from __enter__ so a caller that must
+        outlive one stack frame — an MCP tool returning a consent URL and
+        being called again later — can hold the receiver open across calls."""
+        with self._lifecycle_lock:
+            # _started is set only after _thread.start() returns, so a
+            # RuntimeError out of start() (already started, interpreter
+            # shutting down) leaves _started False and close() still knows
+            # not to call shutdown() — hoisting the flag above the call
+            # would silently rely on shutdown() having something to do.
+            self._thread.start()
+            self._started = True
+
+    def close(self) -> None:
+        """Idempotent, and safe to call on a receiver that never started.
+
+        BaseServer.shutdown() sets a flag and then blocks, with no timeout,
+        on an internal event that only serve_forever() sets on its way out.
+        If the thread never started, nothing will ever set that event, and
+        shutdown() would hang forever — a caller holding a PendingConsent it
+        never finished must be able to close it unconditionally.
+        """
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._started:
+                self._server.shutdown()
+            self._server.server_close()
+
     def __enter__(self) -> "LoopbackReceiver":
-        self._thread.start()
+        self.start()
         return self
 
     def __exit__(self, *exc_info) -> None:
-        self._server.shutdown()
-        self._server.server_close()
+        self.close()
 
-    def wait(self, timeout: float = 300.0) -> str:
-        if not self._received.wait(timeout):
-            raise ConsentFailed("consent timed out; no redirect received")
+    def poll(self) -> str | None:
+        """The authorization code, or None if the redirect has not landed.
+
+        Never blocks. Raises ConsentFailed for a redirect that arrived and
+        was bad — a state mismatch or a refused consent — because those are
+        terminal, and a caller polling forever would never learn of them.
+        """
+        if not self._received.is_set():
+            return None
         if self._error:
             raise ConsentFailed(self._error)
         if not self._code:
             raise ConsentFailed("redirect carried no authorization code")
         return self._code
+
+    def wait(self, timeout: float = 300.0) -> str:
+        if not self._received.wait(timeout):
+            raise ConsentFailed("consent timed out; no redirect received")
+        code = self.poll()
+        assert code is not None  # _received is set, so poll returns or raises
+        return code
 
     def _handler_class(self):
         receiver = self
@@ -437,22 +549,90 @@ class LoopbackReceiver:
         return Handler
 
 
+@dataclass
+class PendingConsent:
+    """A consent round trip in flight, held between two tool calls.
+
+    Carries a LIVE socket: whoever creates one owns closing it. The
+    verifier is the PKCE secret and is never logged, never returned to an
+    MCP client, and never placed in the auth URL.
+    """
+    receiver: LoopbackReceiver
+    verifier: str
+    redirect_uri: str
+    auth_url: str
+    state: str
+
+
+def start_consent(client_id: str) -> PendingConsent:
+    """Open the loopback receiver and build the consent URL. Non-blocking.
+
+    The caller must eventually call receiver.close(), whether consent
+    completes, fails, or is abandoned — an ephemeral port held open by a
+    forgotten receiver leaks a thread for the life of the process.
+    """
+    verifier, challenge = pkce_pair()
+    receiver = LoopbackReceiver()
+    receiver.start()
+    try:
+        redirect_uri = receiver.redirect_uri
+        auth_url = build_auth_url(client_id, redirect_uri, challenge,
+                                  receiver.state)
+    except BaseException:
+        # Nothing below has run, so nothing else will close this socket.
+        receiver.close()
+        raise
+    return PendingConsent(receiver=receiver, verifier=verifier,
+                          redirect_uri=redirect_uri, auth_url=auth_url,
+                          state=receiver.state)
+
+
+def finish_consent(pending: PendingConsent, client_secret: str, *,
+                   client_id: str, session=None,
+                   verify: bool = True) -> dict | None:
+    """Complete the round trip if the redirect has landed, else None.
+
+    Does NOT close the receiver on the None path — the caller polls again.
+    DOES close it on every terminal path, success or raise, because the
+    port has no further purpose once a code has been consumed. That includes
+    poll() itself raising: a state mismatch or a refused consent is just as
+    terminal as a successful exchange, and leaving the socket open in that
+    case would leak a port and a thread for the life of the process.
+    """
+    try:
+        code = pending.receiver.poll()
+    except BaseException:
+        pending.receiver.close()
+        raise
+    if code is None:
+        return None
+    try:
+        token = exchange_code(client_id, client_secret, code,
+                              pending.verifier, pending.redirect_uri,
+                              session=session)
+        if verify:
+            # Before save_token, deliberately: a grant that cannot reach
+            # the API must not replace one that can.
+            verify_token(token, session=session)
+        save_token(token)
+        return token
+    finally:
+        pending.receiver.close()
+
+
 def run_consent_flow(client_id: str, client_secret: str, *,
                      open_browser: bool = True, session=None) -> dict:
-    """Full consent round trip. Returns the stamped token payload and saves it."""
-    verifier, challenge = pkce_pair()
-    with LoopbackReceiver() as receiver:
-        # Capture the URI while the socket is still bound — the token exchange
-        # must send the identical redirect_uri, and reading it after __exit__
-        # has called server_close() would be reading a dead socket.
-        redirect_uri = receiver.redirect_uri
-        url = build_auth_url(client_id, redirect_uri, challenge, receiver.state)
-        log.info("opening consent page")
+    """Full consent round trip, blocking. Returns the saved token payload."""
+    pending = start_consent(client_id)
+    try:
         if open_browser:
-            webbrowser.open(url)
-        code = receiver.wait()
-
-    token = exchange_code(client_id, client_secret, code, verifier,
-                          redirect_uri, session=session)
-    save_token(token)
+            webbrowser.open(pending.auth_url)
+        pending.receiver.wait()
+    except BaseException:
+        pending.receiver.close()
+        raise
+    token = finish_consent(pending, client_secret, client_id=client_id,
+                           session=session)
+    if token is None:  # pragma: no cover — wait() returned, so poll() will too
+        raise ConsentFailed("consent completed but no code was available")
     return token

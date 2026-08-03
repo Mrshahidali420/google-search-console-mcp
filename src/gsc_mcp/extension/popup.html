@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f7f8fb;
+    --surface-2: #eef1f7;
+    --text: #1b2030;
+    --muted: #6b7280;
+    --faint: #9aa1b1;
+    --border: #e6e8ef;
+    --accent: #4f46e5;
+    --accent-ink: #ffffff;
+    --ok: #15803d;     --ok-bg: #dcfce7;
+    --warn: #b45309;   --warn-bg: #fef3c7;
+    --bad: #b91c1c;    --bad-bg: #fee2e2;
+    --info: #6d28d9;   --info-bg: #ede9fe;
+    --radius: 12px;
+    --shadow: 0 1px 2px rgba(20,24,40,.04), 0 8px 24px rgba(20,24,40,.08);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    width: 348px;
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---- header ---------------------------------------------------------- */
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 14px 12px;
+    background:
+      radial-gradient(120% 140% at 0% 0%, #eef0ff 0%, rgba(238,240,255,0) 60%),
+      var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .mark {
+    width: 30px; height: 30px; border-radius: 9px; flex: none;
+    display: grid; place-items: center; color: #fff;
+    background: linear-gradient(145deg, #6366f1, #4338ca);
+    box-shadow: 0 2px 6px rgba(67,56,202,.35);
+  }
+  .title { display: flex; flex-direction: column; line-height: 1.15; }
+  .title b { font-size: 13.5px; letter-spacing: -.1px; }
+  .title span { font-size: 11px; color: var(--muted); }
+  .spacer { flex: 1; }
+  .icon-btn {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    display: grid; place-items: center; cursor: pointer;
+    color: var(--muted); background: transparent;
+    border: 1px solid transparent; transition: background .12s, color .12s, border-color .12s;
+  }
+  .icon-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+  .icon-btn:active { transform: translateY(.5px); }
+  .icon-btn.on { background: var(--info-bg); color: var(--info); border-color: transparent; }
+
+  /* ---- connection pill ------------------------------------------------- */
+  .status-row { padding: 12px 14px 0; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    width: 100%; padding: 9px 12px; border-radius: 10px;
+    font-weight: 600; font-size: 12.5px; border: 1px solid transparent;
+  }
+  .pill .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .pill .lbl { letter-spacing: .1px; }
+  .pill .sub { margin-left: auto; font-weight: 500; font-size: 11px; opacity: .8; }
+  .pill.ok   { background: var(--ok-bg);   color: var(--ok);   }
+  .pill.ok   .dot { background: var(--ok); box-shadow: 0 0 0 0 rgba(21,128,61,.5); animation: pulse 1.8s infinite; }
+  .pill.bad  { background: var(--bad-bg);  color: var(--bad);  }
+  .pill.bad  .dot { background: var(--bad); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+  .pill.warn .dot { background: var(--warn); }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(21,128,61,.45); }
+    70%  { box-shadow: 0 0 0 6px rgba(21,128,61,0); }
+    100% { box-shadow: 0 0 0 0 rgba(21,128,61,0); }
+  }
+
+  /* ---- toolbar --------------------------------------------------------- */
+  .toolbar { display: flex; gap: 8px; padding: 10px 14px 2px; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    flex: 1; padding: 8px 10px; border-radius: 9px; cursor: pointer;
+    font-size: 12px; font-weight: 600; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); transition: background .12s, border-color .12s, transform .05s;
+  }
+  .btn:hover { background: var(--surface); }
+  .btn:active { transform: translateY(.5px); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.danger { color: var(--bad); border-color: #f1c4c4; }
+  .btn.danger:hover { background: var(--bad-bg); border-color: #e9a8a8; }
+  .btn svg { flex: none; }
+
+  /* ---- now / current job ---------------------------------------------- */
+  .now {
+    margin: 12px 14px 0; padding: 10px 12px; border-radius: 10px;
+    background: linear-gradient(180deg, #f5f3ff, #f7f8fb); border: 1px solid #e7e3fb;
+    display: none;
+  }
+  .now.show { display: block; }
+  .now .cap { font-size: 10.5px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--info); display: flex; align-items: center; gap: 6px; }
+  .now .cap .spin { width: 11px; height: 11px; border: 2px solid #c7bdf5; border-top-color: var(--info); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .now .url { margin-top: 4px; font-size: 12px; word-break: break-all; color: var(--text); }
+
+  /* ---- summary chips --------------------------------------------------- */
+  .summary { display: flex; gap: 8px; padding: 12px 14px 2px; }
+  .chip {
+    flex: 1; text-align: center; padding: 8px 4px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface);
+  }
+  .chip .n { display: block; font-size: 18px; font-weight: 700; line-height: 1; letter-spacing: -.5px; }
+  .chip .k { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin-top: 3px; }
+  .chip.ok .n { color: var(--ok); }
+  .chip.warn .n { color: var(--warn); }
+  .chip.bad .n { color: var(--bad); }
+
+  /* ---- activity -------------------------------------------------------- */
+  .sec-head { display: flex; align-items: center; padding: 14px 14px 6px; }
+  .sec-head h3 { margin: 0; font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--faint); }
+  .sec-head .link { margin-left: auto; font-size: 11px; color: var(--accent); cursor: pointer; font-weight: 600; }
+  .sec-head .link:hover { text-decoration: underline; }
+
+  .feed { list-style: none; margin: 0; padding: 0 8px 10px; max-height: 268px; overflow-y: auto; }
+  .feed::-webkit-scrollbar { width: 8px; }
+  .feed::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 8px; border: 2px solid var(--bg); }
+  .item {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 9px 8px; border-radius: 9px; cursor: pointer;
+  }
+  .item:hover { background: var(--surface); }
+  .item .badge {
+    flex: none; margin-top: 1px; display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700;
+    white-space: nowrap;
+  }
+  .item .badge .d { width: 6px; height: 6px; border-radius: 50%; }
+  .badge.ok   { background: var(--ok-bg);   color: var(--ok);   } .badge.ok .d   { background: var(--ok); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); } .badge.warn .d { background: var(--warn); }
+  .badge.bad  { background: var(--bad-bg);  color: var(--bad);  } .badge.bad .d  { background: var(--bad); }
+  .badge.info { background: var(--info-bg); color: var(--info); } .badge.info .d { background: var(--info); }
+  .item .meta { min-width: 0; flex: 1; }
+  .item .path { font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .host { font-size: 10.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .empty { padding: 26px 14px 30px; text-align: center; color: var(--faint); }
+  .empty svg { opacity: .5; margin-bottom: 8px; }
+  .empty p { margin: 0; font-size: 12px; }
+
+  /* ---- settings drawer ------------------------------------------------- */
+  .settings { display: none; padding: 6px 14px 14px; border-top: 1px solid var(--border); background: var(--surface); }
+  .settings.show { display: block; }
+  .settings h3 { margin: 12px 0 2px; font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--faint); }
+  .field { margin-top: 10px; }
+  .field label { display: block; font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+  .field input {
+    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    font: inherit; background: var(--bg); color: var(--text);
+  }
+  .field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
+  .settings .row { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+  .settings .row .btn { flex: none; padding: 8px 14px; }
+  .save-msg { font-size: 11px; color: var(--ok); font-weight: 600; }
+  .drawer-note { margin: 8px 0 2px; font-size: 11px; line-height: 1.4; color: var(--faint); }
+
+  footer { padding: 9px 14px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 10.5px; }
+  footer .k { font-weight: 600; color: var(--muted); }
+  footer .spacer { flex: 1; }
+  .click-stat { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; color: var(--faint); }
+  .click-stat::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+  .click-stat.trusted { color: var(--ok); }     .click-stat.trusted::before { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+  .click-stat.synthetic { color: var(--warn); } .click-stat.synthetic::before { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-bg); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="mark" aria-hidden="true">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+        <path d="M4 7l8-4 8 4-8 4-8-4z" fill="currentColor"/>
+        <path d="M4 12l8 4 8-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity=".7"/>
+        <path d="M4 17l8 4 8-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity=".45"/>
+      </svg>
+    </div>
+    <div class="title"><b>gsc-mcp</b><span>Submission bridge</span></div>
+    <div class="spacer"></div>
+    <button class="icon-btn" id="gear" title="Settings" aria-label="Settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+  </header>
+
+  <div class="status-row">
+    <div class="pill bad" id="pill">
+      <span class="dot"></span>
+      <span class="lbl" id="state">disconnected</span>
+      <span class="sub" id="state-sub"></span>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <button class="btn primary" id="reconnect">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      <span id="reconnect-lbl">Reconnect</span>
+    </button>
+    <button class="btn danger" id="stop">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+        <rect x="6" y="6" width="12" height="12" rx="2"/>
+      </svg>
+      Stop
+    </button>
+    <button class="btn" id="open-sc" title="Open Search Console">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+        <path d="M15 3h6v6"/><path d="M10 14L21 3"/>
+      </svg>
+      GSC
+    </button>
+  </div>
+
+  <div class="now" id="now">
+    <div class="cap"><span class="spin"></span> Working now</div>
+    <div class="url" id="now-url"></div>
+  </div>
+
+  <div class="summary" id="summary">
+    <div class="chip ok"><span class="n" id="c-ok">0</span><span class="k">Submitted</span></div>
+    <div class="chip warn"><span class="n" id="c-quota">0</span><span class="k">Quota</span></div>
+    <div class="chip bad"><span class="n" id="c-err">0</span><span class="k">Errors</span></div>
+  </div>
+
+  <div class="sec-head">
+    <h3>Recent activity</h3>
+    <span class="link" id="clear">Clear</span>
+  </div>
+  <ul class="feed" id="feed"></ul>
+
+  <div class="empty" id="empty" style="display:none">
+    <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/>
+    </svg>
+    <p>No submissions yet</p>
+  </div>
+
+  <div class="settings" id="settings">
+    <h3>Bridge connection</h3>
+    <div class="field">
+      <label for="token">Token <span style="font-weight:400;color:var(--faint)">(filled in automatically by gsc_setup)</span></label>
+      <input id="token" type="text" autocomplete="off" spellcheck="false" placeholder="paste token…">
+    </div>
+    <div class="field">
+      <label for="port">Port</label>
+      <input id="port" type="number" value="8765">
+    </div>
+    <div class="row">
+      <button class="btn primary" id="save">Save &amp; reconnect</button>
+      <span class="save-msg" id="save-msg"></span>
+    </div>
+
+    <h3>Maintenance</h3>
+    <div class="row">
+      <button class="btn danger" id="clear-pending">Clear pending jobs</button>
+      <span class="save-msg" id="clear-msg"></span>
+    </div>
+    <p class="drawer-note">Tells the bridge to drop a stuck/queued submission so a new run starts clean. Use this if a run keeps auto-resuming on reload.</p>
+  </div>
+
+  <footer>
+    <span><span class="k">Port</span> <span id="f-port">8765</span></span>
+    <span class="spacer"></span>
+    <span class="click-stat" id="f-click" title="How the last submit click was performed">no clicks yet</span>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

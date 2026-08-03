@@ -1,0 +1,542 @@
+"""Which Chromium browsers are installed, and where they keep their state.
+
+Layer 1 of three. profiles.py is Layers 2 and 3.
+
+Detection is registry-first on Windows because a path scan misses every
+non-default install location, and the registry is what the OS itself
+consults to launch a browser. The ProgramFiles/LOCALAPPDATA scan is kept
+as a fallback for installs that never registered.
+
+Every consumer is handed ONE resolved Installed object. Deriving the brand
+independently at each call site is how a tool ends up launching Chrome
+while checking whether Brave is running. There is deliberately no helper
+here that turns a brand string back into a Brand: that is the escape hatch
+which reopened the bug last time.
+
+Nothing in this module writes to stdout, and detection failures are logged
+by exception TYPE NAME only — a registry value or a filesystem path can
+carry the operator's account name, and this is a public tool.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
+
+from gsc_core import runlog
+
+log = runlog.get("browsers")
+
+
+@dataclass(frozen=True)
+class Brand:
+    """One browser, stating its own paths rather than deriving them.
+
+    ``win_vendor`` describes where a brand is *installed*; it deliberately
+    does NOT describe where the brand keeps its *data*. Those two layouts
+    disagree for half the table — Vivaldi installs to
+    ``Vivaldi\\Application`` but stores data in ``Vivaldi\\User Data``, and
+    Opera stores under Roaming rather than Local. Deriving one from the
+    other is the same "re-derive it at the call site" mistake this module
+    exists to prevent, so every path is stated per brand and sourced.
+    """
+
+    key: str
+    label: str
+    exe_name: str
+    extensions_url: str
+    win_vendor: tuple[str, str]       # (Vendor, Product) under ProgramFiles
+    win_data_dir: tuple[str, str]     # (environment variable, subpath)
+    mac_bundle_id: str
+    mac_app_name: str
+    mac_data_dir: str                 # subpath under Application Support
+    linux_binaries: tuple[str, ...]
+    linux_config_dir: str
+    flatpak_id: str | None            # None where the brand ships no flatpak
+    # Does this brand write the signed-in Google account into its profile
+    # preferences at all? Only the brands that ship Google Sync do. Brave,
+    # Vivaldi, Opera and plain Chromium strip or never build it, so their
+    # ``account_info`` stays empty even for a user who is signed into Google
+    # in that browser. This is a fact about the BRAND, not about a profile:
+    # for a brand that is False, "no account found" means "not discoverable
+    # from disk", NOT "nobody is signed in", and Layer 3 must not score the
+    # two the same. Confirmed on real hardware 2026-08-02: Chrome and Edge
+    # reported accounts, Brave reported none for a browser in daily use.
+    reports_google_account: bool
+    # Does the account this brand writes there necessarily belong to GOOGLE?
+    # A separate question from the one above, and the two are not opposites.
+    # Edge writes an ``account_info`` entry in exactly the same place Chrome
+    # does, but the address in it can be the user's MICROSOFT account: Edge
+    # signs a profile in to a Microsoft identity by default and to a Google
+    # one only if the user goes and does it. Nothing on disk distinguishes
+    # the two, so a caller that PRESENTS the account — "signed in", "matches
+    # the account you authorised" — must be able to say "found one, but this
+    # brand stores both kinds here". Overloading reports_google_account for
+    # this would invert it: Edge is True there and would get no caveat, while
+    # Brave (False) would get one it can almost never trigger, because it
+    # writes no address at all. Defaults False so a brand that writes nothing
+    # and a brand that writes only Google addresses both stay silent.
+    account_may_be_non_google: bool = False
+
+
+@dataclass(frozen=True)
+class Installed:
+    brand: Brand
+    exe_path: str
+    user_data_dir: str
+
+
+# Sources for the path and id values below (checked 2026-08-02):
+#   Chrome, Chromium — all three platforms, plus the fact that Chromium on
+#     Windows is %LOCALAPPDATA%\Chromium\User Data with no "Application"
+#     segment: Chromium's own docs/user_data_dir.md.
+#   Brave — brave/brave-browser issue tracker, macOS profile path.
+#   Edge — learn.microsoft.com Edge policy docs (UserDataDir).
+#   Vivaldi — help.vivaldi.com, profile locations for all three platforms.
+#   Opera — forums.opera.com; Opera is the outlier that stores under
+#     Roaming (%APPDATA%) rather than Local, and has no "User Data" segment.
+#   flatpak_id — every id below was confirmed against Flathub's appstream
+#     API (flathub.org/api/v2/appstream/<id>) returning a live, non-EOL app
+#     whose name matches the brand.
+BRANDS: dict[str, Brand] = {
+    "chrome": Brand(
+        key="chrome", label="Google Chrome", exe_name="chrome.exe",
+        extensions_url="chrome://extensions",
+        win_vendor=("Google", "Chrome"),
+        win_data_dir=("LOCALAPPDATA", "Google/Chrome/User Data"),
+        mac_bundle_id="com.google.Chrome", mac_app_name="Google Chrome",
+        mac_data_dir="Google/Chrome",
+        linux_binaries=("google-chrome", "google-chrome-stable"),
+        linux_config_dir="google-chrome",
+        flatpak_id="com.google.Chrome",
+        reports_google_account=True),
+    "brave": Brand(
+        key="brave", label="Brave", exe_name="brave.exe",
+        extensions_url="brave://extensions",
+        win_vendor=("BraveSoftware", "Brave-Browser"),
+        win_data_dir=("LOCALAPPDATA", "BraveSoftware/Brave-Browser/User Data"),
+        mac_bundle_id="com.brave.Browser", mac_app_name="Brave Browser",
+        mac_data_dir="BraveSoftware/Brave-Browser",
+        linux_binaries=("brave-browser", "brave"),
+        linux_config_dir="BraveSoftware/Brave-Browser",
+        flatpak_id="com.brave.Browser",
+        # No Google Sync: account_info stays empty even when signed in.
+        reports_google_account=False),
+    "edge": Brand(
+        key="edge", label="Microsoft Edge", exe_name="msedge.exe",
+        extensions_url="edge://extensions",
+        win_vendor=("Microsoft", "Edge"),
+        win_data_dir=("LOCALAPPDATA", "Microsoft/Edge/User Data"),
+        mac_bundle_id="com.microsoft.edgemac", mac_app_name="Microsoft Edge",
+        # One segment on macOS, unlike the two-segment Windows layout.
+        mac_data_dir="Microsoft Edge",
+        linux_binaries=("microsoft-edge", "microsoft-edge-stable"),
+        linux_config_dir="microsoft-edge",
+        # NOT the mac bundle id: that is com.microsoft.edgemac.
+        flatpak_id="com.microsoft.Edge",
+        reports_google_account=True,
+        # The one brand where both are true: it records an account, and that
+        # account may be a Microsoft one.
+        account_may_be_non_google=True),
+    "vivaldi": Brand(
+        key="vivaldi", label="Vivaldi", exe_name="vivaldi.exe",
+        extensions_url="vivaldi://extensions",
+        win_vendor=("Vivaldi", "Application"),
+        # Installs under Vivaldi\Application, stores under Vivaldi\User Data.
+        win_data_dir=("LOCALAPPDATA", "Vivaldi/User Data"),
+        mac_bundle_id="com.vivaldi.Vivaldi", mac_app_name="Vivaldi",
+        mac_data_dir="Vivaldi",
+        linux_binaries=("vivaldi", "vivaldi-stable"),
+        linux_config_dir="vivaldi",
+        flatpak_id="com.vivaldi.Vivaldi",
+        # Vivaldi syncs through its own service, not Google's.
+        reports_google_account=False),
+    "opera": Brand(
+        key="opera", label="Opera", exe_name="opera.exe",
+        extensions_url="opera://extensions",
+        win_vendor=("Programs", "Opera"),
+        # The one brand under Roaming, and with no "User Data" segment.
+        win_data_dir=("APPDATA", "Opera Software/Opera Stable"),
+        mac_bundle_id="com.operasoftware.Opera", mac_app_name="Opera",
+        mac_data_dir="com.operasoftware.Opera",
+        linux_binaries=("opera",), linux_config_dir="opera",
+        # NOT the mac bundle id: that is com.operasoftware.Opera.
+        flatpak_id="com.opera.Opera",
+        # Opera syncs through its own account system, not Google's.
+        reports_google_account=False),
+    "chromium": Brand(
+        key="chromium", label="Chromium", exe_name="chrome.exe",
+        # Chromium registers no chromium:// scheme — chrome://extensions is
+        # genuinely its own page. Do not "fix" this into a distinct-looking
+        # chromium://extensions: that URL simply fails to open.
+        extensions_url="chrome://extensions",
+        win_vendor=("Chromium", "Application"),
+        # No vendor segment and no "Application" segment, unlike Chrome.
+        win_data_dir=("LOCALAPPDATA", "Chromium/User Data"),
+        mac_bundle_id="org.chromium.Chromium", mac_app_name="Chromium",
+        mac_data_dir="Chromium",
+        linux_binaries=("chromium", "chromium-browser"),
+        linux_config_dir="chromium",
+        flatpak_id="org.chromium.Chromium",
+        # Distro Chromium builds ship without Google API keys, so sync is
+        # unavailable and nothing is ever written to account_info.
+        reports_google_account=False),
+}
+
+# chrome.exe is claimed by two brands. Where an executable name is shared,
+# the file name alone cannot identify the browser and the install path has
+# to agree with the vendor as well.
+_AMBIGUOUS_EXE_NAMES = frozenset(
+    name for name, count in
+    Counter(b.exe_name.lower() for b in BRANDS.values()).items() if count > 1
+)
+
+_WIN_START_MENU = r"Software\Clients\StartMenuInternet"
+_WIN_APP_PATHS = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
+
+
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
+
+def detect() -> list[Installed]:
+    """Every Chromium browser installed on this machine, in BRANDS order.
+
+    Never raises: a machine with no Chromium browser at all is a supported
+    state that the recommendation layer reports as "install one". Detection
+    failures are logged by TYPE NAME and skipped, because a registry read
+    that fails on one brand must not hide the other five.
+    """
+    try:
+        if sys.platform == "win32":
+            found = _detect_windows()
+        elif sys.platform == "darwin":
+            found = _detect_macos()
+        else:
+            found = _detect_linux()
+    except Exception as exc:  # noqa: BLE001 — detection is best-effort
+        log.warning("browser detection failed (%s)", type(exc).__name__)
+        return []
+    return found
+
+
+def user_data_dir(brand: Brand) -> str:
+    """Where this brand keeps its profiles on this platform.
+
+    A location only: the directory is not created and may not exist, which
+    is exactly how "installed but never launched" is told apart later.
+    """
+    if sys.platform == "win32":
+        env_name, subpath = brand.win_data_dir
+        base = os.environ.get(env_name)
+        if base:
+            root = Path(base)
+        else:
+            leaf = "Local" if env_name == "LOCALAPPDATA" else "Roaming"
+            root = Path.home() / "AppData" / leaf
+        return str(root.joinpath(*subpath.split("/")))
+    if sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+        return str(root.joinpath(*brand.mac_data_dir.split("/")))
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base) if base else Path.home() / ".config"
+    return str(root.joinpath(*brand.linux_config_dir.split("/")))
+
+
+# ---------------------------------------------------------------------------
+# Windows
+# ---------------------------------------------------------------------------
+
+def _parse_command_path(value: str | None) -> str | None:
+    """Pull the executable out of a registry shell-open command.
+
+    The value is typically a quoted path followed by arguments, but an
+    unquoted one is legal too, so neither form may be assumed.
+    """
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith('"'):
+        end = text.find('"', 1)
+        candidate = text[1:end] if end > 1 else text[1:]
+        return candidate.strip() or None
+    lowered = text.lower()
+    cut = lowered.find(".exe")
+    if cut != -1:
+        return text[:cut + 4]
+    return text.split(" ", 1)[0] or None
+
+
+def _win_exe_matches(brand: Brand, exe_path: str) -> bool:
+    """Does this executable actually belong to this brand?
+
+    Splits with PureWindowsPath rather than os.path, so the answer does not
+    depend on the host. Only Windows ever calls this at runtime, but a
+    backslash is an ordinary filename character to POSIX, so os.path would
+    hand back the whole string as the basename and every path would miss.
+    """
+    name = PureWindowsPath(exe_path).name.lower()
+    if name != brand.exe_name.lower():
+        return False
+    if name not in _AMBIGUOUS_EXE_NAMES:
+        return True
+    parts = {p.lower() for p in PureWindowsPath(exe_path).parts}
+    # Only the vendor directory disambiguates. The product segment is not
+    # enough: two brands both install under an "Application" folder.
+    return brand.win_vendor[0].lower() in parts
+
+
+def _win_scan_roots() -> list[Path]:
+    """Install roots to sweep when the registry knows nothing."""
+    names = ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
+    roots: list[Path] = []
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            root = Path(value)
+            if root not in roots:
+                roots.append(root)
+    return roots
+
+
+def _win_read_default(hive, subkey: str) -> str | None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(hive, subkey) as key:
+            value, _kind = winreg.QueryValueEx(key, "")
+    except OSError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _win_registry_exe(brand: Brand) -> str | None:
+    """Ask the registry where this brand lives, HKLM first then HKCU.
+
+    ``winreg`` is imported inside the function on purpose: this module has
+    to import cleanly on macOS and Linux.
+    """
+    import winreg
+
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for finder in (_win_start_menu_exe, _win_app_paths_exe):
+            exe = finder(hive, brand)
+            if exe:
+                return exe
+    return None
+
+
+def _win_start_menu_exe(hive, brand: Brand) -> str | None:
+    """Walk StartMenuInternet rather than guessing each vendor's key name."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(hive, _WIN_START_MENU) as key:
+            count = winreg.QueryInfoKey(key)[0]
+            names = [winreg.EnumKey(key, i) for i in range(count)]
+    except OSError:
+        return None
+
+    for name in names:
+        command = _win_read_default(
+            hive, rf"{_WIN_START_MENU}\{name}\shell\open\command")
+        exe = _parse_command_path(command)
+        if exe and _win_exe_matches(brand, exe) and os.path.isfile(exe):
+            return exe
+    return None
+
+
+def _win_app_paths_exe(hive, brand: Brand) -> str | None:
+    command = _win_read_default(hive, rf"{_WIN_APP_PATHS}\{brand.exe_name}")
+    exe = _parse_command_path(command)
+    if exe and _win_exe_matches(brand, exe) and os.path.isfile(exe):
+        return exe
+    return None
+
+
+def _win_scan_exe(brand: Brand) -> str | None:
+    """Fallback for an install that never registered itself."""
+    vendor, product = brand.win_vendor
+    for root in _win_scan_roots():
+        candidates = (
+            root / vendor / product / "Application" / brand.exe_name,
+            root / vendor / product / brand.exe_name,
+        )
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return str(candidate)
+            except OSError:
+                continue
+    return None
+
+
+def _detect_windows() -> list[Installed]:
+    found: list[Installed] = []
+    for brand in BRANDS.values():
+        try:
+            exe = _win_registry_exe(brand) or _win_scan_exe(brand)
+            # user_data_dir stays INSIDE the guard: it reads the environment
+            # and can fall through to Path.home(), which raises when no home
+            # can be resolved. Opera is the only brand reading APPDATA, so a
+            # failure there must cost Opera alone, not the other five.
+            if exe:
+                found.append(Installed(brand, exe, user_data_dir(brand)))
+        except Exception as exc:  # noqa: BLE001 — one brand must not hide five
+            log.debug("windows detection skipped %s (%s)",
+                      brand.key, type(exc).__name__)
+            continue
+    return found
+
+
+# ---------------------------------------------------------------------------
+# macOS
+# ---------------------------------------------------------------------------
+
+def _mac_app_roots() -> list[Path]:
+    return [Path("/Applications"), Path.home() / "Applications"]
+
+
+def _mac_bundle_id_agrees(app: Path, brand: Brand) -> bool:
+    """A folder named 'Brave Browser.app' is not proof that it is Brave.
+
+    An unreadable or absent Info.plist is not treated as a mismatch — the
+    bundle is accepted on its name in that case, since refusing would drop
+    a browser the user can plainly see.
+    """
+    plist = app / "Contents" / "Info.plist"
+    try:
+        if not plist.is_file():
+            return True
+        text = plist.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True
+    if "CFBundleIdentifier" not in text:
+        return True
+    return brand.mac_bundle_id in text
+
+
+def _mac_binary(app: Path, brand: Brand) -> str:
+    macos = app / "Contents" / "MacOS"
+    named = macos / brand.mac_app_name
+    try:
+        if named.is_file():
+            return str(named)
+        entries = sorted(p for p in macos.iterdir() if p.is_file())
+    except OSError:
+        return str(app)
+    return str(entries[0]) if entries else str(app)
+
+
+def _detect_macos() -> list[Installed]:
+    found: list[Installed] = []
+    for brand in BRANDS.values():
+        try:
+            for root in _mac_app_roots():
+                app = root / f"{brand.mac_app_name}.app"
+                if not app.is_dir():
+                    continue
+                if not _mac_bundle_id_agrees(app, brand):
+                    continue
+                found.append(Installed(
+                    brand, _mac_binary(app, brand), user_data_dir(brand)))
+                break
+        except Exception as exc:  # noqa: BLE001 — one brand must not hide five
+            log.debug("macos detection skipped %s (%s)",
+                      brand.key, type(exc).__name__)
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Linux
+# ---------------------------------------------------------------------------
+
+def _linux_desktop_dirs() -> list[Path]:
+    return [
+        Path.home() / ".local" / "share" / "applications",
+        Path("/usr/share/applications"),
+    ]
+
+
+def _linux_path_exe(brand: Brand) -> str | None:
+    for binary in brand.linux_binaries:
+        hit = shutil.which(binary)
+        if hit:
+            return hit
+    return None
+
+
+def _linux_desktop_exe(brand: Brand) -> str | None:
+    """Read Exec= from <binary>.desktop rather than globbing every entry."""
+    for directory in _linux_desktop_dirs():
+        for binary in brand.linux_binaries:
+            entry = directory / f"{binary}.desktop"
+            try:
+                if not entry.is_file():
+                    continue
+                lines = entry.read_text(
+                    encoding="utf-8", errors="ignore").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if not line.startswith("Exec="):
+                    continue
+                exe = _parse_exec_value(line[len("Exec="):])
+                if exe and os.path.exists(exe):
+                    return exe
+    return None
+
+
+def _parse_exec_value(value: str) -> str | None:
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith('"'):
+        end = text.find('"', 1)
+        return text[1:end] if end > 1 else text[1:]
+    return text.split(" ", 1)[0] or None
+
+
+def _linux_flatpak(brand: Brand) -> tuple[str, str] | None:
+    """A flatpak install keeps its config inside the sandbox, not ~/.config.
+
+    Returns (launch command, user data dir) or None. The application id is
+    stated per brand — it is NOT the macOS bundle id, which differs for
+    Edge and Opera.
+    """
+    if not brand.flatpak_id:
+        return None
+    app_dir = Path.home() / ".var" / "app" / brand.flatpak_id
+    try:
+        if not app_dir.is_dir():
+            return None
+    except OSError:
+        return None
+    flatpak = shutil.which("flatpak")
+    if not flatpak:
+        return None
+    config = app_dir / "config"
+    data_dir = config.joinpath(*brand.linux_config_dir.split("/"))
+    return f"{flatpak} run {brand.flatpak_id}", str(data_dir)
+
+
+def _detect_linux() -> list[Installed]:
+    found: list[Installed] = []
+    for brand in BRANDS.values():
+        try:
+            exe = _linux_path_exe(brand) or _linux_desktop_exe(brand)
+            if exe:
+                found.append(Installed(brand, exe, user_data_dir(brand)))
+                continue
+            flat = _linux_flatpak(brand)
+            if flat:
+                found.append(Installed(brand, flat[0], flat[1]))
+        except Exception as exc:  # noqa: BLE001 — one brand must not hide five
+            log.debug("linux detection skipped %s (%s)",
+                      brand.key, type(exc).__name__)
+    return found

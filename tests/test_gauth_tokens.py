@@ -314,7 +314,8 @@ def test_concurrent_access_token_calls_refresh_exactly_once(tmp_path):
 # advice to tools that exist today; a future gsc_setup can update them.
 
 _REAL_TOOLS = {"gsc_doctor", "gsc_list_sites", "gsc_check_status",
-               "gsc_quota", "gsc_performance", "gsc_submit_sitemaps"}
+               "gsc_quota", "gsc_performance", "gsc_submit_sitemaps",
+               "gsc_detect_browsers", "gsc_setup"}
 
 
 def _named_tools(message: str) -> set[str]:
