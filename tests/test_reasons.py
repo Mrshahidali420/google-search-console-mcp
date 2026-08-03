@@ -78,6 +78,16 @@ def test_every_reason_has_a_non_empty_action():
 def test_needs_site_access_is_a_subset_of_the_reasons():
     assert reasons.NEEDS_SITE_ACCESS <= reasons.REASONS
 
+def test_needs_site_access_names_every_member_it_has():
+    # Literal equality, not a subset check. Gutting this set to
+    # {noindex, duplicate} left all 1187 tests green: 404, redirect,
+    # soft-404 and robots-blocked would then report
+    # `needs_site_access: false` and vanish from gsc_audit's buckets with
+    # no signal anywhere. Removing any single member must redden this.
+    assert reasons.NEEDS_SITE_ACCESS == frozenset({
+        "404", "redirect", "noindex", "soft-404", "robots-blocked",
+        "duplicate",
+    })
 
 
 def test_a_reason_that_needs_site_access_is_never_one_submitting_helps():

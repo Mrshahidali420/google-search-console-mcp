@@ -78,6 +78,52 @@ def test_submittable_counts_only_where_submitting_helps(store_conn):
     assert out["needs_site_access"] == 1  # noindex; crawled needs neither
 
 
+#: Which action bucket each reason code lands in, spelled out. `None`
+#: means NO bucket: crawled-not-indexed calls for neither a submission nor
+#: a site edit, and it is deliberately absent from all three
+#: (audit.py:85-90), which is also why the three are not a partition.
+_BUCKET_BY_REASON = {
+    "404": "needs_site_access",
+    "redirect": "needs_site_access",
+    "noindex": "needs_site_access",
+    "duplicate": "needs_site_access",
+    "soft-404": "needs_site_access",
+    "robots-blocked": "needs_site_access",
+    "discovered-not-indexed": "submittable",
+    "unknown-to-google": "submittable",
+    "alt-canonical": "no_action_needed",
+    "crawled-not-indexed": None,
+}
+
+_STATUS_BY_REASON = {code: status
+                     for status, code in reasons.REASON_BY_STATUS.items()}
+
+
+def test_every_reason_lands_in_exactly_the_bucket_it_belongs_to(store_conn):
+    """One URL per reason code, each bucket asserted as a whole number.
+
+    A sample of three codes cannot see crawled-not-indexed being swallowed
+    into no_action, nor a code double-counting into two buckets at once --
+    both of those left the suite green. The complete mapping can.
+    """
+    assert set(_BUCKET_BY_REASON) == reasons.REASONS
+
+    for code, bucket in _BUCKET_BY_REASON.items():
+        conn = store_conn
+        _seed(conn, [("https://example.com/only", _STATUS_BY_REASON[code],
+                      "", 1)])
+
+        out = audit.audit(conn, PROPERTY, now=NOW)
+
+        counts = {name: out[name] for name in
+                  ("submittable", "needs_site_access", "no_action_needed")}
+        expected = {name: 0 for name in counts}
+        if bucket is not None:
+            expected[bucket] = 1
+        assert counts == expected, code
+        assert out["unindexed"] == 1, code
+
+
 def test_alt_canonical_is_counted_as_needing_no_action(store_conn):
     _seed(store_conn, [
         ("https://example.com/a", "alternate_canonical", "", 1),
