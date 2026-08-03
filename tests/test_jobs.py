@@ -24,8 +24,10 @@ test instead of hanging the suite.
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
 import threading
+from collections.abc import Callable
 
 import pytest
 
@@ -535,14 +537,18 @@ def test_the_run_is_given_the_interruptible_gap_and_the_stop_signal(monkeypatch,
 
 # --- shutdown ----------------------------------------------------------------
 
-def _wedged_execute(entered: threading.Event, release: threading.Event):
+def _wedged_execute(entered: threading.Event, release: threading.Event
+                    ) -> Callable[..., submit.RunResult]:
     """A run that does NOT answer a stop — a send already in flight.
 
     The case shutdown must survive without hanging: the worker is inside a
     browser round-trip, the stop signal lands where nothing is looking at
     it, and shutdown has to give up and say so.
     """
-    def execute(conn, job_id, urls, cfg, stop_event, on_progress):
+    def execute(conn: sqlite3.Connection, job_id: str, urls: list[str],
+                cfg: dict, stop_event: threading.Event,
+                on_progress: Callable[[submit.Attempt], None]
+                ) -> submit.RunResult:
         entered.set()
         assert release.wait(_JOIN_TIMEOUT), "the wedged worker was never freed"
         return submit.RunResult([], False, None)
@@ -608,6 +614,45 @@ def test_shutdown_reports_false_when_the_worker_does_not_settle_in_time(
     # and _SYNC has no liveness derivation to heal it.
     with jobs.claim_bridge():
         pass
+
+    release.set()
+    _await_terminal(job_id)
+
+
+def test_shutdown_does_not_release_a_claim_that_is_no_longer_the_jobs(
+        monkeypatch, home):
+    """The release is CONDITIONAL, and it has to be.
+
+    The losing race is real: the worker settles during the join, a
+    gsc_request_indexing call takes the bridge in that instant, and
+    shutdown then reaches its release loop. An unconditional clear there
+    hands that live synchronous run a second driver for the one Chrome tab
+    — two submissions of the same URL, two quota slots nobody gets back.
+
+    The claim is planted rather than raced for, because the window is a few
+    bytecodes wide and a test that waits for it to occur naturally is a
+    test that mostly does not run. Everything else is real: a live worker,
+    so the release loop is genuinely reached, and the refusal is proved by
+    trying to take the bridge rather than by reading the flag.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(jobs, "_execute", _wedged_execute(entered, release))
+    job_id = jobs.start(["https://example.com/a"], CFG)
+    assert entered.wait(_JOIN_TIMEOUT)
+
+    with jobs._lock:
+        jobs._holder = jobs._SYNC
+
+    assert _shutdown_off_thread(0.05) is False
+
+    # Still refused, and refused as the SYNCHRONOUS run's claim: _SYNC has
+    # no liveness derivation behind it, so a shutdown that cleared it would
+    # not be healed by anything short of restarting the process.
+    with pytest.raises(jobs.AlreadyRunning) as caught:
+        with jobs.claim_bridge():
+            pytest.fail("shutdown gave away a bridge it did not hold")
+    assert "gsc_request_indexing" in str(caught.value)
 
     release.set()
     _await_terminal(job_id)
