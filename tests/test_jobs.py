@@ -292,7 +292,9 @@ def test_the_gap_still_waits_when_no_stop_has_arrived(home):
     gap = jobs._interruptible_sleep(threading.Event())
     before = real_time.monotonic()
     gap(0.05)
-    assert real_time.monotonic() - before >= 0.04
+    # A loose floor on purpose: Windows' timer granularity is ~15.6ms, and
+    # what is being pinned is "it waited", not "it waited precisely".
+    assert real_time.monotonic() - before >= 0.03
 
 
 def test_the_run_is_given_the_interruptible_gap_and_the_stop_signal(monkeypatch,
@@ -395,6 +397,132 @@ def test_a_crashing_worker_frees_the_registry_slot(monkeypatch, home):
     second = jobs.start(["https://example.com/b"], CFG)
     _await_terminal(second)
     assert _read(second)["state"] == "completed"
+
+
+class _ConnectFailure(OSError):
+    """The shape of a full disk or an unwritable GSC_MCP_HOME."""
+
+
+def _connect_failing_in_the_worker(monkeypatch) -> None:
+    """store.connect() raises once, and only for the worker's own attempt.
+
+    Keyed on the calling thread rather than on a call count, so it fails
+    exactly the acquisition under test: start()'s row insert still lands,
+    and the store stays reachable for the failure to be recorded in — which
+    is what makes "the job reaches failed" an assertion about the
+    implementation rather than about the fake.
+    """
+    real = store.connect
+    tripped = threading.Event()
+
+    def connect(*args, **kwargs):
+        if threading.current_thread().name.startswith("gsc-job-") \
+                and not tripped.is_set():
+            tripped.set()
+            raise _ConnectFailure(f"{SECRET_PATH} is full ({SECRET_EMAIL})")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(jobs.store, "connect", connect)
+
+
+def test_a_worker_that_cannot_open_its_connection_fails_the_job(monkeypatch,
+                                                                home):
+    """The row must not be left pending with no error, forever.
+
+    store.connect() is the first thing the worker does. Outside the try it
+    takes the whole worker down with it: nothing records "failed", nothing
+    frees the registry, and reconcile_jobs() sweeps only "running" — so a
+    full disk means gsc_start_indexing_job answers ok with a job id that
+    reports pending and no error for the life of the installation.
+    """
+    monkeypatch.setattr(jobs, "_execute", _fake_execute(["submitted"]))
+    _connect_failing_in_the_worker(monkeypatch)
+
+    with capturing(jobs.log) as records:
+        job_id = jobs.start(["https://example.com/a"], CFG)
+        _await_terminal(job_id)
+
+    job = _read(job_id)
+    assert job["state"] == "failed"
+    # Type name only: the message carries the path that could not be written.
+    assert job["error"] == "_ConnectFailure"
+    assert "secret-operator" not in job["error"]
+    assert SECRET_EMAIL not in job["error"]
+
+    text = logged_text(records)
+    assert "secret-operator" not in text and SECRET_EMAIL not in text
+    assert "_ConnectFailure" in text                # live-capture canary
+
+
+def test_a_worker_that_cannot_open_its_connection_frees_the_registry(
+        monkeypatch, home):
+    """The other half of the same defect: a lost worker holds the one-job
+    slot, so the operator can never start another job either."""
+    monkeypatch.setattr(jobs, "_execute", _fake_execute(["submitted"]))
+    _connect_failing_in_the_worker(monkeypatch)
+    first = jobs.start(["https://example.com/a"], CFG)
+    _await_terminal(first)
+
+    assert jobs.is_running(first) is False
+    assert jobs._threads == {} and jobs._stop_events == {}
+
+    second = jobs.start(["https://example.com/b"], CFG)
+    _await_terminal(second)
+    assert _read(second)["state"] == "completed"
+
+
+def test_a_store_that_never_opens_still_lets_the_worker_die_quietly(monkeypatch,
+                                                                    home):
+    """The unrecoverable case: nothing can be written, including the
+    failure. What must still hold is that the thread ends and the registry
+    is reclaimed, rather than the process losing its only job slot."""
+    monkeypatch.setattr(jobs, "_execute", _fake_execute(["submitted"]))
+    job_id = jobs.start(["https://example.com/a"], CFG)
+    _await_terminal(job_id)          # a clean run first, so a row exists
+
+    def always_fails(*args, **kwargs):
+        raise _ConnectFailure(SECRET_PATH)
+
+    monkeypatch.setattr(jobs.store, "connect", always_fails)
+    with capturing(jobs.log) as records:
+        # start() opens its own connection through store.session(); the
+        # failure there is the caller's to see, and it must leave nothing
+        # behind either.
+        with pytest.raises(_ConnectFailure):
+            jobs.start(["https://example.com/b"], CFG)
+
+    assert jobs._threads == {} and jobs._stop_events == {}
+    assert SECRET_PATH not in logged_text(records)
+
+
+class _SpawnFailure(RuntimeError):
+    """A thread that cannot be started — an OS resource limit, in practice."""
+
+
+def test_a_thread_that_will_not_start_leaves_nothing_behind(monkeypatch, home):
+    """The registry entry is written before start(). If start() raises, that
+    entry is never reclaimed and the row wedges pending exactly as above —
+    with the added insult that the one-job guard sees a dead thread and the
+    row never settles."""
+    class _DeadThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise _SpawnFailure("no threads left")
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(jobs.threading, "Thread", _DeadThread)
+    with pytest.raises(_SpawnFailure):
+        jobs.start(["https://example.com/a"], CFG)
+
+    assert jobs._threads == {} and jobs._stop_events == {}
+    with store.session() as conn:
+        wedged = store.list_jobs(conn)
+    assert [job["state"] for job in wedged] == ["failed"]
+    assert wedged[0]["error"] == "_SpawnFailure"
 
 
 def test_a_missing_browser_fails_the_job_by_a_named_type(monkeypatch, home):

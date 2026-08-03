@@ -190,6 +190,26 @@ def test_job_status_reports_a_failed_job_with_its_stored_error(store_conn):
     assert result["error"] == "NoBrowser"
 
 
+def test_job_status_reports_a_worker_that_died_before_it_could_start(
+        monkeypatch, store_conn):
+    """The operator-visible half of the worker-startup defect.
+
+    A worker that dies acquiring its connection must leave a row the
+    operator can read a verdict off. Left pending with no error and no live
+    worker, gsc_job_status says "queued, be patient" forever — and
+    reconcile_jobs() sweeps only "running", so nothing ever corrects it.
+    """
+    _seed_job(store_conn, "job-1", state="failed", error="_ConnectFailure")
+    monkeypatch.setattr(tools_submit.jobs, "is_running", lambda job_id: False)
+
+    result = tools_submit.job_status("job-1")
+    assert result["ok"] is True
+    assert result["state"] == "failed"
+    assert result["error"] == "_ConnectFailure"
+    assert result["live"] is False
+    assert result["state"] not in tools_submit.jobs.ACTIVE_STATES
+
+
 def test_job_status_says_whether_a_worker_is_actually_live(monkeypatch,
                                                            store_conn):
     """A row saying "running" after a crash is a lie until the next startup

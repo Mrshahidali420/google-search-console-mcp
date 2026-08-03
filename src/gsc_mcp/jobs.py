@@ -110,7 +110,18 @@ def start(urls: list[str], cfg: dict) -> str:
                                   name=f"gsc-job-{job_id[:8]}", daemon=True)
         _stop_events[job_id] = stop_event
         _threads[job_id] = thread
-        thread.start()
+        try:
+            thread.start()
+        except Exception as exc:  # noqa: BLE001 — reclaim, then re-raise
+            # The registry entry is written before start() so that nothing
+            # can slip between the two. If start() then fails (an OS thread
+            # limit), that entry is a slot nothing will ever free and the
+            # row is a job nothing will ever run: undo both. The caller
+            # still sees the exception — its tool reports it by type name.
+            _stop_events.pop(job_id, None)
+            _threads.pop(job_id, None)
+            _record_failure(job_id, None, type(exc).__name__)
+            raise
     return job_id
 
 
@@ -124,9 +135,16 @@ def stop(job_id: str) -> bool:
     "Between URLs" still means promptly, though. The gap between two sends
     is 130-180 seconds and the worker spends nearly all its life inside
     one, so the gap itself is this event's wait (see _interruptible_sleep):
-    the signal lands within milliseconds, and submit.run re-checks
-    should_stop after the gap and BEFORE reserve(), so the stop costs no
-    quota slot.
+    once the signal is set the worker leaves the gap immediately, and
+    submit.run re-checks should_stop after the gap and BEFORE reserve(), so
+    the stop costs no quota slot.
+
+    Setting the signal is not instant in one case: start() holds _lock
+    across a BEGIN IMMEDIATE row insert, so a stop racing a start can wait
+    on that lock for as long as the store's busy timeout (30s) under write
+    contention. Nothing is lost when it does — the running job keeps
+    pacing, and the stop lands in the same gap it would have — but this is
+    not a lock-free call and should not be sold as one.
     """
     with _lock:
         event = _stop_events.get(job_id)
@@ -151,14 +169,48 @@ def _interruptible_sleep(stop_event: threading.Event
     return sleep
 
 
+def _record_failure(job_id: str, conn: sqlite3.Connection | None,
+                    error: str) -> None:
+    """Settle a job at "failed", on whatever connection there is.
+
+    `conn` is None when the worker never got one — the very failure this
+    most needs to record. A fresh short-lived session is opened for that
+    case, because the alternative is a row that stays pending with no
+    error: reconcile_jobs() sweeps only "running", so nothing downstream
+    would ever correct it and the operator would be told, permanently, that
+    a job that never started is about to.
+
+    `error` is a type name. Never a message: this lands on disk and is
+    returned by gsc_job_status, and the message of a store failure is a
+    filesystem path naming the operator.
+    """
+    try:
+        if conn is not None:
+            store.update_job(conn, job_id, state="failed", error=error)
+            return
+        with store.session() as fresh:
+            store.update_job(fresh, job_id, state="failed", error=error)
+    except Exception as exc:  # noqa: BLE001 — nothing left to try
+        # An unreachable store cannot be told its job failed. Say so in the
+        # log and let the next startup reconcile do what it can.
+        log.warning("could not record the failure of job %s (%s)",
+                    job_id, type(exc).__name__)
+
+
 def _worker(job_id: str, urls: list[str], cfg: dict,
             stop_event: threading.Event) -> None:
-    # Its OWN connection: store.tx()'s re-entrancy is connection-scoped, so
-    # sharing the caller's would let two threads nest transactions silently
-    # and the inner RELEASE would commit nothing durably.
-    conn = store.connect()
+    conn: sqlite3.Connection | None = None
     progress: dict = {"done": 0, "total": len(urls), "results": []}
     try:
+        # Its OWN connection: store.tx()'s re-entrancy is connection-scoped,
+        # so sharing the caller's would let two threads nest transactions
+        # silently and the inner RELEASE would commit nothing durably.
+        #
+        # INSIDE the try, because opening it is itself a failure path — an
+        # unwritable GSC_MCP_HOME, a full disk — and an exception raised
+        # above this line would escape the thread entirely: no "failed"
+        # recorded, no registry slot freed, and a row left pending forever.
+        conn = store.connect()
         store.update_job(conn, job_id, state="running", progress=progress)
 
         def record(attempt: submit.Attempt) -> None:
@@ -182,14 +234,10 @@ def _worker(job_id: str, urls: list[str], cfg: dict,
         # again". The stored error is user-visible AND on disk, so it carries
         # the exception TYPE only.
         log.warning("job %s failed (%s)", job_id, type(exc).__name__)
-        try:
-            store.update_job(conn, job_id, state="failed",
-                             error=type(exc).__name__)
-        except Exception as inner:  # noqa: BLE001 — nothing left to try
-            log.warning("could not record the failure of job %s (%s)",
-                        job_id, type(inner).__name__)
+        _record_failure(job_id, conn, type(exc).__name__)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
         # Last, and after the terminal state is written: join() treats an
         # unregistered job as settled, so clearing earlier would let a
         # caller read the row before its final state landed.
