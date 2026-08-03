@@ -21,8 +21,13 @@ from . import deps
 
 log = runlog.get(__name__)
 
-_FIX_OAUTH_CLIENT = ("no OAuth client is configured — run gsc_setup to "
-                     "connect a Google account")
+# NOT "run gsc_setup". deps.NotConfigured (deps.py:41) means there is no
+# OAuth client to sign in WITH, and onboarding.setup catches that same
+# exception and answers with this env-var advice itself — so pointing at
+# gsc_setup would send the caller round a circle to be told this anyway.
+_FIX_OAUTH_CLIENT = ("no OAuth client is configured — set GSC_MCP_CLIENT_ID "
+                     "and GSC_MCP_CLIENT_SECRET, or install a release build "
+                     "with an embedded client")
 _FIX_TOKEN = "run gsc_setup to sign in again"
 _FIX_BAD_SOURCE = ('source must be one of "sitemap", "store", or "both" '
                    "(the default)")

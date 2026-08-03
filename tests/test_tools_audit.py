@@ -99,6 +99,23 @@ def test_find_unindexed_refuses_when_no_oauth_client_is_configured(
     assert out["fix"]
 
 
+def test_the_not_configured_fix_does_not_send_the_caller_round_a_circle(
+        home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # deps.NotConfigured means there is no OAuth client to sign in WITH,
+    # and onboarding.setup catches the same exception and answers with the
+    # env-var advice. Pointing at gsc_setup would send a signed-out caller
+    # to the one tool that will tell them to do something else.
+    # `assert out["fix"]` alone is truthy-only and cannot see this.
+    monkeypatch.setattr(deps, "oauth_client",
+                        lambda: (_ for _ in ()).throw(deps.NotConfigured()))
+
+    for out in (tools_audit.find_unindexed(PROPERTY),
+                tools_audit.audit(PROPERTY)):
+        assert "GSC_MCP_CLIENT_ID" in out["fix"]
+        assert "GSC_MCP_CLIENT_SECRET" in out["fix"]
+        assert "gsc_setup" not in out["fix"]
+
+
 def test_find_unindexed_probes_the_token_before_fetching_a_sitemap(
         home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # api.check_status never raises AuthRequired -- a 401 becomes an
