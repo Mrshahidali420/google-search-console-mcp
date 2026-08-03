@@ -92,9 +92,25 @@ def test_reconcile_jobs_fails_orphaned_running_jobs(tmp_path):
     assert store.get_job(conn, "job-2")["state"] == "completed"
 
 
-def test_reconcile_jobs_is_a_noop_when_nothing_is_running(tmp_path):
+def test_reconcile_jobs_fails_a_job_that_never_left_pending(tmp_path):
+    """A row is inserted pending and its worker flips it to running a
+    moment later. A crash in that window leaves a row no worker in the new
+    process knows about, so it is orphaned for the same reason a running
+    row is — and would otherwise sit at pending forever."""
     conn = _conn(tmp_path)
     store.create_job(conn, "job-1", {})
+
+    assert store.reconcile_jobs(conn) == 1
+    assert store.get_job(conn, "job-1")["state"] == "failed"
+
+
+def test_reconcile_jobs_is_a_noop_when_every_job_is_settled(tmp_path):
+    conn = _conn(tmp_path)
+    store.create_job(conn, "job-1", {})
+    store.create_job(conn, "job-2", {})
+    store.update_job(conn, "job-1", state="completed")
+    store.update_job(conn, "job-2", state="stopped_user")
+
     assert store.reconcile_jobs(conn) == 0
 
 

@@ -104,19 +104,29 @@ _TOOL_ARGS = {
     "gsc_submit_sitemaps": ((["https://example.com/sitemap.xml"],), {}),
     "gsc_detect_browsers": ((), {}),
     "gsc_setup": ((), {"open_browser": False}),
+    "gsc_request_indexing": ((["https://example.com/a"],), {}),
+    "gsc_start_indexing_job": ((["https://example.com/a"],), {}),
+    "gsc_job_status": ((), {}),
+    "gsc_stop_job": (("no-such-job",), {}),
 }
 
 _SWEPT = sorted(registered_tools())
 
 
 @pytest.mark.parametrize("name", _SWEPT, ids=_SWEPT)
-def test_every_registered_tool_writes_nothing_to_stdout(name, monkeypatch,
+def test_every_registered_tool_writes_nothing_to_stdout(name, home, monkeypatch,
                                                         capsys):
     """The standing guard the whole milestone's definition of done names.
 
     Every tool runs unconfigured, which is the state a fresh install is in
     and the state most likely to send something down an error path. No
     OAuth client means no provider, so nothing here reaches the network.
+
+    `home` is not decoration. Since the submission tools joined the sweep,
+    a tool that got as far as the real store would find the developer's own
+    properties, and gsc_start_indexing_job would answer by opening a real
+    browser and spending real quota. Against a throwaway home there are no
+    properties, so each one refuses at its own guard instead.
     """
     from gsc_mcp import server
 
