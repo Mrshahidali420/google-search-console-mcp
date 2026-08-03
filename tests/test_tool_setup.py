@@ -9,12 +9,11 @@ network call — and the autouse fixture closes them again afterwards.
 from __future__ import annotations
 
 import json
-import logging
-import traceback
 from pathlib import Path
 
 import pytest
 
+from _logcheck import capturing, logged_text
 from gsc_core import browsers, profiles
 from gsc_mcp import onboarding
 
@@ -55,46 +54,8 @@ def captured_log():
     a negative assertion written against an empty buffer would guard
     nothing. `test_the_log_capture_is_live` proves this fixture captures.
     """
-    records: list[logging.LogRecord] = []
-
-    class Collector(logging.Handler):
-        def emit(self, record):
-            records.append(record)
-
-    handler = Collector(level=logging.DEBUG)
-    logger = onboarding.log
-    previous = logger.level
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(handler)
-    try:
+    with capturing(onboarding.log) as records:
         yield records
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous)
-
-
-def logged_text(records) -> str:
-    """Everything a record could carry a secret in, joined.
-
-    `getMessage()` alone is NOT enough, and the gap is not theoretical: a
-    site changed from `log.debug` to `log.exception` puts the exception —
-    and with it a client secret, an address, or an OSError's filesystem path
-    — into `exc_info`, where the default formatter writes it to the log file
-    and a message-only assertion never sees it. `args` is included for the
-    same reason: an argument the format string does not consume still
-    reaches a locals-capturing handler.
-    """
-    parts: list[str] = []
-    for record in records:
-        parts.append(record.getMessage())
-        parts.append(repr(record.args))
-        if record.exc_info:
-            parts.append("".join(traceback.format_exception(*record.exc_info)))
-        if record.exc_text:
-            parts.append(record.exc_text)
-        if record.stack_info:
-            parts.append(record.stack_info)
-    return "\n".join(parts)
 
 
 def _candidate(tmp_path, *, email=None, brand_key="brave"):

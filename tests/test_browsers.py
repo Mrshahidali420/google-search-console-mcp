@@ -10,6 +10,7 @@ import sys
 
 import pytest
 
+from _logcheck import Captured, logged_text
 from gsc_core import browsers
 
 
@@ -162,7 +163,17 @@ def test_detect_returns_nothing_rather_than_raising_on_a_bare_machine(
     assert browsers.detect() == []
 
 
-def test_detect_swallows_a_detector_explosion(monkeypatch, caplog):
+def test_the_log_capture_is_live():
+    """Proves the privacy assertion below is not running over an empty
+    buffer. runlog sets propagate=False, so caplog's root handler never sees
+    these records — which is why this file captures the module's own logger
+    directly rather than using caplog."""
+    with Captured(browsers.log) as records:
+        browsers.log.debug("canary %s", "value")
+    assert any("canary" in record.getMessage() for record in records)
+
+
+def test_detect_swallows_a_detector_explosion(monkeypatch):
     def boom():
         # Invented, not from any real machine: it stands in for the kind of
         # value a registry error carries — an account name in a path.
@@ -171,11 +182,12 @@ def test_detect_swallows_a_detector_explosion(monkeypatch, caplog):
     monkeypatch.setattr(browsers, "_detect_windows", boom)
     monkeypatch.setattr(browsers, "_detect_macos", boom)
     monkeypatch.setattr(browsers, "_detect_linux", boom)
-    with caplog.at_level("WARNING"):
+    with Captured(browsers.log) as records:
         assert browsers.detect() == []
-    logged = "\n".join(r.getMessage() for r in caplog.records)
-    assert "OSError" in logged
-    assert "example-account" not in logged  # message body is never logged
+    assert "OSError" in logged_text(records)
+    # The message body is never logged — and neither is the exception, which
+    # `getMessage()` alone could never have seen.
+    records.assert_says_nothing_identifying("example-account")
 
 
 def test_detect_dispatches_on_platform(monkeypatch):

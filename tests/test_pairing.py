@@ -13,9 +13,8 @@ same rule applies to fixtures.
 from __future__ import annotations
 
 import json
-import logging
-import re
 
+from _logcheck import Captured
 from gsc_core import browsers, pairing, profiles
 
 VALID_ID = "a" * 32          # matches ^[a-p]{32}$
@@ -28,49 +27,18 @@ LOW_ID = "a" * 32
 HIGH_ID = "p" * 32
 
 
-class _Captured(list):
-    """Log records from one module's logger, captured directly.
+# The privacy guard lives in one place for the whole suite; see
+# tests/_logcheck.py for why `getMessage()` alone is not enough and why
+# caplog cannot be used here.
+_Captured = Captured
 
-    Not caplog: runlog gives the package logger its own handlers and sets
-    propagate = False, so whether pytest's capture sees anything depends on
-    which OTHER test file called runlog.init() first. A privacy assertion
-    that quietly runs against an empty buffer is worse than none.
-    """
+# Every log line in this module is prose plus a bare exception TYPE NAME.
+# The shape check is the general rule rather than three examples of it.
+SHAPE = r"[a-z ]+ \(\w+\)"
 
-    def __init__(self, logger):
-        super().__init__()
-        self._logger = logger
-        self._handler = logging.Handler(level=logging.DEBUG)
-        self._handler.emit = self.append
-        self._level = logger.level
 
-    def __enter__(self):
-        self._logger.setLevel(logging.DEBUG)
-        self._logger.addHandler(self._handler)
-        return self
-
-    def __exit__(self, *exc):
-        self._logger.removeHandler(self._handler)
-        self._logger.setLevel(self._level)
-        return False
-
-    def assert_says_nothing_identifying(self, *secrets):
-        """Every line is prose plus a bare exception TYPE NAME.
-
-        The positive assertion is load-bearing: without it the negative
-        ones below pass over an empty buffer. The shape check is the
-        general rule rather than three examples of it — an exception
-        rendered whole would pass a "no address" assertion today and carry
-        a filesystem path the first time the failure mode changes.
-        """
-        assert self, "the failure should have been logged at all"
-        blob = "\n".join(record.getMessage() for record in self)
-        assert "@" not in blob
-        for secret in secrets:
-            assert str(secret) not in blob
-        for record in self:
-            assert re.fullmatch(r"[a-z ]+ \(\w+\)", record.getMessage()), \
-                record.getMessage()
+def _assert_clean(records, *secrets):
+    records.assert_says_nothing_identifying(*secrets, shape=SHAPE)
 
 
 # An exception message shaped like the ones this code really meets: an
@@ -550,13 +518,25 @@ def test_secure_preferences_wins_when_both_files_name_a_different_id(
 # that NO log site here may render an exception, and every site is pinned
 # individually. Five sites, five tests.
 
+def test_the_log_capture_is_live():
+    """Proves the five assertions below are not running over an empty buffer.
+
+    runlog sets propagate=False, so caplog's root handler never sees these
+    records, and `caplog.at_level(0)` is NOTSET, which drops debug records.
+    A negative log assertion written either way passes forever.
+    """
+    with Captured(pairing.log) as records:
+        pairing.log.debug("canary %s", "value")
+    assert any("canary" in record.getMessage() for record in records)
+
+
 def test_an_unreadable_manifest_is_logged_by_type_only(tmp_path, monkeypatch):
     monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
     extracted = pairing.extension_dir()
     (extracted / "manifest.json").write_text("{not json", encoding="utf-8")
     with _Captured(pairing.log) as records:
         pairing.extension_dir()
-    records.assert_says_nothing_identifying(tmp_path)
+    _assert_clean(records, tmp_path)
 
 
 def test_an_unavailable_extraction_is_logged_by_type_only(tmp_path,
@@ -566,7 +546,7 @@ def test_an_unavailable_extraction_is_logged_by_type_only(tmp_path,
     monkeypatch.setattr(pairing, "extension_dir", _raise_leaky)
     with _Captured(pairing.log) as records:
         assert pairing.find_extension_id(installed, profile) is None
-    records.assert_says_nothing_identifying(tmp_path, "a-real-person")
+    _assert_clean(records, tmp_path, "a-real-person")
 
 
 def test_an_unusable_profile_directory_is_logged_by_type_only(tmp_path,
@@ -580,7 +560,7 @@ def test_an_unusable_profile_directory_is_logged_by_type_only(tmp_path,
                               path="")
     with _Captured(pairing.log) as records:
         assert pairing.find_extension_id(installed, broken) is None
-    records.assert_says_nothing_identifying(tmp_path)
+    _assert_clean(records, tmp_path)
 
 
 def test_an_unreadable_preferences_file_is_logged_by_type_only(tmp_path,
@@ -592,7 +572,7 @@ def test_an_unreadable_preferences_file_is_logged_by_type_only(tmp_path,
     _unreadable(target)
     with _Captured(pairing.log) as records:
         pairing.find_extension_id(installed, profile)
-    records.assert_says_nothing_identifying(tmp_path, "User Data")
+    _assert_clean(records, tmp_path, "User Data")
 
 
 def test_an_unparsable_preferences_file_is_logged_by_type_only(tmp_path,
@@ -603,4 +583,4 @@ def test_an_unparsable_preferences_file_is_logged_by_type_only(tmp_path,
         "{not json", encoding="utf-8")
     with _Captured(pairing.log) as records:
         pairing.find_extension_id(installed, profile)
-    records.assert_says_nothing_identifying(tmp_path, "User Data")
+    _assert_clean(records, tmp_path, "User Data")
