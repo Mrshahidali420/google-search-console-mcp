@@ -1035,6 +1035,15 @@ def gsc_find_unindexed(site: str, source: str = "both",
     result reports `candidates_total`, `inspected` and `limited` so you
     can tell a truncated answer from a complete one.
 
+    `limit` is not the only thing that can cut a run short. Inspection
+    quota is per property and roughly eleven slots a day, so on any site
+    larger than that the run reaches the gate and stops: `inspected` is
+    what was handed to the API, `checked` is what actually reached it,
+    and `skipped_quota` lists the URLs accounting for the difference.
+    Report both numbers rather than `inspected` alone — a run that
+    answered for three of forty URLs is not a survey of the property, and
+    the remaining URLs are answerable tomorrow at no extra cost.
+
     Only URLs whose last inspection is older than `inspection_ttl_days`
     are re-inspected; the rest are reported from their stored status. A
     second call the same day therefore costs no budget and still answers
@@ -1047,9 +1056,18 @@ def gsc_find_unindexed(site: str, source: str = "both",
     `submitting_helps` and `needs_site_access`. Act on
     `submitting_helps` before calling gsc_request_indexing: submitting a
     404, a redirect, a noindex, or a page Google crawled and declined
-    wastes an unrecoverable quota slot. URLs whose state could not be
-    established — a failed inspection, or a result the burst re-verify
-    pass could not confirm — are in `undetermined`, never in `unindexed`.
+    wastes an unrecoverable quota slot.
+
+    URLs whose state this run did not establish are in `undetermined`,
+    never in `unindexed`. Read each one's `status` before wording the
+    answer: it separates two cases a reader acts on differently. "We
+    looked and could not tell" covers a failed inspection and a result
+    the burst re-verify pass could not confirm. `"skipped_quota"` is the
+    other case and means the opposite: we never got to look, because the
+    property's daily budget ran out first. That is not a problem with the
+    URL, needs no investigation, and is answered by running again
+    tomorrow — say so rather than reporting it as a fault.
+
     A refusal is `{"ok": false, "error": <code>, "fix": <what to do>}`,
     plus `status` when Search Console refused the call and `detail` (an
     exception type name) when the failure was unexpected.
