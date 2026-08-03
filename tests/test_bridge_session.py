@@ -188,11 +188,41 @@ def test_submit_never_overruns_its_own_timeout(session):
     reconnect_grace x (max_resends + 1) — here, 6s against a 1s ceiling.
     """
     started = time.monotonic()
-    outcome = session.submit("sc-domain:example.com", "https://example.com/a",
-                             "0", timeout=1, reconnect_grace=6)
+    session.submit("sc-domain:example.com", "https://example.com/a",
+                   "0", timeout=1, reconnect_grace=6)
     elapsed = time.monotonic() - started
-    assert outcome == "timeout"
     assert elapsed < 3, f"submit overran its 1s timeout by {elapsed:.2f}s"
+
+
+def test_a_url_that_was_never_sent_is_never_reported_as_a_timeout(session):
+    """The quota-charging distinction, pinned.
+
+    submit.py's disposition table charges a Search Console slot for
+    "timeout" (a click plausibly reached Google) and nothing for "error".
+    A URL that never left this machine because no extension ever connected
+    must therefore report "error". Against a per-property budget of about
+    eleven a day, getting this backwards spends real slots on URLs Google
+    never saw.
+    """
+    # The deadline expires while waiting for a connection: the grace period
+    # is deliberately the longer of the two, so this exits via the budget.
+    assert session.submit("sc-domain:example.com", "https://example.com/a",
+                          "0", timeout=1, reconnect_grace=6) == "error"
+    # And the same via the grace period, with the budget intact.
+    assert session.submit("sc-domain:example.com", "https://example.com/a",
+                          "0", timeout=30, reconnect_grace=1) == "error"
+
+
+def test_a_sent_command_whose_verdict_never_arrives_is_a_timeout(session):
+    """The other half of the same distinction: this one DOES spend a slot."""
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+    thread = _responder(conn, lambda c: {"type": "progress", "id": c["id"],
+                                         "stage": "navigating"})
+    assert session.submit("sc-domain:example.com", "https://example.com/a",
+                          "0", timeout=2, reconnect_grace=10) == "timeout"
+    thread.join(SETTLE)
+    conn.close()
 
 
 def test_progress_and_ping_frames_do_not_disturb_an_in_flight_submit(session):

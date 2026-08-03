@@ -169,12 +169,15 @@ class BridgeSession:
         self._stopped = True
         with self._conn_lock:
             conn, self._conn = self._conn, None
+            # Cleared here, not left to the handler: stop() has just nulled
+            # _conn, so the handler's `if self._conn is conn` guard is False
+            # and it will not clear this itself. Without it
+            # wait_for_extension() keeps answering True for a session that
+            # is already shut down. Inside the lock, so a hello completing
+            # right now cannot set _connected and then have it cleared out
+            # from under it.
+            self._connected.clear()
             self._conn_cv.notify_all()
-        # Cleared here, not left to the handler: stop() has just nulled
-        # _conn, so the handler's `if self._conn is conn` guard is False and
-        # it will not clear this itself. Without it wait_for_extension()
-        # keeps answering True for a session that is already shut down.
-        self._connected.clear()
         self._resolve_all("error")
         # The server may not have finished binding yet, in which case
         # self._server is still None and shutdown() would be skipped. A
@@ -195,6 +198,13 @@ class BridgeSession:
         loop returns at once for the current and remaining URLs and unwinds.
         Unlike stop() it does not shut the server down — the owning run's
         teardown does that, which is what frees the port for a fresh run.
+
+        It does, however, end the current CONNECTION. Setting _stopped makes
+        the handler's read loop fall out within a second and websockets
+        closes the socket, so the extension sees a disconnect and starts its
+        reconnect backoff. That is harmless — the server is still listening
+        and it will reattach — but it is visible in the extension's popup as
+        a brief "reconnecting", and it is why cancel() is not a way to pause.
         """
         log.info("bridge: cancel requested — aborting the current run")
         self._stopped = True
@@ -244,8 +254,24 @@ class BridgeSession:
         rather than failing the whole run. A blip pauses one URL; it does
         not end the batch.
 
-        Returns the reported outcome, "timeout" (no result in time), or
-        "error" (no connection came back, or the resends ran out).
+        Returns the reported outcome, or one of two synthesised ones. The
+        distinction between them is load-bearing and NOT cosmetic, because
+        submit.py's disposition table charges a Search Console quota slot
+        for one and not the other:
+
+        * "timeout" — a submit command WAS put on the wire and no verdict
+          came back in time. A click may well have reached Google, so the
+          slot has to be assumed spent.
+        * "error" — nothing was sent at all (no connection was live within
+          `reconnect_grace`, the whole `timeout` expired before one
+          appeared, the resends ran out, or the run was stopped or
+          cancelled). No slot was spent.
+
+        So "timeout" is never returned for a URL that never left this
+        machine: against a per-property budget of roughly eleven a day,
+        charging a slot for a URL Google never saw is a bug the user pays
+        for. Anything that changes these two returns has to change the
+        disposition table with it.
 
         Caveat, deliberate: re-sending can submit the same URL twice in the
         rare case where a click landed in the instant before the drop,
@@ -258,6 +284,10 @@ class BridgeSession:
             self._pending[cmd_id] = waiter
         deadline = time.monotonic() + timeout
         resends = 0
+        # Whether this command ever reached the wire. It is the ONLY thing
+        # that entitles an expiry to report "timeout" rather than "error" —
+        # see the docstring: one spends a quota slot and the other does not.
+        sent = False
         try:
             while True:
                 # `timeout` is the ceiling on the WHOLE call, so the grace
@@ -267,20 +297,19 @@ class BridgeSession:
                 # sit here for eight minutes.
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    log.warning("bridge: no result within %ss", timeout)
-                    return "timeout"
+                    return self._expired(timeout, sent)
                 conn, gen = self._wait_for_conn(min(reconnect_grace, remaining))
                 if conn is None:
                     if self._stopped:
                         return "error"
                     if time.monotonic() >= deadline:
-                        log.warning("bridge: no result within %ss", timeout)
-                        return "timeout"
+                        return self._expired(timeout, sent)
                     log.warning("bridge: no extension connection within %ss "
                                 "— giving up on this URL", reconnect_grace)
                     return "error"
                 try:
                     conn.send(make_submit(cmd_id, gsc_property, url, authuser))
+                    sent = True
                 except Exception as exc:  # noqa: BLE001 — a drop, not a bug
                     log.warning("bridge: send failed (%s); awaiting reconnect",
                                 type(exc).__name__)
@@ -295,8 +324,7 @@ class BridgeSession:
                     if self._stopped:
                         return "error"
                     if time.monotonic() >= deadline:
-                        log.warning("bridge: no result within %ss", timeout)
-                        return "timeout"
+                        return self._expired(timeout, sent)
                     if self._connection_bounced(conn, gen):
                         # The connection this command was sent on is gone, so
                         # the in-page job died with the old worker; re-send
@@ -310,6 +338,16 @@ class BridgeSession:
         finally:
             with self._pending_lock:
                 self._pending.pop(cmd_id, None)
+
+    def _expired(self, timeout: int, sent: bool) -> str:
+        """The `timeout` budget ran out. Which of the two that is depends
+        entirely on whether anything was ever put on the wire."""
+        if sent:
+            log.warning("bridge: no result within %ss", timeout)
+            return "timeout"
+        log.warning("bridge: no extension connection within the %ss budget "
+                    "— nothing was sent for this URL", timeout)
+        return "error"
 
     def _connection_bounced(self, conn: object, gen: int) -> bool:
         """Has the connection a command was sent on gone away?
