@@ -22,7 +22,7 @@ import time
 
 from gsc_core import bridge, config, runlog, store, submit
 
-from . import deps, target
+from . import deps, jobs, target
 
 log = runlog.get(__name__)
 
@@ -47,6 +47,16 @@ _FIX_BAD_CAP = (f"set sync_submit_cap in the config file to a whole number "
                 f"default")
 _FIX_UNEXPECTED = ("check the log file for the failure type, then try again; "
                    "gsc_doctor reports on the setup as a whole")
+_FIX_NO_JOB_URLS = "pass a list of absolute URLs, at least one"
+_FIX_JOB_RUNNING = ("stop it with gsc_stop_job, or wait for it to finish — "
+                    "the bridge drives one browser tab and cannot run two")
+_FIX_NO_JOBS = "start one with gsc_start_indexing_job"
+_FIX_UNKNOWN_JOB = ("call gsc_job_status with no argument for the most "
+                    "recent job")
+
+_NOTE_JOB_QUEUED = "poll gsc_job_status for progress"
+_NOTE_JOB_STOPPING = "stopping after the URL in flight"
+_NOTE_JOB_FINISHED = "that job had already finished"
 
 # Two loop-level results have no disposition and never reach the wire, and
 # collapsing them into a single "skipped" count would hide that they are
@@ -113,14 +123,20 @@ def _refuse(error: str, detail: str, fix: str) -> dict:
     return {"ok": False, "error": error, "detail": detail, "fix": fix}
 
 
-def _notes(result: submit.RunResult) -> list[str]:
-    outcomes = {attempt.outcome for attempt in result.attempts}
+def _notes_for(outcomes: set[str | None]) -> list[str]:
+    """The guidance a set of outcomes earns. Additive: never a replacement
+    for the counts, because a note explains a number rather than standing
+    in for one."""
     notes = []
     if "no_property" in outcomes:
         notes.append(_NOTE_NO_PROPERTY)
     if "no_quota" in outcomes:
         notes.append(_NOTE_NO_QUOTA)
     return notes
+
+
+def _notes(result: submit.RunResult) -> list[str]:
+    return _notes_for({attempt.outcome for attempt in result.attempts})
 
 
 def _tally(result: submit.RunResult) -> dict:
@@ -212,3 +228,115 @@ def _request_indexing(urls: list[str]) -> dict:
             return _refuse("extension_not_connected", str(exc),
                            _FIX_NO_EXTENSION)
     return _tally(result)
+
+
+# --- the job trio ------------------------------------------------------------
+#
+# The asynchronous half of the same machinery. request_indexing above is
+# capped at five URLs because it blocks for one 130-180 second gap per URL;
+# these three exist so a run of any size can proceed without a client
+# sitting on a stalled call for hours.
+
+
+def start_indexing_job(urls: list[str]) -> dict:
+    """Queue a background submission run over any number of URLs.
+
+    Returns as soon as the job row exists. No cap: the whole point of a job
+    is that nobody is waiting on it.
+    """
+    try:
+        if not urls:
+            return _refuse("no_urls", "no URLs were given", _FIX_NO_JOB_URLS)
+
+        # Checked here rather than left to the run: with no properties every
+        # URL would report no_property, so the job would open a browser, a
+        # bridge and a socket to produce a list of misses. Refusing costs
+        # nothing and says the same thing sooner.
+        with deps.connection() as conn:
+            if not _properties(conn):
+                return _refuse("no_properties",
+                               "no Search Console properties are known yet",
+                               _FIX_NO_PROPERTIES)
+
+        job_id = jobs.start(urls, config.load())
+        return {"ok": True, "job_id": job_id, "total": len(urls),
+                "note": _NOTE_JOB_QUEUED}
+    except jobs.AlreadyRunning as exc:
+        # The one message repeated here, like _request_indexing's single
+        # exemption: it is authored in jobs.start(), it names the running
+        # job id and nothing else, and without that id "stop it" is not
+        # something the caller can act on.
+        return _refuse("job_already_running", str(exc), _FIX_JOB_RUNNING)
+    except Exception as exc:  # noqa: BLE001 — a tool never raises
+        log.warning("gsc_start_indexing_job: unexpected %s",
+                    type(exc).__name__)
+        return _refuse("unexpected", type(exc).__name__, _FIX_UNEXPECTED)
+
+
+def job_status(job_id: str | None = None) -> dict:
+    """One job's state and progress; the most recent when no id is given.
+
+    ok is about the CALL, not about the job: a failed job is reported as a
+    successful status read whose state is "failed".
+    """
+    try:
+        with deps.connection() as conn:
+            if job_id is None:
+                known = store.list_jobs(conn)
+                if not known:
+                    return _refuse("no_jobs",
+                                   "no submission job has run yet",
+                                   _FIX_NO_JOBS)
+                job = known[-1]        # list_jobs orders by started_at
+            else:
+                job = store.get_job(conn, job_id)
+                if job is None:
+                    return _refuse("unknown_job", "no job with that id",
+                                   _FIX_UNKNOWN_JOB)
+
+        progress = job.get("progress") or {}
+        results = progress.get("results", [])
+        return {"ok": True, "job_id": job["id"], "state": job["state"],
+                "done": progress.get("done", 0),
+                "total": progress.get("total", 0),
+                # Kept apart rather than counted together: no_property and
+                # no_quota are different problems with different fixes.
+                "notes": _notes_for({row.get("outcome") for row in results}),
+                "results": results,
+                "started_at": job.get("started_at"),
+                "finished_at": job.get("finished_at"),
+                "error": job.get("error"),
+                # The row alone cannot tell a live job from one whose worker
+                # died; only the registry knows, until the next startup
+                # reconcile catches up.
+                "live": jobs.is_running(job["id"])}
+    except Exception as exc:  # noqa: BLE001 — a tool never raises
+        log.warning("gsc_job_status: unexpected %s", type(exc).__name__)
+        return _refuse("unexpected", type(exc).__name__, _FIX_UNEXPECTED)
+
+
+def stop_job(job_id: str) -> dict:
+    """Ask a running job to stop after the URL it is on.
+
+    Not mid-URL: a submission already sent has spent its slot, and its row
+    must settle with the real outcome rather than be abandoned blind. The
+    signal still lands within the pacing gap rather than after it, so no
+    further slot is reserved.
+    """
+    try:
+        if jobs.stop(job_id):
+            return {"ok": True, "job_id": job_id,
+                    "note": _NOTE_JOB_STOPPING}
+
+        with deps.connection() as conn:
+            job = store.get_job(conn, job_id)
+        if job is None:
+            return _refuse("unknown_job", "no job with that id",
+                           _FIX_UNKNOWN_JOB)
+        # Already finished is not a failure: the caller wanted it stopped
+        # and it is stopped. Refusing here would read as "still running".
+        return {"ok": True, "job_id": job_id, "state": job["state"],
+                "note": _NOTE_JOB_FINISHED}
+    except Exception as exc:  # noqa: BLE001 — a tool never raises
+        log.warning("gsc_stop_job: unexpected %s", type(exc).__name__)
+        return _refuse("unexpected", type(exc).__name__, _FIX_UNEXPECTED)
