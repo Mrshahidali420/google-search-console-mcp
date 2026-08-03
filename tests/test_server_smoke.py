@@ -27,12 +27,10 @@ EXPECTED = {
     "gsc_list_sites", "gsc_doctor", "gsc_check_status",
     "gsc_quota", "gsc_performance", "gsc_submit_sitemaps",
     "gsc_detect_browsers", "gsc_setup",
+    # Plan 3, browser-driven submission — registered in its final task.
+    "gsc_request_indexing", "gsc_start_indexing_job",
+    "gsc_job_status", "gsc_stop_job",
 }
-
-# Belong to Plan 3 (browser-driven submission) or Plan 4 (bulk auditing) —
-# see the task brief's "Out of scope" list. Neither exists yet; if either
-# name shows up here, something leaked ahead of its own plan.
-NOT_YET_SHIPPED = {"gsc_request_indexing", "gsc_start_indexing_job"}
 
 
 async def _list_tools_over_the_wire() -> list[types.Tool]:
@@ -50,18 +48,10 @@ def test_every_tool_is_registered_and_described(tmp_path, monkeypatch):
     # Equality, not a subset check: the claim this test makes is "exactly
     # these tools ship". A subset check (EXPECTED <= names) would pass
     # even if a seventh, unplanned tool were accidentally registered under
-    # any name that isn't already listed in NOT_YET_SHIPPED below.
+    # any name — including one from a later plan that leaked in early.
     assert names == EXPECTED
     for tool in tools:
         assert tool.description, f"{tool.name} has no description"
-
-
-def test_no_milestone_three_tools_leaked_in(tmp_path, monkeypatch):
-    """Submission tools belong to Plan 3 and must not appear yet."""
-    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
-    tools = asyncio.run(_list_tools_over_the_wire())
-    names = {tool.name for tool in tools}
-    assert not (names & NOT_YET_SHIPPED)
 
 
 def test_no_tool_description_names_a_tool_that_does_not_exist(tmp_path,
@@ -92,4 +82,3 @@ def test_no_tool_description_names_a_tool_that_does_not_exist(tmp_path,
         assert not unknown, (
             f"{tool.name}'s description names {sorted(unknown)}, which "
             f"no registered tool provides")
-        assert not (mentioned & NOT_YET_SHIPPED)

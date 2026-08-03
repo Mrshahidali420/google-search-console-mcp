@@ -60,6 +60,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -406,3 +407,84 @@ def _read_json(path: Path) -> tuple[object | None, bool]:
     except (ValueError, RecursionError) as exc:
         log.debug("preferences unparsable (%s)", type(exc).__name__)
         return None, False
+
+
+# ---------------------------------------------------------------------------
+# Pairing
+# ---------------------------------------------------------------------------
+
+def verify_pair_request(installed: browsers.Installed,
+                        profile: profiles.Profile,
+                        claimed_id: str,
+                        origin: str | None) -> tuple[bool, str]:
+    """May the bridge hand its token to a client claiming to be our extension?
+
+    Returns (allowed, reason); the reason is shown to the user either way,
+    so a refusal always says what to do about it.
+
+    This is NOT trust-on-first-use. The browser profile records the ID
+    Chromium assigned to the unpacked extension loaded from OUR directory,
+    so the claim is checked against a fact we can read rather than against
+    whoever knocked first. A local process wanting the token would already
+    need read access to the browser profile — at which point it holds the
+    Google session cookies too, and the token buys it nothing.
+    """
+    if not EXTENSION_ID_RE.match(claimed_id or ""):
+        return False, "malformed extension id"
+    if origin and origin != f"chrome-extension://{claimed_id}":
+        return False, f"Origin {origin} does not match the claimed extension id"
+
+    real = look_up_extension(installed, profile).extension_id
+    if not real:
+        return False, (
+            f"no extension is loaded from {extension_dir()} in "
+            f"{installed.brand.label} — open {installed.brand.extensions_url}, "
+            "turn on Developer mode, and Load unpacked from that directory"
+        )
+    if real != claimed_id:
+        return False, (
+            f"that is not the extension installed from {extension_dir()} "
+            f"(this browser profile has {real})"
+        )
+    return True, "verified against the browser profile"
+
+
+def wake_url(ext_id: str) -> str:
+    """A page inside the extension. Opening it starts an evicted MV3 service
+    worker, which is how we ask a sleeping extension to come and connect."""
+    return f"chrome-extension://{ext_id}/connect.html"
+
+
+def wake(installed: browsers.Installed, profile: profiles.Profile) -> dict:
+    """Nudge the extension awake by opening one of its own pages. Never raises.
+
+    MV3 kills an idle service worker after ~30s and the cheapest legal way
+    back is an alarm, whose floor is also 30s. That gap is the whole delay
+    between "the bridge started listening" and "the extension noticed".
+    Opening an extension page boots the worker at once; connect.js closes
+    the tab again, so the poke leaves nothing behind.
+    """
+    result: dict = {"ok": False, "browser": installed.brand.label}
+    ext_id = look_up_extension(installed, profile).extension_id
+    if not ext_id:
+        result["hint"] = f"extension not loaded in {installed.brand.label}"
+        return result
+    result["extension_id"] = ext_id
+    result["url"] = wake_url(ext_id)
+    try:
+        subprocess.Popen(
+            [installed.exe_path, result["url"]],
+            creationflags=(getattr(subprocess, "DETACHED_PROCESS", 0)
+                           | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)),
+            close_fds=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed poke is never fatal
+        # The exception TYPE only: an OSError message carries a filesystem
+        # path containing the user's account name, and this hint is shown.
+        log.warning("could not wake the extension (%s)", type(exc).__name__)
+        result["hint"] = (f"could not launch {installed.brand.label} "
+                          f"({type(exc).__name__})")
+        return result
+    result["ok"] = True
+    return result

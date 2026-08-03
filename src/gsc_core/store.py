@@ -569,20 +569,28 @@ def _job_row(row: sqlite3.Row) -> dict:
     return job
 
 
+#: The two states that only a live worker inside THIS process can move on.
+#: A row is created pending and its worker flips it to running moments
+#: later; a crash in either state leaves a row nothing will ever advance.
+#: Every other state is settled and must not be touched.
+UNSETTLED_JOB_STATES = ("pending", "running")
+
+
 def reconcile_jobs(conn: sqlite3.Connection, *,
                    error: str = "interrupted by restart") -> int:
-    """Fail jobs that a crash or restart left marked running.
+    """Fail jobs that a crash or restart left unsettled.
 
-    A running job implies a live worker inside this process. After a restart
-    there is none, so any row still marked running is orphaned and will never
+    A pending or running job implies a live worker inside this process.
+    After a restart there is none, so such a row is orphaned and will never
     progress. Call once at startup, before accepting new work.
 
     Returns how many were reconciled.
     """
-    orphans = list_jobs(conn, state="running")
+    orphans = [job for state in UNSETTLED_JOB_STATES
+               for job in list_jobs(conn, state=state)]
     for job in orphans:
         update_job(conn, job["id"], state="failed", error=error)
     if orphans:
-        log.warning("reconciled %d job(s) left running by a restart",
+        log.warning("reconciled %d job(s) left unsettled by a restart",
                     len(orphans))
     return len(orphans)

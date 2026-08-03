@@ -38,7 +38,8 @@ runlog.init()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliberate
 
-from . import deps, onboarding, tools_browsers  # noqa: E402 — import order is deliberate
+# noqa: E402 on the import below — import order is deliberate, see above.
+from . import deps, onboarding, tools_browsers, tools_submit  # noqa: E402
 
 log = runlog.get(__name__)
 
@@ -960,9 +961,84 @@ def gsc_setup(open_browser: bool = True) -> dict:
     return onboarding.setup(open_browser)
 
 
+@mcp.tool()
+def gsc_request_indexing(urls: list[str]) -> dict:
+    """Submit up to five URLs to Google's Request Indexing, one at a time,
+    through the browser extension in your own signed-in profile.
+
+    BLOCKING and slow by design: submissions are paced 130-180 seconds
+    apart, so five URLs can take fifteen minutes. Use
+    gsc_start_indexing_job for anything larger.
+
+    Quota is per property — roughly eleven slots per property on a rolling
+    24-hour window, and properties are independent. Call gsc_quota first to
+    see what is spendable; act on `spendable_free`, not `free`.
+
+    Returns `{"ok", "submitted", "skipped", "failed", "stopped_early",
+    "stop_reason", "notes", "results"}`, with one entry per URL in
+    `results`. A run stops early on the first throttle, captcha, or
+    signed-out session rather than burning the rest of the batch against a
+    refusing server. A refusal is `{"ok": False, "error", "detail", "fix"}`.
+    """
+    return tools_submit.request_indexing(urls)
+
+
+@mcp.tool()
+def gsc_start_indexing_job(urls: list[str]) -> dict:
+    """Queue a background submission run over any number of URLs.
+
+    Returns immediately with `{"ok", "job_id", "total", "note"}`. Poll
+    gsc_job_status for progress and gsc_stop_job to end it early. One
+    submission job runs at a time: the bridge drives a single browser tab
+    in your real profile, so a second job is refused rather than queued.
+    """
+    return tools_submit.start_indexing_job(urls)
+
+
+@mcp.tool()
+def gsc_job_status(job_id: str | None = None) -> dict:
+    """Progress and state for one submission job, or the most recent one.
+
+    States: pending, running, completed, stopped_user, stopped_throttled,
+    failed. `results` holds one entry per URL attempted so far, and `live`
+    says whether a worker is still on it in this process.
+    """
+    return tools_submit.job_status(job_id)
+
+
+@mcp.tool()
+def gsc_stop_job(job_id: str) -> dict:
+    """Ask a running submission job to stop.
+
+    It stops after the URL currently in flight, never mid-URL: a
+    submission already sent has spent its quota slot and its ledger row
+    must settle with the real outcome.
+    """
+    return tools_submit.stop_job(job_id)
+
+
+def _reconcile_at_startup() -> None:
+    """Close out what a crash or restart left dangling.
+
+    A job row marked pending or running implies a live worker thread inside
+    this process; after a restart there is none, so it would sit unsettled
+    forever. Open submission rows are swept by store.reconcile() on the
+    same principle — each one holds a quota slot that never settles.
+    """
+    try:
+        with store.session() as conn:
+            store.reconcile_jobs(conn)
+            store.reconcile(conn)
+    except Exception as exc:  # noqa: BLE001 — never block startup
+        # Type name only: an unauthored message can carry a filesystem path
+        # holding the operator's account name, and log files get shipped.
+        log.warning("startup reconciliation skipped (%s)", type(exc).__name__)
+
+
 def main() -> None:
     """Entry point for the `gsc-mcp` console script. Runs until the client
     disconnects; communicates over stdio per the MCP transport default."""
+    _reconcile_at_startup()
     mcp.run()
 
 

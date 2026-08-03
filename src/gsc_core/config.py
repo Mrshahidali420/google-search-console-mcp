@@ -35,6 +35,12 @@ DEFAULTS: dict = {
     # Behaviour
     "stop_on_throttle": True,
     "sync_submit_cap": 5,
+
+    # Bridge
+    "bridge_port": 8765,         # localhost only; the extension defaults to this
+    "authuser": "0",             # the /u/N index of the Google account in GSC
+    "auto_launch_browser": True,
+    "bridge_connect_timeout": 60,  # seconds to wait for the extension to appear
 }
 
 
@@ -130,5 +136,26 @@ def validate(data: dict) -> list[str]:
 
     if not isinstance(data.get("stop_on_throttle"), bool):
         problems.append("stop_on_throttle must be true or false")
+
+    # bool subclasses int, so it is excluded explicitly throughout: `true` would
+    # otherwise sail through as 1 for the timeout.
+    port = data.get("bridge_port")
+    if (not isinstance(port, int) or isinstance(port, bool)
+            or not 1024 <= port <= 65535):
+        problems.append("bridge_port must be an integer from 1024 to 65535")
+
+    authuser = data.get("authuser")
+    if not isinstance(authuser, str) or not authuser.isdigit():
+        problems.append(
+            "authuser must be a digit string — the /u/N index Search Console "
+            'uses for the signed-in account, e.g. "0"'
+        )
+
+    if not isinstance(data.get("auto_launch_browser"), bool):
+        problems.append("auto_launch_browser must be true or false")
+
+    timeout = data.get("bridge_connect_timeout")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        problems.append("bridge_connect_timeout must be a positive integer")
 
     return problems
