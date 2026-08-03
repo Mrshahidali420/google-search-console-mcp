@@ -21,7 +21,7 @@ from contextlib import contextmanager
 import pytest
 
 from _logcheck import capturing
-from gsc_core import browsers, config, paths, profiles, store, submit
+from gsc_core import bridge, browsers, config, paths, profiles, store, submit
 from gsc_mcp import target, tools_submit
 
 PROPERTY = "sc-domain:example.com"
@@ -182,6 +182,33 @@ def test_config_may_not_raise_the_cap_above_the_hard_ceiling(monkeypatch,
     assert tools_submit.HARD_SYNC_CAP == 5
 
 
+@pytest.mark.parametrize("configured", [0, -1])
+def test_a_nonsense_cap_still_lets_one_url_through(monkeypatch, store_conn,
+                                                   configured):
+    """config.load() does not run validate(), so 0 reaches this code.
+
+    A cap of zero would refuse every call with "takes at most 0", which
+    reads as a broken tool rather than as a configuration mistake.
+    """
+    _seed_site(store_conn)
+    paths.config_path().write_text(json.dumps({"sync_submit_cap": configured}),
+                                   encoding="utf-8")
+    _ready(monkeypatch, ["submitted"])
+    assert tools_submit.request_indexing(["https://example.com/a"])["ok"] is True
+
+
+def test_a_cap_that_is_not_a_number_says_so_instead_of_failing_generically(
+        monkeypatch, store_conn):
+    _seed_site(store_conn)
+    paths.config_path().write_text(json.dumps({"sync_submit_cap": None}),
+                                   encoding="utf-8")
+    monkeypatch.setattr(tools_submit.target, "resolve", _boom)
+    result = tools_submit.request_indexing(["https://example.com/a"])
+    assert result["ok"] is False
+    assert result["error"] == "bad_config"
+    assert "sync_submit_cap" in result["fix"]
+
+
 def test_an_empty_url_list_is_refused(monkeypatch, store_conn):
     monkeypatch.setattr(tools_submit.target, "resolve", _boom)
     result = tools_submit.request_indexing([])
@@ -210,21 +237,76 @@ def test_no_known_properties_is_its_own_error(monkeypatch, store_conn):
     assert result["error"] == "no_properties"
 
 
+def _raising_session(exc: BaseException):
+    @contextmanager
+    def refuses(chosen, cfg):
+        raise exc
+        yield  # pragma: no cover
+
+    return refuses
+
+
 def test_an_extension_that_never_connects_is_a_clean_error(monkeypatch,
                                                            store_conn):
     _seed_site(store_conn)
     monkeypatch.setattr(tools_submit.target, "resolve", lambda *a, **k: _target())
-
-    @contextmanager
-    def refuses(chosen, cfg):
-        raise RuntimeError("the extension never connected")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(tools_submit.bridge, "bridge_session", refuses)
+    monkeypatch.setattr(tools_submit.bridge, "bridge_session",
+                        _raising_session(bridge.ExtensionNotConnected(
+                            "the extension never connected")))
     result = tools_submit.request_indexing(["https://example.com/a"])
     assert result["ok"] is False
+    assert result["error"] == "extension_not_connected"
     assert "extension" in result["detail"]
     assert _count(store_conn, "submissions") == 0
+
+
+def test_only_the_dedicated_bridge_failure_gets_its_message_repeated(
+        monkeypatch, store_conn):
+    """The str(exc) exemption is scoped to ONE exception type we author.
+
+    bridge.load_or_create_token raises a plain RuntimeError for a different
+    problem entirely, and a plain RuntimeError is also what any future
+    change might start raising with a filesystem path in it.
+    """
+    _seed_site(store_conn)
+    monkeypatch.setattr(tools_submit.target, "resolve", lambda *a, **k: _target())
+    monkeypatch.setattr(tools_submit.bridge, "bridge_session",
+                        _raising_session(RuntimeError(
+                            f"could not save the token under {PROFILE_PATH}")))
+    result = tools_submit.request_indexing(["https://example.com/a"])
+    assert result["error"] != "extension_not_connected"
+    assert result["detail"] == "RuntimeError"
+    assert "secret-operator" not in json.dumps(result)
+
+
+def test_a_failure_inside_the_run_is_never_mistaken_for_a_bridge_failure(
+        monkeypatch, store_conn):
+    """The exemption must not cover the run body.
+
+    A RuntimeError out of submit.run is not a bridge problem, and its
+    message is not one this project wrote — so neither the label nor the
+    text may be reused. Unreachable today only because submit.run swallows
+    sender exceptions; that is luck, and this pins the structure instead.
+    """
+    _seed_site(store_conn)
+    _ready(monkeypatch, [])
+
+    def explode(*args, **kwargs):
+        raise RuntimeError(f"lost the socket at {PROFILE_PATH} ({PROFILE_EMAIL})")
+
+    monkeypatch.setattr(tools_submit.submit, "run", explode)
+    with capturing(tools_submit.log) as records:
+        result = tools_submit.request_indexing(["https://example.com/a"])
+
+    assert result["ok"] is False
+    assert result["error"] == "unexpected"
+    assert result["error"] != "extension_not_connected"
+    assert result["detail"] == "RuntimeError"
+    blob = json.dumps(result)
+    assert "secret-operator" not in blob
+    assert PROFILE_EMAIL not in blob
+    assert "socket" not in blob
+    records.assert_says_nothing_identifying("secret-operator", "lost the socket")
 
 
 def test_an_unexpected_failure_returns_the_type_name_and_nothing_else(

@@ -42,6 +42,22 @@ from . import pairing, paths, runlog
 
 log = runlog.get(__name__)
 
+
+class ExtensionNotConnected(RuntimeError):
+    """The extension never answered, and this is the message to show for it.
+
+    A distinct type because a calling tool REPEATS this message to its
+    caller, and an MCP result travels to a client this project does not
+    control. That is only safe for a message this project writes itself —
+    this one names a browser brand and nothing else. Every other
+    RuntimeError reaching a tool must be reported by type name alone,
+    which a tool cannot do if it has to guess from the text which kind it
+    caught.
+
+    Subclasses RuntimeError so existing callers catching the broad type
+    keep working.
+    """
+
 # The EXACT result vocabulary submit.py consumes. Anything else off the wire
 # is coerced to "error" — the bridge never invents a status. "skipped" is in
 # here because content.js emits it (probe-only runs, an aborted job); the
@@ -579,8 +595,12 @@ def ensure_browser_open(target: object, *, auto_launch: bool) -> bool:
 def bridge_session(target: object, cfg: dict) -> Iterator[BridgeSession]:
     """Start the bridge, wait for the extension, yield the session, always stop.
 
-    Raises RuntimeError if the extension never connects, which the calling
-    tool surfaces as a clean run error rather than a stack trace.
+    Raises ExtensionNotConnected if the extension never connects, which the
+    calling tool surfaces as a clean run error rather than a stack trace.
+    That type is what makes repeating the message to an MCP client safe;
+    the other RuntimeError this path can raise (an unwritable config
+    directory, from load_or_create_token) is deliberately left as the plain
+    type so a tool reports it by name instead.
     """
     launched = ensure_browser_open(
         target, auto_launch=cfg.get("auto_launch_browser", True))
@@ -608,7 +628,7 @@ def bridge_session(target: object, cfg: dict) -> Iterator[BridgeSession]:
                      "waking it via its own page" if poke.get("ok")
                      else f"could not wake it: {poke.get('hint')}")
             if not session.wait_for_extension(max(total_wait - first_wait, 15)):
-                raise RuntimeError(
+                raise ExtensionNotConnected(
                     f"the extension never connected — open "
                     f"{target.installed.brand.label} with the GSC MCP Bridge "
                     "extension enabled, then try again")

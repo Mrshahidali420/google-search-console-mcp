@@ -646,3 +646,9 @@ def test_bridge_session_raises_a_readable_error_when_nothing_connects(monkeypatc
             pass
     assert "never connected" in str(excinfo.value)
     assert TOKEN not in str(excinfo.value)
+    # A dedicated type, not a bare RuntimeError: a tool repeats this
+    # message to its caller, and it may only do that for the one failure
+    # whose text this project writes. A subclass of RuntimeError so that
+    # callers catching the broad type keep working.
+    assert isinstance(excinfo.value, bridge.ExtensionNotConnected)
+    assert issubclass(bridge.ExtensionNotConnected, RuntimeError)

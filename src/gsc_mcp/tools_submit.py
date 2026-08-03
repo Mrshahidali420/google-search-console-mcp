@@ -42,6 +42,9 @@ _FIX_NO_PROPERTIES = ("run gsc_list_sites first — a URL can only be "
                       "submitted through a property that covers it")
 _FIX_NO_EXTENSION = ("open the browser and load the GSC MCP Bridge extension; "
                      "gsc_doctor reports where it should be loaded from")
+_FIX_BAD_CAP = (f"set sync_submit_cap in the config file to a whole number "
+                f"between 1 and {HARD_SYNC_CAP}, or remove it to use the "
+                f"default")
 _FIX_UNEXPECTED = ("check the log file for the failure type, then try again; "
                    "gsc_doctor reports on the setup as a whole")
 
@@ -80,6 +83,30 @@ def _account() -> str:
 def _properties(conn: sqlite3.Connection) -> list[str]:
     """Every property the local store knows about, for routing."""
     return [site["property"] for site in store.get_sites(conn)]
+
+
+def _cap(cfg: dict) -> int | None:
+    """How many URLs this call may carry, or None if the config is unusable.
+
+    config.load() layers a user file over the defaults WITHOUT running
+    validate(), so anything JSON can hold arrives here. Two guards:
+
+    * the ceiling can only come DOWN — min() against HARD_SYNC_CAP, because
+      a blocking tool that waits half an hour is a hung client;
+    * and it cannot come down to nothing — max(1, ...), because a cap of 0
+      or -1 would refuse every call with "takes at most 0", which reads as
+      a broken tool rather than as a typo in a config file.
+
+    None is reserved for a value that is not a number at all (null, a
+    string, a list). That earns a named refusal naming the setting, rather
+    than a TypeError surfacing as a generic "unexpected".
+    """
+    raw = cfg.get("sync_submit_cap", HARD_SYNC_CAP)
+    try:
+        configured = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(configured, HARD_SYNC_CAP))
 
 
 def _refuse(error: str, detail: str, fix: str) -> dict:
@@ -136,7 +163,10 @@ def request_indexing(urls: list[str]) -> dict:
 
 def _request_indexing(urls: list[str]) -> dict:
     cfg = config.load()
-    cap = min(int(cfg.get("sync_submit_cap", HARD_SYNC_CAP)), HARD_SYNC_CAP)
+    cap = _cap(cfg)
+    if cap is None:
+        return _refuse("bad_config",
+                       "sync_submit_cap is not a whole number", _FIX_BAD_CAP)
     if not urls:
         return _refuse("no_urls", "no URLs were given", _FIX_NO_URLS)
     if len(urls) > cap:
@@ -168,13 +198,16 @@ def _request_indexing(urls: list[str]) -> dict:
                                     properties=properties,
                                     account=_account(), job_id=None, cfg=cfg,
                                     sleep=time.sleep)
-        except RuntimeError as exc:
-            # bridge_session raises this when the extension never connects,
-            # and load_or_create_token when the config directory is not
-            # writable. Both messages are written by this project and carry
-            # no path and no token, which is why str(exc) is safe HERE and
-            # nowhere else — do not extend it to exceptions we did not
-            # author. Anything else falls through to request_indexing's
+        except bridge.ExtensionNotConnected as exc:
+            # The ONLY place in this module that repeats an exception's
+            # message. Scoped to one exception type this project raises,
+            # whose text names a browser brand and nothing else — not to
+            # RuntimeError, which would also catch anything the run body
+            # raises and hand its unauthored message (a filesystem path
+            # holding the operator's account name, say) to an MCP client.
+            # Do not widen it. Everything else, including the plain
+            # RuntimeError load_or_create_token raises for an unwritable
+            # config directory, falls through to request_indexing's
             # type-name-only handler.
             return _refuse("extension_not_connected", str(exc),
                            _FIX_NO_EXTENSION)
