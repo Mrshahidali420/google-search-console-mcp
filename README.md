@@ -76,7 +76,7 @@ Google has no API for Request Indexing that a tool like this can use, so submiss
 
 **Quota is per property and small.** Roughly eleven slots per property, on a rolling 24-hour window — each slot frees 24 hours and a minute after its own use, not at midnight. Properties are independent budgets. Call `gsc_quota` first and act on `spendable_free`, not `free`: `spendable_free` subtracts the `daily_reserve` you set aside in config. A spent slot is unrecoverable; there is no undo.
 
-**One job at a time.** The bridge drives a single browser tab in your real profile, so a second `gsc_start_indexing_job` while one is running is refused outright rather than queued.
+**One run at a time.** The bridge drives a single browser tab in your real profile and listens on one fixed local port, so a second run while one is going is refused outright rather than queued. That covers both directions: `gsc_start_indexing_job` while a job or a `gsc_request_indexing` call is in flight, and `gsc_request_indexing` while a job is running.
 
 ### Which tool
 

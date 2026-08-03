@@ -16,13 +16,14 @@ letting submit.run bind the real one as a default argument.
 from __future__ import annotations
 
 import json
+import threading
 from contextlib import contextmanager
 
 import pytest
 
 from _logcheck import capturing
 from gsc_core import bridge, browsers, config, paths, profiles, store, submit
-from gsc_mcp import target, tools_submit
+from gsc_mcp import jobs, target, tools_submit
 
 PROPERTY = "sc-domain:example.com"
 
@@ -237,6 +238,69 @@ def test_an_empty_url_list_is_refused(monkeypatch, store_conn):
     result = tools_submit.request_indexing([])
     assert result["ok"] is False
     assert result["fix"]
+
+
+# --- one run at a time -------------------------------------------------------
+
+def test_a_sync_call_is_refused_while_a_background_job_holds_the_bridge(
+        monkeypatch, store_conn):
+    """Both entry points drive one browser tab through one fixed port.
+
+    Allowed to proceed, this call would bind a port the job already holds —
+    inside a daemon thread where the OSError is invisible — then sit out its
+    whole connect timeout and blame the extension. The refusal has to be
+    immediate and free: no browser resolved, no bridge opened, no slot spent.
+    """
+    _seed_site(store_conn)
+    running = threading.Event()
+    finish = threading.Event()
+
+    def blocking(conn, job_id, urls, cfg, stop_event, on_progress):
+        running.set()
+        assert finish.wait(10), "the job was never released"
+        return submit.RunResult([], True, "stopped_by_user")
+
+    monkeypatch.setattr(jobs, "_execute", blocking)
+    job_id = jobs.start(["https://example.com/job"], {})
+    try:
+        assert running.wait(10), "the job never started"
+        monkeypatch.setattr(tools_submit.target, "resolve", _boom)
+        monkeypatch.setattr(tools_submit.bridge, "bridge_session", _boom)
+
+        result = tools_submit.request_indexing(["https://example.com/a"])
+
+        assert result["ok"] is False
+        assert result["error"] == "job_already_running"
+        assert job_id in result["detail"]
+        assert result["fix"]
+        assert _count(store_conn, "submissions") == 0
+        assert _count(store_conn, "quota_slots") == 0
+    finally:
+        finish.set()
+        jobs.stop(job_id)
+        assert jobs.join(job_id, timeout=10)
+        jobs._threads.clear()
+        jobs._stop_events.clear()
+        jobs._holder = None
+
+
+def test_the_sync_call_gives_the_bridge_back_when_it_is_done(monkeypatch,
+                                                             store_conn):
+    """Otherwise the first submission of the session would be the last."""
+    _seed_site(store_conn)
+    _ready(monkeypatch, ["submitted"])
+    assert tools_submit.request_indexing(["https://example.com/a"])["ok"] is True
+    assert jobs._holder is None
+
+
+def test_the_bridge_is_given_back_even_when_the_run_fails(monkeypatch,
+                                                          store_conn):
+    _seed_site(store_conn)
+    monkeypatch.setattr(tools_submit.target, "resolve", lambda *a, **k: _target())
+    monkeypatch.setattr(tools_submit.bridge, "bridge_session",
+                        _raising_session(RuntimeError("/home/someone/thing")))
+    assert tools_submit.request_indexing(["https://example.com/a"])["ok"] is False
+    assert jobs._holder is None
 
 
 # --- setup failures ----------------------------------------------------------

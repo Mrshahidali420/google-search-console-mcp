@@ -3,10 +3,18 @@ database connection.
 
 ONE AT A TIME is not a simplification. The bridge binds a fixed localhost
 port and drives a single browser tab in the user's real profile; two
-concurrent jobs would fight over both, and their quota reservations would
+concurrent runs would fight over both, and their quota reservations would
 serialise into each other's BEGIN IMMEDIATE for hours. The guard is taken
 under a lock that also covers the row insert, so two callers racing into
 start() cannot both come out of it with a job.
+
+The guard covers BOTH entry points, not just jobs. gsc_request_indexing
+runs the same machinery synchronously, and a second bind of the fixed port
+fails inside a daemon thread where nothing can catch it: the caller waits
+out its whole connect timeout and is then told the extension is not
+connected, about an extension that is loaded and working. So a synchronous
+run claims the same flag a job does (claim_bridge), and either one refuses
+while the other holds it.
 
 PRIVACY. A job's `error` column is written to disk AND handed back by
 gsc_job_status, so it carries the exception TYPE NAME and nothing else: an
@@ -19,7 +27,8 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 from gsc_core import bridge, runlog, store, submit
 
@@ -54,6 +63,97 @@ _lock = threading.Lock()
 _stop_events: dict[str, threading.Event] = {}
 _threads: dict[str, threading.Thread] = {}
 
+#: The holder name a synchronous gsc_request_indexing call claims under.
+#: Not a job id and never collides with one: job ids are uuid4 hex.
+_SYNC = "sync"
+
+#: Who holds the bridge right now — a job id, _SYNC, or None. Read and
+#: written ONLY under _lock, and only through the four helpers below.
+_holder: str | None = None
+
+
+def _busy_message(holder: str) -> str:
+    """Why a caller was refused. Authored here, in full.
+
+    This string is the one thing about the refusal that reaches an MCP
+    client, so it is written rather than borrowed from an exception: a job
+    id is the only identifier in it, and a job id names nobody.
+    """
+    if holder == _SYNC:
+        return ("a gsc_request_indexing call is still running; wait for it "
+                "to finish — the bridge drives one browser tab and cannot "
+                "run two")
+    return (f"submission job {holder} is still running; stop it with "
+            "gsc_stop_job or wait for it to finish")
+
+
+def _current_holder() -> str | None:
+    """Who holds the bridge, with a dead job's stale claim dropped.
+
+    Caller MUST hold _lock. A worker releases its own claim in a finally,
+    so the only way a job's claim outlives its worker is a failure severe
+    enough to skip that finally. Re-deriving liveness from the thread here,
+    rather than trusting the flag alone, means such a failure costs one
+    refusal instead of every submission until the process restarts.
+
+    A synchronous claim has no thread to check: it is released in the
+    contextmanager's finally, which runs for a return, an exception and a
+    stop alike.
+    """
+    global _holder
+    if _holder is not None and _holder != _SYNC:
+        thread = _threads.get(_holder)
+        if thread is None or not thread.is_alive():
+            _holder = None
+    return _holder
+
+
+def _claim(holder: str) -> None:
+    """Take the bridge for `holder`, or raise. Caller MUST hold _lock.
+
+    Test-and-set in one lock hold, never check-then-act: two callers that
+    each looked and then each took would both drive the one browser tab.
+    """
+    global _holder
+    current = _current_holder()
+    if current is not None:
+        raise AlreadyRunning(_busy_message(current))
+    _holder = holder
+
+
+def _release_locked(holder: str) -> None:
+    """Give the bridge back, if this holder still has it. Caller holds _lock.
+
+    Conditional on purpose: a stale claim already reclaimed by
+    _current_holder may since have been taken by someone else, and an
+    unconditional clear would hand two callers the port at once.
+    """
+    global _holder
+    if _holder == holder:
+        _holder = None
+
+
+def _release(holder: str) -> None:
+    """_release_locked, taking the lock itself."""
+    with _lock:
+        _release_locked(holder)
+
+
+@contextmanager
+def claim_bridge() -> Iterator[None]:
+    """Hold the bridge for a synchronous run, for as long as the block runs.
+
+    Raises AlreadyRunning if a job — or another synchronous run — has it.
+    The caller's tool reports that as the same job_already_running refusal
+    a second job start earns, because it is the same fact.
+    """
+    with _lock:
+        _claim(_SYNC)
+    try:
+        yield
+    finally:
+        _release(_SYNC)
+
 
 def is_running(job_id: str) -> bool:
     """Whether a worker for this job is alive IN THIS PROCESS.
@@ -85,19 +185,15 @@ def join(job_id: str, timeout: float | None = None) -> bool:
 def start(urls: list[str], cfg: dict) -> str:
     """Create the job row and its worker thread. Returns the new job id.
 
-    The liveness check, the row insert and the thread start all happen
-    under one lock. Splitting them would be a check-then-act race: two
-    callers would each see no live job, each insert a row, and each start a
-    worker onto the one browser tab.
+    The claim, the row insert and the thread start all happen under one
+    lock. Splitting them would be a check-then-act race: two callers would
+    each see no live run, each insert a row, and each start a worker onto
+    the one browser tab. The claim also covers the synchronous tool, so a
+    job cannot start on top of a gsc_request_indexing call in flight.
     """
     job_id = uuid.uuid4().hex
     with _lock:
-        live = [existing for existing, thread in _threads.items()
-                if thread.is_alive()]
-        if live:
-            raise AlreadyRunning(
-                f"submission job {live[0]} is still running; stop it with "
-                "gsc_stop_job or wait for it to finish")
+        _claim(job_id)
 
         # Inside the lock on purpose, so a refused start leaves no row: an
         # orphan row would surface in gsc_job_status as a job that never ran.
@@ -120,6 +216,7 @@ def start(urls: list[str], cfg: dict) -> str:
             # still sees the exception — its tool reports it by type name.
             _stop_events.pop(job_id, None)
             _threads.pop(job_id, None)
+            _release_locked(job_id)
             _record_failure(job_id, None, type(exc).__name__)
             raise
     return job_id
@@ -244,6 +341,11 @@ def _worker(job_id: str, urls: list[str], cfg: dict,
         with _lock:
             _stop_events.pop(job_id, None)
             _threads.pop(job_id, None)
+            # In the same finally as the registry, and for the same reason:
+            # a claim this worker never gives back is a bridge nothing can
+            # use again, and this block runs for a clean finish, a crash and
+            # a stop alike.
+            _release_locked(job_id)
 
 
 def _final_state(result: submit.RunResult,

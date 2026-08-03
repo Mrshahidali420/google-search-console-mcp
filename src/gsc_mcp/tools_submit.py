@@ -169,6 +169,12 @@ def request_indexing(urls: list[str]) -> dict:
     """Submit up to five URLs, blocking until every one has an outcome."""
     try:
         return _request_indexing(urls)
+    except jobs.AlreadyRunning as exc:
+        # Repeated for the same reason start_indexing_job repeats it: the
+        # message is authored in jobs.py, it names a job id at most, and
+        # without it the caller cannot tell "something else has the browser"
+        # from "the extension is broken".
+        return _refuse("job_already_running", str(exc), _FIX_JOB_RUNNING)
     except Exception as exc:  # noqa: BLE001 — a tool never raises
         # TYPE NAME only, in the log and in the result: an unauthored
         # message can carry a filesystem path holding the operator's
@@ -193,40 +199,52 @@ def _request_indexing(urls: list[str]) -> dict:
                        f"{len(urls)} URLs given; this tool takes at most {cap}",
                        _FIX_TOO_MANY)
 
-    chosen = target.resolve()
-    if chosen is None:
-        return _refuse("no_browser", "no Chromium browser profile was found",
-                       _FIX_NO_BROWSER)
+    # ONE RUN AT A TIME, and the same claim a background job takes. The
+    # bridge binds one fixed localhost port and drives one browser tab, so a
+    # sync call landing on top of a running job cannot work — and fails
+    # unhelpfully if it is allowed to try: ws_serve's bind error is raised
+    # inside a daemon thread nothing can catch, so `ready` never sets, this
+    # call waits out its whole connect timeout, and the caller is told to
+    # load an extension that is already loaded. Claimed HERE, before the
+    # browser is resolved and long before a slot is reserved, so a refusal
+    # costs nothing. AlreadyRunning is left to request_indexing to convert.
+    with jobs.claim_bridge():
+        chosen = target.resolve()
+        if chosen is None:
+            return _refuse("no_browser",
+                           "no Chromium browser profile was found",
+                           _FIX_NO_BROWSER)
 
-    with deps.connection() as conn:
-        properties = _properties(conn)
-        if not properties:
-            return _refuse("no_properties",
-                           "no Search Console properties are known yet",
-                           _FIX_NO_PROPERTIES)
-        try:
-            with bridge.bridge_session(chosen, cfg) as session:
-                # sleep is passed explicitly, resolved off this module's own
-                # `time` at call time: submit.run binds the real time.sleep
-                # as a default argument at import, so a test that replaced
-                # it afterwards would still wait out a real 130-180s gap.
-                result = submit.run(conn, session, urls,
-                                    properties=properties,
-                                    account=_account(), job_id=None, cfg=cfg,
-                                    sleep=time.sleep)
-        except bridge.ExtensionNotConnected as exc:
-            # The ONLY place in this module that repeats an exception's
-            # message. Scoped to one exception type this project raises,
-            # whose text names a browser brand and nothing else — not to
-            # RuntimeError, which would also catch anything the run body
-            # raises and hand its unauthored message (a filesystem path
-            # holding the operator's account name, say) to an MCP client.
-            # Do not widen it. Everything else, including the plain
-            # RuntimeError load_or_create_token raises for an unwritable
-            # config directory, falls through to request_indexing's
-            # type-name-only handler.
-            return _refuse("extension_not_connected", str(exc),
-                           _FIX_NO_EXTENSION)
+        with deps.connection() as conn:
+            properties = _properties(conn)
+            if not properties:
+                return _refuse("no_properties",
+                               "no Search Console properties are known yet",
+                               _FIX_NO_PROPERTIES)
+            try:
+                with bridge.bridge_session(chosen, cfg) as session:
+                    # sleep is passed explicitly, resolved off this module's
+                    # own `time` at call time: submit.run binds the real
+                    # time.sleep as a default argument at import, so a test
+                    # that replaced it afterwards would still wait out a
+                    # real 130-180s gap.
+                    result = submit.run(conn, session, urls,
+                                        properties=properties,
+                                        account=_account(), job_id=None,
+                                        cfg=cfg, sleep=time.sleep)
+            except bridge.ExtensionNotConnected as exc:
+                # The ONLY place in this module that repeats an exception's
+                # message. Scoped to one exception type this project raises,
+                # whose text names a browser brand and nothing else — not to
+                # RuntimeError, which would also catch anything the run body
+                # raises and hand its unauthored message (a filesystem path
+                # holding the operator's account name, say) to an MCP client.
+                # Do not widen it. Everything else, including the plain
+                # RuntimeError load_or_create_token raises for an unwritable
+                # config directory, falls through to request_indexing's
+                # type-name-only handler.
+                return _refuse("extension_not_connected", str(exc),
+                               _FIX_NO_EXTENSION)
     return _tally(result)
 
 

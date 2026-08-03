@@ -24,6 +24,7 @@ test instead of hanging the suite.
 """
 from __future__ import annotations
 
+import sys
 import threading
 
 import pytest
@@ -55,6 +56,10 @@ def _clean_registry():
         jobs.join(job_id, timeout=_JOIN_TIMEOUT)
     jobs._threads.clear()
     jobs._stop_events.clear()
+    # The bridge claim too: a claim left standing by a test that failed
+    # part-way would refuse every submission in every test after it, and
+    # the failure would land on an innocent test.
+    jobs._holder = None
 
 
 def _await_terminal(job_id: str) -> None:
@@ -225,6 +230,185 @@ def test_two_racing_starts_yield_exactly_one_job(monkeypatch, home):
 
     jobs.stop(started[0])
     _await_terminal(started[0])
+
+
+def test_a_job_cannot_start_while_a_synchronous_run_holds_the_bridge(home):
+    """The guard covers both entry points, not only jobs.
+
+    Without this, a job started during a gsc_request_indexing call binds a
+    port that is already taken, inside a daemon thread where the OSError is
+    invisible — and the job dies reporting an extension problem it does not
+    have.
+    """
+    with jobs.claim_bridge():
+        with pytest.raises(jobs.AlreadyRunning) as caught:
+            jobs.start(["https://example.com/a"], CFG)
+        # Nothing about the refusal names anything but the tool.
+        assert "gsc_request_indexing" in str(caught.value)
+        assert SECRET_EMAIL not in str(caught.value)
+        # And it cost nothing: no row, no worker.
+        with store.session() as conn:
+            assert store.list_jobs(conn) == []
+        assert jobs._threads == {}
+
+
+def test_a_synchronous_run_cannot_claim_the_bridge_while_a_job_is_live(
+        monkeypatch, home):
+    monkeypatch.setattr(jobs, "_execute", _blocking_execute())
+    first = jobs.start(["https://example.com/a"], CFG)
+
+    with pytest.raises(jobs.AlreadyRunning) as caught:
+        with jobs.claim_bridge():
+            pytest.fail("the synchronous run took a bridge a job was holding")
+    assert first in str(caught.value)
+
+    jobs.stop(first)
+    _await_terminal(first)
+    # Released with the job: the next synchronous run gets straight through.
+    with jobs.claim_bridge():
+        pass
+
+
+def test_the_claim_is_released_even_when_the_held_block_raises(home):
+    with pytest.raises(ValueError):
+        with jobs.claim_bridge():
+            raise ValueError("the run blew up")
+    with jobs.claim_bridge():
+        pass
+
+
+def test_a_dead_worker_cannot_wedge_the_bridge_permanently(home):
+    """A claim is not a latch. If a worker were ever to die without running
+    its finally, the next caller must still be able to submit — one refusal
+    is a bug, every submission until a restart is a broken install."""
+    jobs._holder = "a-job-that-is-no-longer-running"
+    with jobs.claim_bridge():
+        pass
+
+
+# Contenders per round of the cross-entry-point race — one job start and
+# this many synchronous claims — and how many rounds of it.
+#
+# Measured against the mutant rather than guessed, because the window a
+# check-then-act claim opens is a few bytecodes wide and stating the
+# intent is not the same as catching it. Against a deliberately
+# check-then-act claim_bridge: one job versus one sync claim at a plain
+# Barrier was caught in 0 runs out of 10; the shape below — spin line-up,
+# five sync contenders, a short thread-switch interval, this many rounds —
+# was caught in 10 out of 10. It costs about 1.5 seconds.
+_RACE_SYNC_RACERS = 5
+_RACE_ROUNDS = 250
+
+
+def _race_once(round_number: int) -> str:
+    """One contended round. Returns the winner: a job id, or "sync".
+
+    Every contender arrives at the same Barrier, and the winner holds its
+    claim until every other contender has reported — so a loser is a loser
+    because it was refused, never because the winner had already let go.
+    """
+    # The main thread is a party too, so it can flip `go` only once every
+    # contender is already spinning on it. A Barrier alone is not enough:
+    # its waiters wake one at a time off a condition variable, and the first
+    # one through finishes its whole claim before the rest are scheduled —
+    # which is exactly how a check-then-act claim survives an unaided race.
+    # The bounded spin below keeps every contender RUNNABLE at the moment
+    # the flag flips. It never sleeps and it is bounded by the barrier that
+    # precedes it.
+    ready = threading.Barrier(_RACE_SYNC_RACERS + 2)
+    go = [False]
+    release = threading.Event()
+    settled = threading.Semaphore(0)
+    won: list[str] = []
+    refused: list[str] = []
+    guard = threading.Lock()
+
+    def line_up() -> None:
+        ready.wait(_JOIN_TIMEOUT)
+        while not go[0]:
+            pass
+
+    def run_job() -> None:
+        line_up()
+        try:
+            job_id = jobs.start([f"https://example.com/{round_number}"], CFG)
+        except jobs.AlreadyRunning:
+            with guard:
+                refused.append("job")
+        else:
+            with guard:
+                won.append(job_id)
+        settled.release()
+
+    def run_sync() -> None:
+        line_up()
+        try:
+            with jobs.claim_bridge():
+                with guard:
+                    won.append("sync")
+                settled.release()
+                assert release.wait(_JOIN_TIMEOUT)
+        except jobs.AlreadyRunning:
+            with guard:
+                refused.append("sync")
+            settled.release()
+
+    racers = [threading.Thread(target=run_job)]
+    racers += [threading.Thread(target=run_sync)
+               for _ in range(_RACE_SYNC_RACERS)]
+    for racer in racers:
+        racer.start()
+    ready.wait(_JOIN_TIMEOUT)   # everyone is spinning on `go`
+    go[0] = True
+    # A rendezvous, not a poll: every contender reports before the winner
+    # is let go, so the claim really was contended.
+    for _ in racers:
+        assert settled.acquire(timeout=_JOIN_TIMEOUT), "a racer never settled"
+    release.set()
+    for racer in racers:
+        racer.join(_JOIN_TIMEOUT)
+        assert not racer.is_alive()
+
+    assert len(won) == 1, f"round {round_number}: won={won} refused={refused}"
+    assert len(refused) == len(racers) - 1
+    return won[0]
+
+
+def test_a_job_and_synchronous_runs_racing_yield_exactly_one_winner(
+        monkeypatch, home):
+    """Test-and-set, not check-then-act.
+
+    Every contender arrives together at a Barrier. An implementation that
+    looked at the flag and then set it lets more than one through, and they
+    drive one browser tab through one port between them.
+    """
+    monkeypatch.setattr(jobs, "_execute", _blocking_execute())
+    # A Barrier releases its waiters together, but the first one through
+    # normally finishes its whole claim before the rest are even scheduled —
+    # which is how a check-then-act claim passes an unaided race. Shortening
+    # the interpreter's thread-switch interval for the duration puts real
+    # preemption inside the window instead of hoping for it. Restored by the
+    # fixture below whatever this test does.
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    job_wins = 0
+    try:
+        for round_number in range(_RACE_ROUNDS):
+            winner = _race_once(round_number)
+            if winner != "sync":
+                job_wins += 1
+                jobs.stop(winner)
+                _await_terminal(winner)
+            # The round settled completely: nothing holds the bridge, so
+            # the next round starts where this one did.
+            assert jobs._holder is None
+    finally:
+        sys.setswitchinterval(previous)
+
+    # One row per round the job won, and not one more: a refused start must
+    # leave nothing behind even when it lost by a hair.
+    with store.session() as conn:
+        assert len(store.list_jobs(conn)) == job_wins
 
 
 def test_a_new_job_may_start_once_the_previous_one_has_finished(monkeypatch,

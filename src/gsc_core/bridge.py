@@ -169,7 +169,24 @@ class BridgeSession:
         that drive the user's signed-in browser, so it must not be
         reachable from anywhere but this machine.
         """
-        with ws_serve(self._handler, "127.0.0.1", self.port) as server:
+        try:
+            listening = ws_serve(self._handler, "127.0.0.1", self.port)
+        except OSError as exc:
+            # Logged rather than re-raised, because this runs in a daemon
+            # thread: there is no caller to catch it, and the only symptom
+            # otherwise is `ready` never setting — which the waiting run
+            # reports, minutes later, as "the extension never connected".
+            # That diagnosis is wrong whenever the real cause is the port
+            # already being in use, and without this line nothing anywhere
+            # says so. Scoped to the BIND alone, so an error out of
+            # serve_forever during teardown is not misreported as one, and
+            # carrying the type name only: an OSError's message is
+            # unauthored text.
+            log.warning("bridge could not listen on 127.0.0.1:%s (%s) — "
+                        "another run may already hold the port",
+                        self.port, type(exc).__name__)
+            return
+        with listening as server:
             self._server = server
             # Port 0 means "any free port"; publish the one actually bound
             # so callers and tests never have to guess or probe.
