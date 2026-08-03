@@ -206,6 +206,43 @@ def test_find_unindexed_keeps_its_documented_defaults(
     assert seen == [("https://example.com/", "both", None)]
 
 
+#: The parameter names a CLIENT sees, per tool. A wrapper's parameter name
+#: is public API — FastMCP publishes it in the tool's input schema and a
+#: model calls by keyword — so renaming one silently breaks every existing
+#: caller with a schema error. Positional delegation tests cannot see that:
+#: they would pass just as happily against a parameter called `cap`.
+_PUBLIC_PARAMETERS = {
+    "gsc_find_unindexed": {"site", "source", "limit"},
+    "gsc_audit": {"site"},
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PUBLIC_PARAMETERS))
+def test_the_discovery_tools_publish_their_documented_parameters(
+    name: str,
+) -> None:
+    tool = {t.name: t for t in server.mcp._tool_manager.list_tools()}[name]
+    assert set(tool.parameters["properties"]) == _PUBLIC_PARAMETERS[name]
+
+
+def test_find_unindexed_accepts_its_parameters_by_keyword(
+    monkeypatch: pytest.MonkeyPatch, home,
+) -> None:
+    """The call a model actually makes. `limit` in particular has to arrive
+    under that name: a caller capping a run and being ignored would spend
+    unrecoverable quota slots it explicitly asked not to spend."""
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        server.tools_audit, "find_unindexed",
+        lambda site, source, limit: seen.append((site, source, limit))
+        or {"ok": True})
+
+    registered()["gsc_find_unindexed"](
+        site="https://example.com/", source="store", limit=3)
+
+    assert seen == [("https://example.com/", "store", 3)]
+
+
 def test_no_discovery_wrapper_swallows_the_bodys_refusal(
     monkeypatch: pytest.MonkeyPatch, home,
 ) -> None:
