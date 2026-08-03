@@ -273,9 +273,11 @@ def _record_failure(job_id: str, conn: sqlite3.Connection | None,
     `conn` is None when the worker never got one — the very failure this
     most needs to record. A fresh short-lived session is opened for that
     case, because the alternative is a row that stays pending with no
-    error: reconcile_jobs() sweeps only "running", so nothing downstream
-    would ever correct it and the operator would be told, permanently, that
-    a job that never started is about to.
+    error for the rest of the process's life: reconcile_jobs() does sweep
+    "pending" as well as "running", but only at STARTUP, so a row left
+    behind now would keep gsc_job_status telling the operator that a job
+    which never started is about to — until they restart the server. This
+    corrects the row in-process instead of waiting for that.
 
     `error` is a type name. Never a message: this lands on disk and is
     returned by gsc_job_status, and the message of a store failure is a
