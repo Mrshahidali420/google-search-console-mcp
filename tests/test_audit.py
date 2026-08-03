@@ -74,14 +74,15 @@ def test_submittable_counts_only_where_submitting_helps(store_conn):
 
     out = audit.audit(store_conn, PROPERTY, now=NOW)
 
-    assert out["submittable"] == 1
-    assert out["needs_site_access"] == 1  # noindex; crawled needs neither
+    assert out["submittable"] == 2  # discovered and crawled
+    assert out["needs_site_access"] == 1  # noindex
 
 
-#: Which action bucket each reason code lands in, spelled out. `None`
-#: means NO bucket: crawled-not-indexed calls for neither a submission nor
-#: a site edit, and it is deliberately absent from all three
-#: (audit.py:85-90), which is also why the three are not a partition.
+#: Which action bucket each reason code lands in, spelled out. Every code
+#: is in exactly one, so the three buckets partition `unindexed` -- see
+#: the sum asserted in the test below. A `None` here would mean a code in
+#: no bucket at all, which audit.py:85-93 permits deliberately so that an
+#: unbucketed new code is visible rather than defaulting to "no action".
 _BUCKET_BY_REASON = {
     "404": "needs_site_access",
     "redirect": "needs_site_access",
@@ -92,7 +93,7 @@ _BUCKET_BY_REASON = {
     "discovered-not-indexed": "submittable",
     "unknown-to-google": "submittable",
     "alt-canonical": "no_action_needed",
-    "crawled-not-indexed": None,
+    "crawled-not-indexed": "submittable",
 }
 
 _STATUS_BY_REASON = {code: status
@@ -102,9 +103,11 @@ _STATUS_BY_REASON = {code: status
 def test_every_reason_lands_in_exactly_the_bucket_it_belongs_to(store_conn):
     """One URL per reason code, each bucket asserted as a whole number.
 
-    A sample of three codes cannot see crawled-not-indexed being swallowed
-    into no_action, nor a code double-counting into two buckets at once --
-    both of those left the suite green. The complete mapping can.
+    A sample of three codes cannot see a code landing in the wrong bucket,
+    nor one double-counting into two at once -- both of those left the
+    suite green. The complete mapping can. It also pins the partition the
+    gsc_audit docstring promises: every code lands in exactly one bucket,
+    so the three sum to `unindexed`.
     """
     assert set(_BUCKET_BY_REASON) == reasons.REASONS
 
@@ -122,6 +125,7 @@ def test_every_reason_lands_in_exactly_the_bucket_it_belongs_to(store_conn):
             expected[bucket] = 1
         assert counts == expected, code
         assert out["unindexed"] == 1, code
+        assert sum(counts.values()) == out["unindexed"], code
 
 
 def test_alt_canonical_is_counted_as_needing_no_action(store_conn):

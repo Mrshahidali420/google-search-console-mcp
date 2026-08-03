@@ -75,7 +75,7 @@ There are **ten** of them. `submitting_helps` on each row is the one to act on b
 |---|---|---|
 | `discovered-not-indexed` | yes | Google knows the URL but has not crawled it |
 | `unknown-to-google` | yes | Google has never seen the URL |
-| `crawled-not-indexed` | no | Google crawled it and chose not to index it |
+| `crawled-not-indexed` | yes | Google crawled it and chose not to index it — improve it, **then** submit |
 | `404` | no | The URL returns not-found |
 | `redirect` | no | The URL redirects elsewhere |
 | `noindex` | no | A noindex directive on the page or its response |
@@ -84,7 +84,9 @@ There are **ten** of them. `submitting_helps` on each row is the one to act on b
 | `duplicate` | no | Google chose a different canonical |
 | `alt-canonical` | no | An alternate page pointing at its own canonical — no action |
 
-If you have read the eight-code list in the design notes and counted ten here, the extra two are `discovered-not-indexed` and `unknown-to-google`, kept separate from `crawled-not-indexed` on purpose. They are the only states where submitting a URL changes anything: Google has not judged the page yet, it just has not fetched it. Folding them into `crawled-not-indexed` — a page Google *has* judged, and declined — would invert the advice and spend unrecoverable slots on URLs that cannot benefit.
+If you have read the eight-code list in the design notes and counted ten here, the extra two are `discovered-not-indexed` and `unknown-to-google`, kept separate from `crawled-not-indexed` on purpose. All three answer *yes* to "can a quota slot move this", but not to "what do I do first", and that is the part you act on. Discovered and unknown are pages Google has not judged — it has not fetched them yet, so submitting is the whole remedy. Crawled-not-indexed is a page it fetched and passed on; a fresh crawl can reverse that verdict, but resubmitting byte-identical content re-crawls to the same one. Improve the page, then submit it.
+
+Slots are roughly eleven per property per rolling day and unrecoverable, and `crawled-not-indexed` is usually the biggest bucket on a real site. `submitting_helps: true` means the slot *can* work, not that today is the day to spend it.
 
 A URL whose state could not be established — a failed inspection, or a result a re-check could not confirm — is reported as `undetermined`, never as unindexed. Absence of evidence is not a finding.
 

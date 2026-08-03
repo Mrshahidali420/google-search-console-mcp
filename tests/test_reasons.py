@@ -54,20 +54,33 @@ def test_a_quota_skip_is_undetermined_but_named_apart_from_a_real_unknown():
                 & set(reasons.REASON_BY_STATUS))
 
 
-def test_submitting_helps_only_where_google_has_not_looked_yet():
+def test_submitting_helps_names_every_member_it_has():
+    # Literal equality, not a subset check, for the same reason
+    # NEEDS_SITE_ACCESS below gets one: dropping a member silently flips
+    # that code to `submitting_helps: false` and drops it out of
+    # gsc_audit's submittable bucket, with no other signal anywhere.
+    # crawled-not-indexed is a member: Google fetching a page and passing
+    # on it is not a permanent verdict, and a re-crawl can reverse it.
     assert reasons.SUBMITTING_HELPS == frozenset(
-        {"discovered-not-indexed", "unknown-to-google"})
+        {"discovered-not-indexed", "unknown-to-google",
+         "crawled-not-indexed"})
 
 
-def test_crawled_and_discovered_give_opposite_advice():
+def test_crawled_and_discovered_order_the_work_differently():
     # The whole reason the vocabulary is ten codes rather than the spec's
-    # eight. Collapsing these two would tell a caller to spend an
-    # unrecoverable quota slot on a page Google has already declined.
+    # eight. Both are submittable, so `submitting_helps` alone cannot tell
+    # them apart -- what differs is the sequence, and collapsing the codes
+    # would lose it: discovered needs only the submission, crawled needs
+    # the page improved BEFORE the slot is worth spending.
     crawled = reasons.describe("crawled-not-indexed")
     discovered = reasons.describe("discovered-not-indexed")
     assert discovered["submitting_helps"] is True
-    assert crawled["submitting_helps"] is False
+    assert crawled["submitting_helps"] is True
     assert crawled["action"] != discovered["action"]
+    # Not merely different strings: crawled's action must actually carry
+    # the precondition, or the two codes collapse in the only place a
+    # caller reads them apart.
+    assert "then submit" in crawled["action"]
 
 
 def test_every_reason_has_a_non_empty_action():

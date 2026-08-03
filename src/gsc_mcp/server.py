@@ -1094,10 +1094,13 @@ def gsc_audit(site: str) -> dict:
     `undetermined`, `never_checked`, `stale`), `indexed_pct` (null when
     nothing has been checked), a `by_reason` histogram over the ten reason
     codes, and three action counts: `submittable`, `needs_site_access` and
-    `no_action_needed`. They are not a partition of `unindexed` and need
-    not sum to it — `crawled-not-indexed` is in none of them, because
-    neither a submission nor a site edit is its remedy. Rendering all this
-    — prose, table, chart — is yours to do.
+    `no_action_needed`. Every reason code is in exactly one of the three,
+    so they sum to `unindexed`. `submittable` counts URLs a quota slot can
+    move, not URLs to submit right now: it includes `crawled-not-indexed`,
+    usually the largest bucket, where Google has already fetched the page
+    and passed — a re-crawl can reverse that, but only after the page
+    changes. Read each row's `action` before spending slots. Rendering all
+    this — prose, table, chart — is yours to do.
     """
     return tools_audit.audit(site)
 
