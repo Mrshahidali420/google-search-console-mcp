@@ -19,6 +19,7 @@ needed: this transport is available in the installed mcp 1.29.0.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from mcp import types
 from mcp.shared.memory import create_connected_server_and_client_session
@@ -54,6 +55,35 @@ def test_every_tool_is_registered_and_described(tmp_path, monkeypatch):
     assert names == EXPECTED
     for tool in tools:
         assert tool.description, f"{tool.name} has no description"
+
+
+#: Spelled out because the README's Project status sentence is prose. Only
+#: the counts this project could plausibly reach are listed; an unmapped
+#: count fails with the reason rather than a KeyError.
+_COUNT_WORDS = {12: "Twelve", 13: "Thirteen", 14: "Fourteen", 15: "Fifteen",
+                16: "Sixteen", 17: "Seventeen", 18: "Eighteen"}
+
+
+def test_the_readme_tool_count_matches_what_is_registered():
+    """The README's own claim, checked against the registry above.
+
+    Prose is the one place in this repo where a wrong statement ships
+    silently: no test reads it, so a milestone that adds tools updates the
+    table four lines below and leaves the count sentence stale. It has
+    already happened once. EXPECTED is the authority, so this pins the
+    sentence to it rather than to another hand-written number.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8")
+    word = _COUNT_WORDS.get(len(EXPECTED))
+    assert word, f"add {len(EXPECTED)} to _COUNT_WORDS, then fix the README"
+
+    claim = [line for line in readme.splitlines()
+             if "tools are registered on the server" in line]
+    assert len(claim) == 1, "the README's tool-count sentence moved or split"
+    assert claim[0].startswith(f"{word} tools are registered on the server"), (
+        f"README claims a different tool count; {len(EXPECTED)} are registered"
+    )
 
 
 def test_no_tool_description_names_a_tool_that_does_not_exist(tmp_path,

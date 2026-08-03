@@ -16,7 +16,7 @@
 
 **Pre-alpha. The whole surface is wired up, including submission; none of it has met a real Google account yet.**
 
-Twelve tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in and submission both exist end to end in code and can be walked by hand — see [docs/manual-smoke.md](docs/manual-smoke.md) — but no real Google account has authenticated against this code, and no URL has been submitted through it; see Known gaps.
+Fourteen tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in and submission both exist end to end in code and can be walked by hand — see [docs/manual-smoke.md](docs/manual-smoke.md) — but no real Google account has authenticated against this code, and no URL has been submitted through it; see Known gaps.
 
 | Milestone | Scope | State |
 |---|---|---|

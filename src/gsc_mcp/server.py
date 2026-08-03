@@ -1036,9 +1036,12 @@ def gsc_find_unindexed(site: str, source: str = "both",
     can tell a truncated answer from a complete one.
 
     Only URLs whose last inspection is older than `inspection_ttl_days`
-    are re-inspected; fresher ones are reported from their stored status
-    and marked `"fresh": true`. A second call the same day therefore costs
-    no budget and still answers in full.
+    are re-inspected; the rest are reported from their stored status. A
+    second call the same day therefore costs no budget and still answers
+    in full. `"fresh": true` on a row means only that THIS run did not
+    inspect it — usually because it was within the TTL, but also when
+    `limit` cut the run short before reaching it. It is not a promise
+    that the stored status is within the TTL.
 
     Each unindexed row carries `reason` (one of ten codes), `action`,
     `submitting_helps` and `needs_site_access`. Act on
@@ -1047,7 +1050,9 @@ def gsc_find_unindexed(site: str, source: str = "both",
     wastes an unrecoverable quota slot. URLs whose state could not be
     established — a failed inspection, or a result the burst re-verify
     pass could not confirm — are in `undetermined`, never in `unindexed`.
-    A refusal is `{"ok": False, "error", "fix"}`.
+    A refusal is `{"ok": false, "error": <code>, "fix": <what to do>}`,
+    plus `status` when Search Console refused the call and `detail` (an
+    exception type name) when the failure was unexpected.
     """
     return tools_audit.find_unindexed(site, source, limit)
 
