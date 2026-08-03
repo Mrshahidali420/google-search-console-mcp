@@ -45,8 +45,17 @@ _FIX_UNEXPECTED = ("check the log file for the failure type, then try "
 def _api_fix(status: int | None) -> str:
     """403 is almost always a missing webmasters scope or a property this
     account cannot read, and that has a more useful next step than the
-    generic one. Mirrors server._api_fix; not imported from there because
-    server.py imports this module, not the other way round."""
+    generic one.
+
+    Deliberately NOT a mirror of server._api_fix, despite the same shape
+    and the same `error` code: that one answers 403 with _FIX_PROPERTIES
+    ("this account has no properties, or the token lacks the scope"), this
+    one with _FIX_UNKNOWN_PROPERTY. Both tools here take a `site` the
+    caller chose, so the likelier 403 is a property this account cannot
+    read, and "list them and pass one exactly as listed" is the step that
+    resolves it. Not imported from server.py in any case: server.py imports
+    this module, not the other way round.
+    """
     return _FIX_UNKNOWN_PROPERTY if status == 403 else _FIX_API
 
 

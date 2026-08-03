@@ -1075,8 +1075,11 @@ def gsc_audit(site: str) -> dict:
     Returns counts (`total_known`, `checked`, `indexed`, `unindexed`,
     `undetermined`, `never_checked`, `stale`), `indexed_pct` (null when
     nothing has been checked), a `by_reason` histogram over the ten reason
-    codes, and the `submittable` / `needs_site_access` / `no_action_needed`
-    split. Rendering it — prose, table, chart — is yours to do.
+    codes, and three action counts: `submittable`, `needs_site_access` and
+    `no_action_needed`. They are not a partition of `unindexed` and need
+    not sum to it — `crawled-not-indexed` is in none of them, because
+    neither a submission nor a site edit is its remedy. Rendering all this
+    — prose, table, chart — is yours to do.
     """
     return tools_audit.audit(site)
 
