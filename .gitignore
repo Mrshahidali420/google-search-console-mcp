@@ -23,3 +23,11 @@ build/
 # VCS-ignored files by default. test_embedded_client.py asserts this line
 # exists -- deleting it reddens the suite.
 src/gsc_mcp/_embedded.py
+
+# The same OAuth client in the form scripts/publish_client.py writes for
+# upload to the `client` release tag, which is how a SOURCE checkout gets a
+# client (release wheels use _embedded.py above). Never committed, for the
+# same reason -- and specifically because GitHub's secret scanner reads
+# repository content but not release assets, so committing this is the one
+# move that could get the client revoked by Google.
+/client.json

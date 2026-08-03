@@ -128,25 +128,30 @@ def _harden(path: Path) -> None:
         log.warning("could not restrict permissions on %s", path.name)
 
 
-def save_token(data: dict, path: Path | None = None) -> None:
-    """Write the token file atomically, readable only by this user.
+def write_private_json(data: dict, target: Path) -> None:
+    """Write JSON atomically to a file readable only by this user.
 
-    The temp file is hardened immediately after creation, before the refresh
-    token is written into it — writing first and hardening after would leave
-    the credential unprotected on disk for the width of the write, on every
-    refresh. The random temp name also stops two processes colliding and
+    The temp file is hardened immediately after creation, before any
+    credential is written into it — writing first and hardening after would
+    leave the secret unprotected on disk for the width of the write, on
+    every save. The random temp name also stops two processes colliding and
     promoting a half-written file.
+
+    Public rather than private because the token is not the only credential
+    on disk: the shipped OAuth client is cached beside it, and a second
+    implementation of "harden then write atomically" is exactly the kind of
+    duplicate that drifts until only one of them still hardens.
     """
-    target = path or paths.token_path()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".token-",
+    handle, temporary = tempfile.mkstemp(dir=target.parent,
+                                         prefix=f".{target.stem}-",
                                          suffix=".tmp")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             # Harden while the file is still empty: on Windows there is no
             # equivalent of POSIX 0600-at-creation, so writing first would put
-            # the refresh token on disk unprotected. Inside the with-block so
+            # the credential on disk unprotected. Inside the with-block so
             # the descriptor is closed exactly once even if this raises.
             _harden(Path(temporary))
             json.dump(data, stream, indent=2)
@@ -154,6 +159,11 @@ def save_token(data: dict, path: Path | None = None) -> None:
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
+
+
+def save_token(data: dict, path: Path | None = None) -> None:
+    """Write the token file atomically, readable only by this user."""
+    write_private_json(data, path or paths.token_path())
 
 
 def load_token(path: Path | None = None) -> dict | None:

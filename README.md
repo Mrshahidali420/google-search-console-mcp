@@ -129,7 +129,8 @@ The extension must be loaded in the browser profile you paired, and the browser 
   loads a browser extension into one of your existing profiles, and there
   is no way to complete setup without one. Firefox and Safari are not
   Chromium and will not work.
-- Your own Google OAuth client (see Install below) — **this package does not embed one yet**
+- No Google Cloud setup. `gsc_setup` fetches the OAuth client this project
+  ships. You can still supply your own — see Install below.
 
 ## Install
 
@@ -140,19 +141,29 @@ python -m venv .venv
 .venv/Scripts/python -m pip install -e .   # POSIX: .venv/bin/python
 ```
 
-### You must bring your own OAuth client
+### The OAuth client is handled for you
 
-Release wheels carry their own OAuth client, injected at build time — but
-no release has been published yet, so if you are installing from source
-you need your own. A source checkout never contains a client: a real
-secret cannot be committed to a public repository, so it is written into
-the build instead (see
-[docs/google-cloud-oauth.md](docs/google-cloud-oauth.md)) and
-`deps._embedded_client()` falls back to empty without it.
+You do not need a Google Cloud project. `gsc_setup()` finds a client in
+this order — environment variables, the client baked into a release wheel,
+then a one-time download of the client this project ships, cached in your
+config directory. A source checkout takes the third path; everything after
+the first run is offline.
 
-Environment variables override an embedded client either way, so these
-steps also apply if you have a release build but want to point it at your
-own Google Cloud project:
+The tracked source deliberately contains no client. A secret committed to
+a public repository is permanent in git history, and GitHub reports Google
+client secrets to Google, which can revoke them — breaking every user at
+once. So it is delivered as a release asset and a build-time injection
+instead; [docs/google-cloud-oauth.md](docs/google-cloud-oauth.md) has the
+mechanism. To be plain about it: that asset is public and anyone can read
+it, exactly like the wheel. What it buys is rotation, not secrecy — an
+installed app's security comes from PKCE, which this uses.
+
+### Using your own OAuth client instead
+
+Optional. Worth doing if you want the consent screen to carry your own
+app name, or your organisation requires its own client. Set
+`GSC_MCP_CLIENT_ID` and `GSC_MCP_CLIENT_SECRET` and they override
+everything above, in a release build or a source checkout alike.
 
 All of this happens in [Google Cloud Console](https://console.cloud.google.com/),
 free, and takes about five minutes. Do the steps in order — step 4 is the
@@ -263,12 +274,10 @@ next thing to do. Call it in a loop until it returns `ok: true`.
 
 **1. Install and connect** — see [Install](#install) above.
 
-**2. Set the two environment variables.** `GSC_MCP_CLIENT_ID` and
-`GSC_MCP_CLIENT_SECRET`, from your own Google Cloud OAuth client. A release
-build will eventually embed a verified client and this step will go away;
-it has not shipped, and `EMBEDDED_CLIENT_SECRET` in `gsc_mcp/deps.py` is an
-empty string by design because a real secret can never be committed to a
-public repository.
+**2. Nothing.** The OAuth client is handled for you — `gsc_setup()`
+downloads it on the first run and caches it. Set `GSC_MCP_CLIENT_ID` and
+`GSC_MCP_CLIENT_SECRET` only if you want to
+[use your own](#using-your-own-oauth-client-instead).
 
 **3. Run `gsc_setup()`.** It opens a Google consent screen in your browser
 and returns the URL as well, so a headless machine can still complete it by
@@ -416,7 +425,7 @@ Stated plainly, because they are the things a reviewer should look at first:
 - macOS and Linux browser detection has only ever run against fixtures, never on real hardware, here or in CI. The first person to run the smoke checklist on a Mac or a Linux box is performing that test.
 - `gsc_detect_browsers` reports `matches_authorised_account` as `null` on every real machine today. The flag reads an `account_email` key from the stored token, and nothing writes it: the current scope set returns no identity claim and the consent step does not record the authorising account. The plumbing is correct and inert. Treat the field as "unknown", not as "does not match".
 - The `extension` check reports whether the extension is **registered**, not whether it is working. Only the bridge learns whether the MV3 worker is alive, and only at submission time.
-- The embedded-client machinery is built and verified, but **no release has been published**, so in practice everyone installing today still supplies their own Google Cloud credentials (see Install above). The wheel produced by the `Release build` workflow does carry a client; nothing has shipped it to a package index yet.
+- **The shipped OAuth client has not been published yet, so first-run download currently fails.** Both delivery paths are built and tested against fakes, but neither has been exercised for real: no release exists on the `client` tag for `shipped_client` to fetch, and no wheel has reached a package index. Until the asset is uploaded, everyone installing today must still supply `GSC_MCP_CLIENT_ID` and `GSC_MCP_CLIENT_SECRET` (see Install above) — `gsc_setup` will report the download failure and say so.
 - `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright — confirmed directly against the 2.0 wheel, which has no `fastmcp` module at all — so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to whatever construction API replaced it.
 
 ## Contributing

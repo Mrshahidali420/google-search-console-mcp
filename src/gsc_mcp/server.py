@@ -59,8 +59,8 @@ mcp = FastMCP("gsc-mcp")
 mcp._mcp_server.version = __version__
 
 _FIX_OAUTH_CLIENT = (
-    "No OAuth client is configured. Set GSC_MCP_CLIENT_ID and "
-    "GSC_MCP_CLIENT_SECRET, or install a release build."
+    "No OAuth client is configured. Run gsc_setup() to download the bundled "
+    "client, or set GSC_MCP_CLIENT_ID and GSC_MCP_CLIENT_SECRET to use your own."
 )
 _FIX_TOKEN = "Not signed in. Run the consent flow to authorise Search Console access."
 _FIX_PROPERTIES = (

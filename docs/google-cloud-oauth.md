@@ -103,16 +103,25 @@ so `gsc_submit_sitemaps` (the one call needing write access,
 
 Decision D1 says the product ships its own client so a user just clicks
 Allow. No tracked file holds that client, and both facts are true at once,
-because **the repo and the released package are different places**.
+because **the repo, the released package and a release asset are three
+different places**.
 
 A Desktop-app client secret is not confidential — an installed app cannot
 keep one, which is why PKCE exists, and anyone can unzip a wheel and read
-it. So embedding it in a release is normal practice. What committing it to
-a *public repo* costs you is cheap rotation: a value in git history is
-permanent, while a value baked into a build can be changed in the console
-and rebuilt whenever you want.
+it. So shipping it is normal practice. Committing it to a *public repo*
+is the one form that is actually worse, for two reasons:
 
-So the client is injected at build time. Four pieces:
+- git history is permanent, so a rotation never removes the old value;
+- GitHub's secret scanning reads repository content and reports Google
+  client secrets to Google, which can revoke them. That would break every
+  user of every release at once, not just whoever pushed it. Release
+  assets are not scanned.
+
+There are therefore two delivery paths, one per audience.
+
+### Installed users: baked into the wheel
+
+Injected at build time. Four pieces:
 
 | Piece | Where |
 |---|---|
@@ -139,11 +148,59 @@ GSC_MCP_CLIENT_ID=... GSC_MCP_CLIENT_SECRET=... python scripts/write_embedded.py
 python -m build --wheel
 ```
 
-Environment variables still override an embedded client
-(`deps.oauth_client()`), so a self-hoster can always point a release build
-at their own Cloud project.
+### Source checkouts: downloaded on first setup
 
-The test suite runs as if no client were embedded — `tests/conftest.py`
-blanks the constants for every test. Without that, the suite's result would
-depend on whether the generated file happened to exist on the machine
-running it.
+A wheel carries the client; a `git clone` cannot. So a source checkout
+downloads it the first time `gsc_setup()` runs and caches it in
+`GSC_MCP_HOME/client.json`, hardened to the current user like the token
+file. Every run after that is offline.
+
+The asset hangs off a **permanent `client` tag**, not `latest`:
+
+```
+https://github.com/Mrshahidali420/google-search-console-mcp/releases/download/client/client.json
+```
+
+Version releases never touch it, and rotating it never needs a release —
+which also means there is no release that can break first-run setup by
+forgetting to carry the asset. To publish or rotate:
+
+```
+GSC_MCP_CLIENT_ID=... GSC_MCP_CLIENT_SECRET=... python scripts/publish_client.py
+gh release create client --title "Bundled OAuth client" --notes "..."   # first time only
+gh release upload client client.json --clobber
+```
+
+Then delete the local `client.json`. It is gitignored, and
+`test_embedded_client.py` asserts that line still exists.
+
+Be clear about what this is and is not. That URL is in public source and
+serves the client to anyone who requests it — no more private than a wheel
+anyone can unzip. The gain is **operational**: rotate in one place, revoke
+if abused, and nothing for the scanner to find. The security of an
+installed-app client is PKCE, unchanged either way.
+
+`shipped_client` validates what comes back before caching it — HTTPS on
+every redirect hop, a size cap enforced while reading, both fields
+present and non-empty, and a `client_id` ending in
+`.apps.googleusercontent.com`. Without that last check a captive portal's
+login page caches successfully and surfaces days later as an opaque
+`invalid_client` from Google, mid-consent.
+
+### Precedence, and the test suite
+
+`deps.oauth_client()` reads, in order: **environment → embedded (build) →
+cached download**. All three are local reads; only `gsc_setup()` ever
+touches the network. So a self-hoster can point any build at their own
+Cloud project with `GSC_MCP_CLIENT_ID` / `GSC_MCP_CLIENT_SECRET` without
+patching source or clearing a cache. Each source supplies both halves or
+neither — a half-set environment falls through whole rather than pairing
+one exported variable with a cached secret.
+
+The test suite runs as if no client existed anywhere: `tests/conftest.py`
+blanks the embedded constants, blanks the cache, and makes any request for
+the shipped client raise. Without the first two, the suite's result would
+depend on files that happen to exist on the machine running it. Without
+the third, every "no client configured" test silently makes a live request
+to GitHub — and still passes, because a 404 and being offline produce the
+same next step.

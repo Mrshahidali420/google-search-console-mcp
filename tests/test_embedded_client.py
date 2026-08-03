@@ -124,6 +124,20 @@ def test_the_embedded_module_is_gitignored():
     assert "src/gsc_mcp/_embedded.py" in ignored
 
 
+def test_the_publishable_client_asset_is_gitignored():
+    """The second form the same secret takes on disk.
+
+    scripts/publish_client.py writes client.json into the repository root
+    for upload to the `client` release tag. Committing it is the one move
+    that could get the client REVOKED rather than merely exposed: GitHub's
+    scanner reads repository content and reports Google client secrets to
+    Google, and it does not read release assets. That asymmetry is the
+    whole basis of shipping the client this way.
+    """
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "/client.json" in ignored
+
+
 def _scannable_files():
     """Tracked text files that must never contain a live secret.
 

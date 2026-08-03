@@ -24,6 +24,8 @@ from typing import Iterator
 
 from gsc_core import gauth, paths, store
 
+from . import shipped_client
+
 CLIENT_ID_ENV = "GSC_MCP_CLIENT_ID"
 CLIENT_SECRET_ENV = "GSC_MCP_CLIENT_SECRET"
 
@@ -64,6 +66,18 @@ def _embedded_client() -> tuple[str, str]:
 EMBEDDED_CLIENT_ID, EMBEDDED_CLIENT_SECRET = _embedded_client()
 
 
+def _cached_client() -> tuple[str, str]:
+    """The client a previous `gsc_setup` downloaded, or ("", "").
+
+    Read on every call rather than resolved once at import, unlike the
+    embedded constants above: `gsc_setup` writes this file part-way through
+    a running process, and a value snapshotted at import would leave the
+    server insisting it has no client until it is restarted — immediately
+    after the step whose whole job was to give it one.
+    """
+    return shipped_client.cached()
+
+
 class NotConfigured(RuntimeError):
     """No OAuth client is available — neither environment nor embedded.
 
@@ -76,21 +90,41 @@ class NotConfigured(RuntimeError):
 def oauth_client() -> tuple[str, str]:
     """The (client_id, client_secret) to authenticate with, env-first.
 
-    The environment variables always win when both are set, so a developer
-    or a self-hosted deployment can override the embedded client without
-    patching source. Raises NotConfigured when the result would be empty —
-    better than handing gauth an empty client id that fails confusingly
-    much later, mid-OAuth-flow.
+    Three sources, in descending order of how deliberately the user chose
+    them: the environment, the client baked into a release build, and the
+    one a previous `gsc_setup` downloaded and cached. The environment
+    always wins, so a developer or a self-hosted deployment can point a
+    release build at their own Cloud project without patching source or
+    clearing a cache.
+
+    Every source is a LOCAL read. This is on the hot path — `provider()`
+    calls it per tool call — so nothing here may touch the network; see
+    `shipped_client`'s docstring for why the download lives in setup
+    instead.
+
+    The id and the secret are resolved independently rather than as a
+    pair. Mixing halves of two different clients is not a real risk: a
+    half-set environment is the common case (one variable exported, one
+    forgotten), and falling back for the missing half alone would silently
+    build a client that cannot authenticate. Both come from the first
+    source that supplies them.
+
+    Raises NotConfigured when nothing supplies both — better than handing
+    gauth an empty client id that fails confusingly much later,
+    mid-OAuth-flow.
     """
-    client_id = os.environ.get(CLIENT_ID_ENV) or EMBEDDED_CLIENT_ID
-    client_secret = os.environ.get(CLIENT_SECRET_ENV) or EMBEDDED_CLIENT_SECRET
-    if not client_id or not client_secret:
-        raise NotConfigured(
-            "no OAuth client configured; set GSC_MCP_CLIENT_ID and "
-            "GSC_MCP_CLIENT_SECRET, or install a release build with an "
-            "embedded client"
-        )
-    return client_id, client_secret
+    for client_id, client_secret in (
+        (os.environ.get(CLIENT_ID_ENV, ""), os.environ.get(CLIENT_SECRET_ENV, "")),
+        (EMBEDDED_CLIENT_ID, EMBEDDED_CLIENT_SECRET),
+        _cached_client(),
+    ):
+        if client_id and client_secret:
+            return client_id, client_secret
+    raise NotConfigured(
+        "no OAuth client configured; run gsc_setup() to download the "
+        "bundled client, or set GSC_MCP_CLIENT_ID and GSC_MCP_CLIENT_SECRET "
+        "to use your own"
+    )
 
 
 _provider_lock = threading.Lock()

@@ -54,6 +54,13 @@ def token_path() -> Path:
     return config_dir() / "token.json"
 
 
+def client_path() -> Path:
+    """Path to the cached OAuth client downloaded on first setup. Returns a
+    path only — does not create the parent; call ``ensure_config_dir()``
+    first if you're writing."""
+    return config_dir() / "client.json"
+
+
 def config_path() -> Path:
     """Path to the user config file. Returns a path only — does not create
     the parent; call ``ensure_config_dir()`` first if you're writing."""

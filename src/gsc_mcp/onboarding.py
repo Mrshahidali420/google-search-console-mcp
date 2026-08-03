@@ -72,7 +72,7 @@ from dataclasses import dataclass
 
 from gsc_core import gauth, pairing, profiles, runlog
 
-from . import deps
+from . import deps, shipped_client
 
 log = runlog.get(__name__)
 
@@ -83,8 +83,8 @@ STEPS = ("oauth_client", "consent", "browser", "extension")
 _CONSENT_TTL = 600.0
 
 _ACTION_OAUTH_CLIENT = (
-    "set GSC_MCP_CLIENT_ID and GSC_MCP_CLIENT_SECRET, or install a release "
-    "build with an embedded client"
+    "Call gsc_setup() again to retry, or set GSC_MCP_CLIENT_ID and "
+    "GSC_MCP_CLIENT_SECRET to use your own OAuth client"
 )
 _ACTION_CONSENT_OPEN = (
     "open the URL in next.url, approve the consent screen, then call "
@@ -241,8 +241,18 @@ def _setup(open_browser: bool) -> dict:
     try:
         client_id, client_secret = deps.oauth_client()
     except deps.NotConfigured:
-        return _result(done, {"step": "oauth_client",
-                              "action": _ACTION_OAUTH_CLIENT})
+        # The one place in the server that may touch the network for a
+        # client. A source checkout has none until this runs; a release
+        # build and a configured environment never reach here at all.
+        try:
+            client_id, client_secret = shipped_client.fetch_and_cache()
+        except shipped_client.FetchFailed as exc:
+            # FetchFailed's message is written for a user and carries no
+            # response body and no part of the credential — see its
+            # docstring. It is the only exception in this module whose text
+            # is repeated outward.
+            return _result(done, {"step": "oauth_client",
+                                  "action": f"{exc}. {_ACTION_OAUTH_CLIENT}"})
     done.append("oauth_client")
 
     consent = _consent_step(client_id, client_secret, open_browser)

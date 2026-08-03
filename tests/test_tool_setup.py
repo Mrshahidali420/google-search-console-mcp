@@ -15,7 +15,7 @@ import pytest
 
 from _logcheck import capturing, logged_text
 from gsc_core import browsers, profiles
-from gsc_mcp import onboarding
+from gsc_mcp import onboarding, shipped_client
 
 CLIENT_ID = "client-id-123"
 CLIENT_SECRET = "client-secret-456"
@@ -85,9 +85,28 @@ def _install_extension(candidate, ext_dir):
 # Step 1: the OAuth client
 # ---------------------------------------------------------------------------
 
-def test_reports_the_missing_oauth_client_first(monkeypatch):
+@pytest.fixture
+def undownloadable(monkeypatch):
+    """No client anywhere, and the bundled one cannot be downloaded."""
     monkeypatch.delenv("GSC_MCP_CLIENT_ID", raising=False)
     monkeypatch.delenv("GSC_MCP_CLIENT_SECRET", raising=False)
+
+    def fail():
+        raise shipped_client.FetchFailed("the download failed")
+
+    monkeypatch.setattr(onboarding.shipped_client, "fetch_and_cache", fail)
+
+
+@pytest.fixture
+def downloadable(monkeypatch):
+    """No client configured, but the bundled one downloads cleanly."""
+    monkeypatch.delenv("GSC_MCP_CLIENT_ID", raising=False)
+    monkeypatch.delenv("GSC_MCP_CLIENT_SECRET", raising=False)
+    monkeypatch.setattr(onboarding.shipped_client, "fetch_and_cache",
+                        lambda: (CLIENT_ID, CLIENT_SECRET))
+
+
+def test_reports_the_missing_oauth_client_first(undownloadable):
     result = onboarding.setup()
     assert result["ok"] is False
     assert result["next"]["step"] == "oauth_client"
@@ -97,11 +116,24 @@ def test_reports_the_missing_oauth_client_first(monkeypatch):
                                  "extension"]
 
 
-def test_a_missing_client_never_starts_a_consent(monkeypatch):
+def test_the_download_failure_is_explained_not_just_the_fix(undownloadable):
+    """Without the reason, an offline user is told to go make a Cloud
+    project — advice that is both wrong and a great deal of work."""
+    result = onboarding.setup()
+    assert "the download failed" in result["next"]["action"]
+
+
+def test_a_downloaded_client_satisfies_the_step(downloadable):
+    """A source checkout with a working network gets past step one without
+    the user configuring anything, which is the whole point of D1."""
+    result = onboarding.setup()
+    assert "oauth_client" in result["done"]
+    assert result["next"]["step"] == "consent"
+
+
+def test_a_missing_client_never_starts_a_consent(undownloadable):
     """No client means no flow to start — and a receiver opened here would
     hold a port for a sign-in that can never complete."""
-    monkeypatch.delenv("GSC_MCP_CLIENT_ID", raising=False)
-    monkeypatch.delenv("GSC_MCP_CLIENT_SECRET", raising=False)
     onboarding.setup()
     assert onboarding._peek_pending("") is None
     assert onboarding._peek_pending(CLIENT_ID) is None
