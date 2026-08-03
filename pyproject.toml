@@ -51,7 +51,11 @@ dependencies = [
     # on 13.0-16.x it only closes the LISTENING socket (verified in review),
     # so the read loop polls with a bounded recv() instead and teardown works
     # the same on every release from 12 up.
-    "websockets>=12",
+    # <18: an upper bound because nothing above 17 has been tried here. 17.0
+    # already changed shutdown()'s signature and semantics -- the code
+    # survives that one, but a public package should not silently adopt a
+    # major it has never been run against.
+    "websockets>=12,<18",
 ]
 
 [project.scripts]
