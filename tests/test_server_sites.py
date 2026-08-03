@@ -87,7 +87,8 @@ def test_doctor_reports_every_check(home, monkeypatch):
     monkeypatch.setattr(server.deps, "provider", lambda: object())
     out = server.gsc_doctor()
     names = [c["name"] for c in out["checks"]]
-    assert names == ["oauth_client", "token", "config", "store", "properties"]
+    assert names == ["oauth_client", "token", "config", "store", "properties",
+                     "browser", "extension"]
 
 
 def test_doctor_gives_a_fix_string_for_every_failing_check(home, monkeypatch):
@@ -151,7 +152,7 @@ def test_doctor_continues_after_a_failing_check(home, monkeypatch):
 
     monkeypatch.setattr(server.deps, "provider", boom)
     out = server.gsc_doctor()
-    assert len(out["checks"]) == 5
+    assert len(out["checks"]) == 7
 
 
 # --- failures the tool does not model still keep the contract (A1 + B3) ------

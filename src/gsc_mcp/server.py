@@ -274,18 +274,26 @@ def _check_properties() -> dict:
 def gsc_doctor() -> dict:
     """Diagnose whether gsc-mcp is set up to talk to Search Console.
 
-    Runs five checks in order — oauth_client, token, config, store,
-    properties — and reports all of them even if one raises. A check that
-    raises is recorded as `ok: False` with the exception's TYPE NAME only
-    in `detail`; the message is never included, because it can carry a
-    bearer token, a credentialed URL, or a raw response body. Every
-    failing check carries a non-empty `fix` string with a concrete next
-    step; this tool diagnoses, it does not repair anything itself.
+    Runs seven checks in order — oauth_client, token, config, store,
+    properties, browser, extension — and reports all of them even if one
+    raises. A check that raises is recorded as `ok: False` with the
+    exception's TYPE NAME only in `detail`; the message is never included,
+    because it can carry a bearer token, a credentialed URL, a raw response
+    body, or a filesystem path holding your account name. Every failing
+    check carries a non-empty `fix` string with a concrete next step; this
+    tool diagnoses, it does not repair anything itself.
+
+    The last two are the local setup for browser-driven submission, and
+    they come last because they cost nothing and the first five establish
+    whether anything works at all. `browser` names the profile to use;
+    `extension` reports whether the bridge extension is REGISTERED in that
+    profile — a green check does not mean its background worker is
+    running, which needs a live connection and arrives with Milestone 3B.
+    "Could not be checked" is reported as such, never as "not installed".
 
     Costs at most one Search Console API call (`sites.list`, for the
-    `properties` check) — zero network calls if an earlier check already
-    shows the client or token is unusable and a caller stops before
-    reaching it, though this implementation always runs all five.
+    `properties` check); the browser and extension checks are local file
+    reads and make none.
 
     Returns `{"ok": bool, "checks": [{"name", "ok", "detail", "fix"}, ...]}`;
     `ok` is true only when every check passed.
@@ -296,6 +304,8 @@ def gsc_doctor() -> dict:
         _check_config(),
         _check_store(),
         _check_properties(),
+        onboarding.check_browser(),
+        onboarding.check_extension(),
     ]
     return {"ok": all(check["ok"] for check in checks), "checks": checks}
 

@@ -16,16 +16,17 @@
 
 **Pre-alpha. The MCP surface is wired up; browser-driven submission is not.**
 
-Six tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Nothing in this project has ever authenticated against a real Google account — every OAuth path is exercised against fakes; see Known gaps.
+Eight tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. The sign-in path now exists end to end and can be walked by hand — see [docs/manual-smoke.md](docs/manual-smoke.md) — but the submission path does not, and no real Google account has authenticated against this code yet; see Known gaps.
 
 | Milestone | Scope | State |
 |---|---|---|
 | 1. Foundation | Paths, logging, SQLite store, quota engine, OAuth + PKCE, config | **Done** |
 | 2. MCP surface | The tools below, exposed over MCP | **Done** |
-| 3. Submission | Browser-driven Request Indexing, browser/profile auto-detection | Next |
+| 3A. Onboarding | Guided sign-in, browser/profile detection, the bridge extension | **Done** |
+| 3B. Submission | Browser-driven Request Indexing, job control | Next |
 | 4. Reporting | Indexation audits, discovery loops, bulk runs | Planned |
 
-Watch or star the repo if you want to know when milestone 3 ships.
+Watch or star the repo if you want to know when Milestone 3B ships.
 
 ## Tools
 
@@ -39,6 +40,8 @@ Shipped and registered on the MCP server today:
 | `gsc_quota` | Request-Indexing and URL Inspection budget remaining today, per property |
 | `gsc_performance` | Clicks, impressions, CTR and position from Search Analytics |
 | `gsc_submit_sitemaps` | Submit or resubmit sitemaps to a property |
+| `gsc_setup` | Walk through sign-in and setup; idempotent, returns the single next step |
+| `gsc_detect_browsers` | Locate installed browsers and profiles for browser-driven submission |
 
 ### Planned
 
@@ -46,12 +49,10 @@ Not yet built — tracked for future milestones:
 
 | Tool | What it does | Milestone |
 |---|---|---|
-| `gsc_setup` | Interactive OAuth client / consent setup | 3 |
-| `gsc_detect_browsers` | Locate installed browsers and profiles for browser-driven submission | 3 |
-| `gsc_request_indexing` | Submit a URL for indexing, quota permitting | 3 |
-| `gsc_start_indexing_job` | Kick off a batch indexing-request job | 3 |
-| `gsc_job_status` | Check on a running indexing job | 3 |
-| `gsc_stop_job` | Cancel a running indexing job | 3 |
+| `gsc_request_indexing` | Submit a URL for indexing, quota permitting | 3B |
+| `gsc_start_indexing_job` | Kick off a batch indexing-request job | 3B |
+| `gsc_job_status` | Check on a running indexing job | 3B |
+| `gsc_stop_job` | Cancel a running indexing job | 3B |
 | `gsc_find_unindexed` | Find URLs Google has not indexed | 4 |
 | `gsc_audit` | Bulk indexation audit across a property | 4 |
 
@@ -139,6 +140,116 @@ server talks the standard MCP stdio transport (`gsc_mcp.server:main`).
 This has not yet been exercised against a real Claude Desktop session or
 a real Google account; see Known gaps.
 
+## Getting started
+
+Once the server is installed and connected, the whole of setup is one tool
+called repeatedly. `gsc_setup()` is idempotent: it never resumes a session,
+it re-reads the whole state on every call, and it hands back the single
+next thing to do. Call it in a loop until it returns `ok: true`.
+
+**1. Install and connect** — see [Install](#install) above.
+
+**2. Set the two environment variables.** `GSC_MCP_CLIENT_ID` and
+`GSC_MCP_CLIENT_SECRET`, from your own Google Cloud OAuth client. A release
+build will eventually embed a verified client and this step will go away;
+it has not shipped, and `EMBEDDED_CLIENT_SECRET` in `gsc_mcp/deps.py` is an
+empty string by design because a real secret can never be committed to a
+public repository.
+
+**3. Run `gsc_setup()`.** It opens a Google consent screen in your browser
+and returns the URL as well, so a headless machine can still complete it by
+hand. Approve it, then call `gsc_setup()` again — the second call collects
+the redirect, stores the token, and moves on. Nothing about your sign-in is
+returned to the caller: not the token, not the authorization code, not the
+PKCE verifier.
+
+**4. Load the bridge extension.** `gsc_setup()` will tell you where it
+extracted the extension to and which browser profile to load it into. In
+that browser: open its extensions page (`chrome://extensions`,
+`brave://extensions`, `edge://extensions`, and so on — `gsc_setup()` gives
+you the exact URL for your browser), turn on **Developer mode**, choose
+**Load unpacked**, and select the folder it named.
+
+> **You will see a warning banner, and it is expected.** The extension asks
+> for the `debugger` permission, so Chromium shows a prominent bar saying
+> an extension is debugging your browser, and may warn you when you enable
+> Developer mode. That permission is not incidental. Search Console applies
+> a soft throttle to Request Indexing clicks that did not come from a real
+> pointer, and synthetic DOM clicks trip it. The extension therefore issues
+> *trusted* input events through the Chrome DevTools Protocol instead,
+> which is what `debugger` grants and the only way to grant it. The banner
+> is Chromium correctly reporting a real capability — read it as "yes, this
+> is the extension you just installed", not as malware. It only ever
+> attaches to `search.google.com`, the one host in its `host_permissions`.
+
+**5. Run `gsc_doctor()`.** Seven checks, in order: `oauth_client`, `token`,
+`config`, `store`, `properties`, `browser`, `extension`. Every failing one
+carries a concrete `fix`. Sample output, on a machine where everything is
+working:
+
+```json
+{
+  "ok": true,
+  "checks": [
+    {"name": "oauth_client", "ok": true, "detail": "configured", "fix": ""},
+    {"name": "token", "ok": true, "detail": "token file present", "fix": ""},
+    {"name": "config", "ok": true, "detail": "config valid", "fix": ""},
+    {"name": "store", "ok": true, "detail": "schema version 2", "fix": ""},
+    {"name": "properties", "ok": true, "detail": "2 properties", "fix": ""},
+    {"name": "browser", "ok": true,
+     "detail": "Google Chrome / Default is the profile to use", "fix": ""},
+    {"name": "extension", "ok": true,
+     "detail": "the gsc-mcp bridge extension is installed in Google Chrome / Default at version 1.10.0; whether its background service worker is running is not checked in this milestone",
+     "fix": ""}
+  ]
+}
+```
+
+### Reading the browser and extension checks
+
+These two are about your local machine rather than your Google account, and
+they are worded carefully because the failure modes are easy to misread.
+
+**"Could not be checked" never means "not installed."** The extension check
+reads your browser's own preferences files. Those files are frequently
+locked, mid-write, cloud-synced, or held open by antivirus. When a read
+does not happen, the check says the question *could not be checked* and
+that the extension may already be there. That is not a polite way of saying
+it is missing, and the fix is to run `gsc_doctor()` again (closing the
+browser first if it is running) — **not** to reinstall an extension that is
+sitting right where you put it. The same distinction runs through
+`gsc_detect_browsers`, whose `has_extension` field is three-valued: `true`
+present, `false` every preferences file was read and it was not among them,
+`null` the check could not be performed.
+
+**Microsoft Edge can report a Microsoft account where a Google one is
+expected.** Edge stores signed-in account addresses in the same file and
+the same key Chrome uses for Google accounts, but by default it signs
+profiles in to *Microsoft* identities. Nothing on disk tells the two apart.
+So for an Edge profile, an address found is not evidence of a Google
+sign-in — and if your Microsoft address happens to be the same as your
+Google one, what looks like a confirmed match is not confirmed at all. The
+tools hedge this rather than assert it: an Edge profile is reported with
+"this profile's Google sign-in could not be confirmed". Check it yourself
+before relying on it. Brave, Vivaldi, Opera and plain Chromium record no
+Google account at all and are hedged for the different reason that there is
+nothing to read.
+
+**A changed extension ID means re-pairing, not breakage.** The extension
+ships with no manifest `key`, so Chromium derives its ID by hashing the
+absolute path it was loaded from. That ID is stable for as long as the
+extraction directory is stable — and it changes if that directory moves:
+an upgrade that relocates the config directory, a different `GSC_MCP_HOME`,
+a migration to a new machine. When it changes, the extension check stops
+recognising the loaded copy and reports it as not installed. Nothing is
+broken and nothing is corrupted; the fix is to load the unpacked extension
+again from the new folder, exactly as in step 4.
+
+**A green `extension` check means registered, not running.** It says the
+extension is loaded into that profile at that version. Whether its MV3
+background service worker is alive needs a live connection from the bridge,
+and that check arrives with Milestone 3B.
+
 ## Development
 
 ```bash
@@ -160,10 +271,11 @@ a real Google account; see Known gaps.
 | `gsc_core/config.py` | User-tunable settings with validation |
 | `gsc_core/browsers.py` | Which Chromium browsers are installed, and where they keep their state |
 | `gsc_core/profiles.py` | Which profiles each browser has, and which Google account is signed into each |
+| `gsc_core/pairing.py` | Where the bridge extension is extracted to, and what ID Chromium gave it |
 
 ## Privacy
 
-To tell you which browser profile to use, this tool reads the profile list and the signed-in account address out of the browser's own files on your machine — `Local State` and each profile's `Preferences` / `Secure Preferences`.
+To tell you which browser profile to use, this tool reads the profile list and the signed-in account address out of the browser's own files on your machine — `Local State` and each profile's `Preferences` / `Secure Preferences`. The same files are read a second time, for a different reason, to find out whether the bridge extension is loaded in that profile and at what version.
 
 That read is entirely local. The address is used in memory to show you which profile is signed into which account, and:
 
@@ -171,14 +283,18 @@ That read is entirely local. The address is used in memory to show you which pro
 - it is never written to disk by this tool,
 - it is never written to the log, at any level — failures reading these files are logged by exception type name only, precisely so that neither an address nor a path containing your Windows username can end up in a log file you might attach to a bug report.
 
-Nothing in the tool opens these files for writing.
+Nothing in the tool opens these files for writing. No address is ever returned by a tool either, in either direction — not one found in a profile, and not your own authorised address. A tool result is rendered into a transcript and retained by whatever MCP client is driving the server, none of which this project controls, so a profile is identified by browser and profile directory and nothing else.
 
 ## Known gaps
 
 Stated plainly, because they are the things a reviewer should look at first:
 
 - No test proves `icacls` actually applied an ACL on Windows — the Windows test only observes that the call was made, so `_harden` could no-op there and the suite would stay green. The POSIX equivalents now execute on Linux and macOS on every push, so this gap is Windows-only.
-- Nothing has authenticated against a real Google account. Every OAuth path is tested against fakes.
+- **The sign-in path now exists and is testable; the submission path still does not.** `gsc_setup`, `gsc_detect_browsers` and the two new `gsc_doctor` checks make it possible to walk from a clean install to a signed-in, extension-loaded machine. Nothing yet submits a URL for indexing — `gsc_request_indexing` and the job tools land in Milestone 3B.
+- **No real Google account has authenticated against this code.** Every OAuth path is exercised against fakes; the live path is [docs/manual-smoke.md](docs/manual-smoke.md), and that checklist has not yet been run for real. Until it has, "you can sign in" is a claim the test suite cannot support.
+- macOS and Linux browser detection has only ever run against fixtures, never on real hardware, here or in CI. The first person to run the smoke checklist on a Mac or a Linux box is performing that test.
+- `gsc_detect_browsers` reports `matches_authorised_account` as `null` on every real machine today. The flag reads an `account_email` key from the stored token, and nothing writes it: the current scope set returns no identity claim and the consent step does not record the authorising account. The plumbing is correct and inert. Treat the field as "unknown", not as "does not match".
+- The `extension` check reports whether the extension is **registered**, not whether it is working. MV3 worker-liveness detection needs a live bridge connection and arrives with 3B.
 - Google OAuth verification for the sensitive `webmasters` scope has not started.
 - No OAuth client is embedded yet, so users must supply their own Google Cloud credentials (see Install above).
 - `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright — confirmed directly against the 2.0 wheel, which has no `fastmcp` module at all — so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to whatever construction API replaced it.

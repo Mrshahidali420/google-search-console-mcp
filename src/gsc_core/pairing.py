@@ -106,6 +106,19 @@ def extension_dir() -> Path:
     return target
 
 
+def extension_version(ext_dir: Path | str) -> str | None:
+    """The version of the extension sitting in ``ext_dir``, or None.
+
+    Public because a diagnostic has to compare this against the version the
+    browser recorded when it loaded that same directory, and reading the
+    manifest a second time in a second module would put two spellings of
+    "what counts as a usable version" in the codebase. Never raises: an
+    absent or unreadable manifest is None, which callers read as "cannot
+    compare".
+    """
+    return _manifest_version(Path(ext_dir) / _MANIFEST)
+
+
 def _is_current(source: Path, target: Path) -> bool:
     """Is the extracted copy present and built from this package version?
 
@@ -164,10 +177,21 @@ class Lookup:
     and "we could not look". Collapsing the two tells a user with the
     extension correctly installed that it is missing, which is the one
     wrong answer this whole module exists to avoid.
+
+    ``version`` is the version Chromium recorded for the entry that
+    matched, and it is NOT the same fact as the extracted copy's version.
+    Chromium snapshots the manifest it read at load time; a later
+    ``pip install --upgrade`` refreshes the extracted directory underneath
+    it and the browser keeps running the old code until someone clicks
+    Reload. The gap between the two numbers is the only way to see that
+    from outside the browser. None when nothing matched, or when the entry
+    recorded no usable version — an absent number is not a mismatch, and
+    must not be reported as one.
     """
 
     extension_id: str | None
     complete: bool
+    version: str | None = None
 
 
 def look_up_extension(installed: browsers.Installed,
@@ -199,9 +223,9 @@ def look_up_extension(installed: browsers.Installed,
 
     complete = True
     for filename in _PREFERENCE_FILES:
-        found, readable = _match_in(root / filename, root, wanted)
+        found, version, readable = _match_in(root / filename, root, wanted)
         if found is not None:
-            return Lookup(found, True)
+            return Lookup(found, True, version)
         complete = complete and readable
     return Lookup(None, complete)
 
@@ -262,9 +286,9 @@ def _profile_dir(installed: browsers.Installed,
 
 
 def _match_in(prefs_path: Path, root: Path,
-              wanted: str) -> tuple[str | None, bool]:
-    """The first ID in this file whose recorded path is ours, and whether
-    the file could be read at all.
+              wanted: str) -> tuple[str | None, str | None, bool]:
+    """The first ID in this file whose recorded path is ours, the version
+    recorded alongside it, and whether the file could be read at all.
 
     Iteration is sorted so that a preferences file listing two entries
     pointing at the same directory — which happens when a browser has been
@@ -276,10 +300,29 @@ def _match_in(prefs_path: Path, root: Path,
     for ext_id in sorted(settings):
         if not EXTENSION_ID_RE.match(ext_id):
             continue
-        recorded = _recorded_path(settings[ext_id], root)
+        entry = settings[ext_id]
+        recorded = _recorded_path(entry, root)
         if recorded is not None and recorded == wanted:
-            return ext_id, readable
-    return None, readable
+            return ext_id, _recorded_version(entry), readable
+    return None, None, readable
+
+
+def _recorded_version(entry: object) -> str | None:
+    """The version from the manifest Chromium snapshotted at load time.
+
+    Guarded the same way everything else here is: this is a browser state
+    file, and a chained subscript on one is a TypeError waiting for the
+    first user whose profile is mid-migration. An entry with no usable
+    version yields None, which callers must treat as "cannot compare",
+    never as "different".
+    """
+    if not isinstance(entry, dict):
+        return None
+    manifest = entry.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    version = manifest.get("version")
+    return version if isinstance(version, str) and version.strip() else None
 
 
 def _extension_settings(prefs: object) -> dict[str, object]:

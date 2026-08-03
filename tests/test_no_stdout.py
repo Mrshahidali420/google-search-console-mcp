@@ -70,3 +70,60 @@ def test_gsc_setup_writes_nothing_on_the_failure_path(monkeypatch, capsys):
     monkeypatch.setattr(onboarding.profiles, "survey", _boom)
     assert onboarding.setup(open_browser=False)["ok"] is False
     assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Every registered tool, in one sweep
+# ---------------------------------------------------------------------------
+
+#: All eight, called with arguments that need no network and no real
+#: browser. Listed by name rather than by object so that the assertion
+#: below can say WHICH tool printed — a bare "something wrote to stdout"
+#: over eight calls is a bug report nobody can act on.
+_ALL_TOOLS = [
+    ("gsc_list_sites", lambda s: s.gsc_list_sites()),
+    ("gsc_doctor", lambda s: s.gsc_doctor()),
+    ("gsc_check_status", lambda s: s.gsc_check_status(["https://example.com/"])),
+    ("gsc_quota", lambda s: s.gsc_quota()),
+    ("gsc_performance", lambda s: s.gsc_performance("sc-domain:example.com")),
+    ("gsc_submit_sitemaps",
+     lambda s: s.gsc_submit_sitemaps(["https://example.com/sitemap.xml"])),
+    ("gsc_detect_browsers", lambda s: s.gsc_detect_browsers()),
+    ("gsc_setup", lambda s: s.gsc_setup(open_browser=False)),
+]
+
+
+@pytest.mark.parametrize("name,call", _ALL_TOOLS, ids=[t[0] for t in _ALL_TOOLS])
+def test_every_registered_tool_writes_nothing_to_stdout(name, call, monkeypatch,
+                                                        capsys):
+    """The standing guard the whole milestone's definition of done names.
+
+    Every tool runs unconfigured, which is the state a fresh install is in
+    and the state most likely to send something down an error path. No
+    OAuth client means no provider, so nothing here reaches the network.
+    """
+    from gsc_mcp import server
+
+    monkeypatch.delenv("GSC_MCP_CLIENT_ID", raising=False)
+    monkeypatch.delenv("GSC_MCP_CLIENT_SECRET", raising=False)
+    monkeypatch.setattr(server.deps, "EMBEDDED_CLIENT_ID", "")
+    monkeypatch.setattr(server.deps, "EMBEDDED_CLIENT_SECRET", "")
+    # One patch covers both tools that survey: onboarding and
+    # tools_browsers hold the same gsc_core.profiles module object.
+    monkeypatch.setattr(onboarding.profiles, "survey", lambda: [])
+
+    call(server)
+    assert capsys.readouterr().out == "", f"{name} wrote to stdout"
+
+
+def test_the_sweep_covers_every_tool_the_server_registers():
+    """Guards the list above against the server growing a ninth tool.
+
+    A stdout sweep that silently stops covering a new tool is worse than
+    no sweep: it reads as a passing guard.
+    """
+    from gsc_mcp import server
+
+    registered = {name for name in dir(server)
+                  if name.startswith("gsc_") and callable(getattr(server, name))}
+    assert registered == {name for name, _ in _ALL_TOOLS}

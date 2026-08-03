@@ -132,6 +132,29 @@ _NOTE_NOT_DISCOVERABLE = (
     "does not record a Google account, so check you are signed in to it "
     "with the account that owns your Search Console properties."
 )
+_FIX_BROWSER_UNEXPECTED = (
+    "Browser detection failed unexpectedly. The log file records the failure "
+    "type; retry, and if it persists name the browser and profile you want "
+    "to use instead."
+)
+_FIX_EXTENSION_UNEXPECTED = (
+    "The extension check failed unexpectedly. The log file records the "
+    "failure type; retry, and if it persists reload the gsc-mcp extension "
+    "from your browser's extensions page."
+)
+_DETAIL_NO_BROWSER = "no Chromium browser found on this machine"
+_COULD_NOT_CHECK = (
+    "whether the gsc-mcp bridge extension is installed in {where} could not "
+    "be checked"
+)
+#: 3A can see that the extension is REGISTERED. It cannot see whether the
+#: MV3 service worker is alive, because that needs the bridge to attempt a
+#: connection — which is 3B's. The detail says so rather than letting a
+#: green check be read as "the submission path works".
+_NOTE_WORKER_UNKNOWN = (
+    "; whether its background service worker is running is not checked in "
+    "this milestone"
+)
 
 
 @dataclass
@@ -456,6 +479,157 @@ def _extension_action(best: profiles.Candidate, complete: bool) -> str:
               f"Developer mode, choose Load unpacked, and select the folder "
               f"in next.path. Then call gsc_setup() again.")
     return action + _account_caveat(best.profile, brand)
+
+
+# ---------------------------------------------------------------------------
+# gsc_doctor's two setup checks
+#
+# They live here rather than in server.py for two reasons. server.py is
+# already over the file-size ceiling and holds tool registration, not tool
+# logic; and everything these two need — the brand caveats, the extension
+# wording, the "could not check" distinction — is already written here for
+# gsc_setup. Two modules phrasing the same diagnosis differently is how a
+# user ends up being told to reinstall by one tool and to reload by
+# another.
+#
+# Both return the {"name", "ok", "detail", "fix"} shape the other five
+# checks return, both are last in the doctor's list because they cost
+# nothing, and neither raises: a doctor that dies on one check is worse
+# than no doctor.
+# ---------------------------------------------------------------------------
+
+def check_browser() -> dict:
+    """Is there a Chromium browser and profile to drive?
+
+    A raise is reported as a failed check carrying the exception's TYPE
+    NAME only. The message is never included and never logged: an OSError
+    from a browser state file quotes a path containing the operator's
+    account name, and a parse error quotes a file holding their address.
+    """
+    name = "browser"
+    try:
+        best = profiles.recommend(profiles.survey())
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        log.warning("doctor: %s check raised %s", name, type(exc).__name__)
+        return _check(name, False, type(exc).__name__, _FIX_BROWSER_UNEXPECTED)
+
+    if best is None:
+        return _check(name, False, _DETAIL_NO_BROWSER, _ACTION_BROWSER)
+
+    detail = (f"{_where(best)} is the profile to use"
+              + _account_caveat(best.profile, best.installed.brand))
+    return _check(name, True, detail, "")
+
+
+def check_extension() -> dict:
+    """Is the bridge extension loaded into that profile, and is it current?
+
+    Four outcomes, not three. The brief's table lists never-installed,
+    version-mismatch and present; the fourth is "could not be checked",
+    and it is the reason this uses `look_up_extension` rather than
+    `find_extension_id`. A user whose preferences file was momentarily
+    unreadable must not be told to reinstall something that is sitting
+    right there, so "could not be checked" gets its own detail AND its own
+    fix — a shared fix string would make the two indistinguishable to
+    anyone reading the output rather than the code.
+
+    A green check means REGISTERED, not working; see _NOTE_WORKER_UNKNOWN.
+    """
+    name = "extension"
+    try:
+        return _extension_check(name)
+    except Exception as exc:  # noqa: BLE001 — see check_browser
+        log.warning("doctor: %s check raised %s", name, type(exc).__name__)
+        return _check(name, False, type(exc).__name__,
+                      _FIX_EXTENSION_UNEXPECTED)
+
+
+def _extension_check(name: str) -> dict:
+    best = profiles.recommend(profiles.survey())
+    if best is None:
+        return _check(name, False, _DETAIL_NO_BROWSER, _ACTION_BROWSER)
+
+    where = _where(best)
+    try:
+        ext_dir = pairing.extension_dir()
+    except Exception as exc:  # noqa: BLE001 — logged by type: the path names the user
+        log.debug("extension directory unavailable (%s)", type(exc).__name__)
+        return _check(name, False, _COULD_NOT_CHECK.format(where=where)
+                      + " — the extension could not be unpacked, so there was "
+                        "nothing to match against",
+                      _ACTION_EXTENSION_NO_DIR)
+
+    lookup = pairing.look_up_extension(best.installed, best.profile,
+                                       ext_dir=ext_dir)
+    if lookup.extension_id is None:
+        return _absent(name, best, ext_dir, where, lookup.complete)
+    return _present(name, best, ext_dir, where, lookup.version)
+
+
+def _absent(name: str, best: profiles.Candidate, ext_dir, where: str,
+            complete: bool) -> dict:
+    """Not found — and whether that is an answer or a shrug."""
+    url = best.installed.brand.extensions_url
+    install = (f"open {url}, enable Developer mode, choose Load unpacked, "
+               f"and select {ext_dir}.")
+    if complete:
+        return _check(name, False,
+                      f"the gsc-mcp bridge extension is not installed in "
+                      f"{where}",
+                      f"To install it: {install}")
+    return _check(name, False,
+                  _COULD_NOT_CHECK.format(where=where)
+                  + " — a browser preferences file could not be read, so it "
+                    "may already be there",
+                  f"Run gsc_doctor again; if the browser is running, close "
+                  f"it first. If it really is not installed: {install}")
+
+
+def _present(name: str, best: profiles.Candidate, ext_dir, where: str,
+             loaded: str | None) -> dict:
+    """Found — but possibly a build the browser loaded some releases ago.
+
+    A missing version on either side is "cannot compare", never "differs".
+    Telling a user to click Reload because a preferences entry happened to
+    omit a manifest snapshot would be a fabricated instruction, and they
+    would do it.
+    """
+    packaged = pairing.extension_version(ext_dir)
+    if loaded and packaged and loaded != packaged:
+        return _check(
+            name, False,
+            f"the gsc-mcp bridge extension in {where} is loaded at version "
+            f"{loaded}, but the copy on disk is now version {packaged}",
+            f"Click Reload on the gsc-mcp extension in "
+            f"{best.installed.brand.extensions_url}.")
+    shown = loaded or packaged
+    version = f" at version {shown}" if shown else ""
+    return _check(name, True,
+                  f"the gsc-mcp bridge extension is installed in {where}"
+                  f"{version}{_NOTE_WORKER_UNKNOWN}", "")
+
+
+def _check(name: str, ok: bool, detail: str, fix: str) -> dict:
+    """The doctor's check shape, built in one place.
+
+    A failing check with an empty `fix` is the defect this guards: it is
+    the difference between a diagnosis and a complaint, and it is easy to
+    introduce by adding a branch and forgetting the string.
+    """
+    assert ok or fix.strip(), f"{name}: a failing check needs a fix"
+    return {"name": name, "ok": ok, "detail": detail, "fix": fix}
+
+
+def _where(best: profiles.Candidate) -> str:
+    """A profile named the way a human picks one, and no other way.
+
+    Brand label plus on-disk directory. NOT the display name — Chrome
+    labels profiles with the account signed into them often enough that
+    passing it through would leak an address into a transcript — and not
+    the path, which contains the operator's account name on every
+    supported OS.
+    """
+    return f"{best.installed.brand.label} / {best.profile.directory}"
 
 
 def _account_caveat(profile: profiles.Profile, brand) -> str:
