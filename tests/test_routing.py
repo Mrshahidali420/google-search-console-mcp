@@ -214,3 +214,161 @@ def test_route_all_is_scheme_aware_too():
         ("https://example.com/a", HTTPS_PREFIX),
         ("http://example.com/b", HTTP_PREFIX),
     ]
+
+
+# ------------------------------------------------------------ path awareness
+#
+# A URL-prefix property carries a PATH as well as a host:
+# "https://example.com/blog/" is a different property from
+# "https://example.com/", holds different data, and covers only the pages
+# beneath it. Matching on host alone made those two indistinguishable, so
+# every URL on the host resolved to whichever appeared first in the list.
+#
+# That is worse than a coin flip. Because attribution is stable, every URL
+# gets WRITTEN under the winner, and a later
+# gsc_find_unindexed(site="https://example.com/blog/", source="store")
+# reads back nothing -- which a calling model reads as "no indexing
+# problems here" rather than "the data is filed elsewhere".
+
+ROOT = "https://example.com/"
+BLOG = "https://example.com/blog/"
+DEEP = "https://example.com/blog/2026/"
+
+
+def test_path_of_normalises_to_leading_and_trailing_slashes():
+    assert routing.path_of("https://example.com/blog/post") == "/blog/post/"
+    assert routing.path_of("https://example.com/blog/") == "/blog/"
+    assert routing.path_of("https://example.com") == "/"
+    assert routing.path_of("example.com/a") == "/a/"
+
+
+def test_path_of_ignores_the_query_and_fragment():
+    # ?page=2 is not part of what a property covers. Folding it into the
+    # path would make the same page resolve differently with and without
+    # its query string.
+    assert routing.path_of("https://example.com/blog/?page=2#top") == "/blog/"
+
+
+@pytest.mark.parametrize("properties", [[ROOT, BLOG], [BLOG, ROOT]])
+def test_the_sub_path_property_wins_whatever_the_list_order(properties):
+    """The headline case from issue #11."""
+    assert routing.resolve_property(
+        "https://example.com/blog/post", properties) == BLOG
+
+
+@pytest.mark.parametrize("properties", [[ROOT, BLOG], [BLOG, ROOT]])
+def test_a_url_outside_the_sub_path_still_goes_to_the_root(properties):
+    assert routing.resolve_property(
+        "https://example.com/shop/item", properties) == ROOT
+
+
+def test_the_deepest_covering_path_wins():
+    properties = [ROOT, BLOG, DEEP]
+    assert routing.resolve_property(
+        "https://example.com/blog/2026/post", properties) == DEEP
+
+
+def test_a_path_property_does_not_claim_a_lookalike_sibling():
+    """/blog/ must not swallow /blogger/ the way a bare startswith would.
+
+    The same class of bug as notexample.com matching example.com: string
+    prefixes are not path prefixes unless the boundary is enforced.
+    """
+    assert routing.resolve_property(
+        "https://example.com/blogger/post", [BLOG]) is None
+
+
+def test_the_property_path_itself_resolves():
+    # The property's own landing page, with and without the trailing slash.
+    assert routing.resolve_property("https://example.com/blog", [BLOG]) == BLOG
+    assert routing.resolve_property("https://example.com/blog/", [BLOG]) == BLOG
+
+
+def test_an_uncovered_url_returns_none_rather_than_guessing():
+    """None means "no property covers this", which callers already handle.
+
+    Returning the blog property for a /shop/ URL would be a confident wrong
+    answer -- the failure mode this whole module exists to avoid.
+    """
+    assert routing.resolve_property(
+        "https://example.com/shop/item", [BLOG]) is None
+
+
+def test_a_domain_property_takes_over_where_no_path_property_covers():
+    """Falling through to step 3 is the RIGHT outcome, not a miss.
+
+    sc-domain: has no path and covers the whole host, so it still owns the
+    URLs the sub-path property does not.
+    """
+    properties = [BLOG, "sc-domain:example.com"]
+    assert routing.resolve_property(
+        "https://example.com/shop/item", properties) == "sc-domain:example.com"
+    assert routing.resolve_property(
+        "https://example.com/blog/post", properties) == BLOG
+
+
+def test_the_www_toggle_step_is_path_aware_too():
+    properties = ["https://www.example.com/", "https://www.example.com/blog/"]
+    assert routing.resolve_property(
+        "https://example.com/blog/post", properties) == "https://www.example.com/blog/"
+
+
+def test_the_suffix_step_is_path_aware_too():
+    properties = ["https://example.com/", "https://example.com/blog/"]
+    assert routing.resolve_property(
+        "https://deep.example.com/blog/post", properties) == "https://example.com/blog/"
+
+
+def test_a_longer_host_still_beats_a_deeper_path():
+    """Host specificity stays PRIMARY at the suffix step.
+
+    Path depth is a tie-break WITHIN a host, not across hosts: a property
+    for the actual subdomain owns the URL even when a broader property has
+    a deeper path that also covers it.
+    """
+    properties = ["https://example.org/x/", "https://b.example.org/"]
+    assert routing.resolve_property(
+        "https://a.b.example.org/x/y", properties) == "https://b.example.org/"
+
+
+def test_scheme_still_breaks_ties_between_equal_paths():
+    properties = ["http://example.com/blog/", "https://example.com/blog/"]
+    assert routing.resolve_property(
+        "https://example.com/blog/post", properties) == "https://example.com/blog/"
+
+
+def test_paths_are_compared_case_sensitively():
+    """Hosts are case-insensitive; paths are not.
+
+    A server may serve /Blog/ and /blog/ as different pages, and Search
+    Console treats the two as different properties. Lowercasing the path
+    the way host_of() lowercases the host would merge them.
+    """
+    assert routing.resolve_property("https://example.com/Blog/post", [BLOG]) is None
+
+
+def test_route_all_is_path_aware_too():
+    properties = [ROOT, BLOG]
+    assert routing.route_all(
+        ["https://example.com/blog/a", "https://example.com/shop/b"],
+        properties) == [
+        ("https://example.com/blog/a", BLOG),
+        ("https://example.com/shop/b", ROOT),
+    ]
+
+
+def test_a_property_stored_without_its_trailing_slash_still_has_a_boundary():
+    """The case that proves path_of's normalisation is load-bearing.
+
+    test_a_path_property_does_not_claim_a_lookalike_sibling above passes
+    even with normalisation removed, because "https://example.com/blog/"
+    carries its own trailing slash -- it tests the literal, not the code.
+    Search Console hands back a trailing slash today, but nothing here
+    validates that, and one property string missing it would otherwise let
+    /blog swallow every /blogger and /blogroll URL on the host.
+    """
+    stored = "https://example.com/blog"
+    assert routing.resolve_property(
+        "https://example.com/blogger/post", [stored]) is None
+    assert routing.resolve_property(
+        "https://example.com/blog/post", [stored]) == stored

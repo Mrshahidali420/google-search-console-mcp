@@ -22,12 +22,35 @@ Match order, most to least specific:
 3. sc-domain: property covering the host or any subdomain of it
 4. bare host suffix — a URL-prefix property whose host is a suffix of the URL's
 
+Steps 1, 2 and 4 consider only URL-prefix properties whose PATH covers the
+URL; step 3 needs no such filter because an sc-domain: property has no
+path and covers the whole host.
+
 A host can be covered by more than one property at steps 3 and 4 (e.g. both
 "sc-domain:example.com" and "sc-domain:shop.example.com" cover
 "cart.shop.example.com"). Search Console itself resolves that ambiguity by
 preferring the most specific (longest) match, so this does the same rather
 than depending on list order — the caller's property list has no ordering
 guarantee the way the original tool's config.json dict insertion order did.
+
+PATH filters before any of that, at steps 1, 2 and 4. A URL-prefix
+property carries a path as well as a host: "https://example.com/blog/" is
+a different property from "https://example.com/", holds different data,
+and covers only the pages beneath it. Matching on host alone made the two
+indistinguishable, so every URL on the host went to whichever came first
+in the list — and because attribution is stable, every URL was then
+WRITTEN under that winner, leaving gsc_find_unindexed on the other
+property to read back nothing. An empty result reads to a calling model as
+"no problems here" rather than "the data is filed elsewhere", which is the
+silent-empty failure this codebase is written to avoid.
+
+A property that does not cover the URL's path is therefore dropped
+entirely rather than merely ranked lower — it does not partially own the
+URL, so it must fall out of the way and let step 3 answer, where an
+sc-domain: property has no path and genuinely does cover it. Among
+properties that DO cover the path, the deepest wins. This is vacuous for
+the ordinary one-property-per-host case: a root property is "/", which
+every path starts with.
 
 SCHEME is the tie-break of last resort at steps 1, 2 and 4. A host can be
 registered twice — "http://example.com/" AND "https://example.com/" are
@@ -57,6 +80,44 @@ def host_of(url: str) -> str:
     netloc = urlparse(candidate).netloc.lower()
     netloc = netloc.split("@")[-1]  # drop userinfo
     return netloc.split(":")[0]  # drop port
+
+
+def path_of(url: str) -> str:
+    """Normalised path, always with a leading AND a trailing slash.
+
+    Both ends matter. The leading slash makes a bare host ("example.com")
+    produce "/" rather than "", so a root property covers it. The trailing
+    slash is what turns a string prefix into a PATH prefix: without it
+    "/blogger/post".startswith("/blog") is true and the blog property
+    swallows a sibling section — the same lookalike-suffix bug _is_covered
+    exists to prevent on the host side.
+
+    The query and fragment are excluded: ?page=2 is not part of what a
+    property covers, and folding it in would make one page resolve
+    differently with and without it.
+
+    Case is PRESERVED, unlike host_of. A host is case-insensitive by
+    definition; a path is not — a server may serve /Blog/ and /blog/ as
+    different pages, and Search Console registers them as different
+    properties.
+    """
+    candidate = url if "://" in url else f"http://{url}"
+    path = urlparse(candidate).path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path if path.endswith("/") else f"{path}/"
+
+
+def _covers_path(url_path: str, prop_path: str) -> bool:
+    """True if a property at prop_path covers a URL at url_path.
+
+    Both arguments must already be path_of() output; the trailing slash on
+    each is what makes this a path-boundary test rather than a substring
+    one. A root property is "/", which every path starts with, so this is
+    vacuously true for properties that carry no path — which is why adding
+    it does not disturb any single-property-per-host setup.
+    """
+    return url_path.startswith(prop_path)
 
 
 def scheme_of(url: str) -> str:
@@ -97,11 +158,13 @@ def resolve_property(url: str, properties: list[str]) -> str | None:
     host = host_of(url)
     host_bare = _without_www(host)
     scheme = scheme_of(url)
+    path = path_of(url)
 
     def same_scheme(prop: str) -> bool:
         return bool(scheme) and scheme_of(prop) == scheme
 
-    def best(candidates: list[str], specificity: Callable[[str], int]) -> str:
+    def best(candidates: list[str],
+             specificity: Callable[[str], tuple[int, ...]]) -> str:
         """The winner among equally-eligible properties for one step.
 
         `specificity` stays PRIMARY and scheme is only a tie-break within
@@ -117,26 +180,34 @@ def resolve_property(url: str, properties: list[str]) -> str | None:
         return max(candidates, key=lambda prop: (specificity(prop),
                                                  same_scheme(prop)))
 
+    # Only URL-prefix properties that actually COVER this URL's path are
+    # eligible. Filtering here rather than penalising later is deliberate:
+    # a property at /blog/ does not partially own a /shop/ URL, it does not
+    # own it at all, and it must drop out entirely so the search falls
+    # through to step 3 — an sc-domain: property, which has no path and
+    # does own it.
     prefix_hosts = {prop: host_of(prop) for prop in properties
-                    if not prop.startswith("sc-domain:")}
+                    if not prop.startswith("sc-domain:")
+                    and _covers_path(path, path_of(prop))}
     # The domain half of an sc-domain: property is API-supplied and its case
     # is not guaranteed — lower() it here, once, so every comparison below
     # is case-insensitive without each call site having to remember to do it.
     domain_hosts = {prop: prop.removeprefix("sc-domain:").lower()
                     for prop in properties if prop.startswith("sc-domain:")}
 
-    # Step 1: exact host match. Every candidate here is equally specific
-    # (the host matched exactly), so scheme is the only tie-break there is.
+    # Step 1: exact host match. The hosts are identical by construction, so
+    # PATH DEPTH is the specificity that remains — /blog/ beats / for a URL
+    # both cover — and scheme breaks what depth cannot.
     exact = [prop for prop, prop_host in prefix_hosts.items()
              if prop_host == host]
     if exact:
-        return best(exact, lambda prop: 0)
+        return best(exact, lambda prop: (len(path_of(prop)),))
 
-    # Step 2: www/non-www toggle. Equally specific for the same reason.
+    # Step 2: www/non-www toggle. Same reasoning, same tie-break.
     toggled = [prop for prop, prop_host in prefix_hosts.items()
                if _without_www(prop_host) == host_bare]
     if toggled:
-        return best(toggled, lambda prop: 0)
+        return best(toggled, lambda prop: (len(path_of(prop)),))
 
     # Step 3: sc-domain: property covering the host or any subdomain of it.
     domain_matches = [prop for prop, domain in domain_hosts.items()
@@ -148,7 +219,13 @@ def resolve_property(url: str, properties: list[str]) -> str | None:
     suffix_matches = [prop for prop, prop_host in prefix_hosts.items()
                        if _is_covered(host, prop_host)]
     if suffix_matches:
-        return best(suffix_matches, lambda prop: len(prefix_hosts[prop]))
+        # Host length stays ahead of path depth in the tuple: path is a
+        # tie-break WITHIN a host, not across hosts. A property for the
+        # actual subdomain owns the URL even when a broader property
+        # carries a deeper path that also covers it.
+        return best(suffix_matches,
+                    lambda prop: (len(prefix_hosts[prop]),
+                                  len(path_of(prop))))
 
     return None
 
