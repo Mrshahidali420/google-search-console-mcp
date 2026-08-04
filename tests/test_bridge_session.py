@@ -108,6 +108,144 @@ def test_the_bound_port_is_reported_back(session):
     assert session.port > 0
 
 
+# --------------------------------------------- one connection owns the run
+
+def test_a_second_browser_is_refused_while_the_first_is_connected(session):
+    """The bug this exists to stop cost two quota slots for one URL.
+
+    An unpacked extension's ID is a hash of the directory it was loaded
+    from, so the SAME directory loaded into two browsers yields the same ID
+    and the same `chrome-extension://` origin. Pairing cannot tell them
+    apart, and both copies retry the bridge every 30s. Before this rule the
+    second arrival displaced the first mid-submit, submit() saw the bounce
+    and re-sent — and the URL was requested once in each browser while the
+    ledger recorded a single slot.
+    """
+    first = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+
+    second = ws_connect(f"ws://127.0.0.1:{session.port}")
+    second.send(json.dumps({"type": "hello", "token": TOKEN,
+                            "version": "1.5.0"}))
+    assert json.loads(second.recv())["type"] == "hello_busy"
+    second.close()
+
+    # The incumbent still owns the run, and a submit reaches it once —
+    # no bounce, so no resend, so no second click in another window.
+    commands: list[dict] = []
+
+    def reply(command: dict) -> dict:
+        commands.append(command)
+        return {"type": "result", "id": command["id"], "outcome": "submitted"}
+
+    thread = _responder(first, reply)
+    assert session.submit("sc-domain:example.com", "https://example.com/a",
+                          "0", timeout=10) == "submitted"
+    thread.join(SETTLE)
+    assert len(commands) == 1
+    first.close()
+
+
+def test_a_refused_second_browser_is_not_told_to_re_pair(session):
+    """`hello_busy` and `hello_denied` must stay distinct frames.
+
+    background.js treats `hello_denied` as "your token is stale": it drops
+    the token and pairs again. Answering a merely-busy browser that way
+    would make it discard a perfectly good token every 30s.
+    """
+    first = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+    with Captured(bridge.log) as records:
+        second = ws_connect(f"ws://127.0.0.1:{session.port}")
+        second.send(json.dumps({"type": "hello", "token": TOKEN}))
+        reply = json.loads(second.recv())
+        second.close()
+    assert reply["type"] != "hello_denied"
+    assert TOKEN not in records.text
+    first.close()
+
+
+def _targeted(session, exe: str):
+    session.target = SimpleNamespace(installed=SimpleNamespace(exe_path=exe))
+    return session
+
+
+def test_a_connection_from_another_browser_never_reaches_the_token_check(
+        session, monkeypatch):
+    """The kernel is asked which browser is speaking, because the frame lies.
+
+    Not by intent: the ID an unpacked extension presents is a hash of the
+    directory it was loaded from, so a second browser loading the same
+    directory presents the same ID and the same origin, and pairing would
+    hand it the token.
+    """
+    _targeted(session, r"C:\Brave\brave.exe")
+    monkeypatch.setattr(bridge, "peer_exe", lambda conn: r"C:\Chrome\chrome.exe")
+    conn = ws_connect(f"ws://127.0.0.1:{session.port}")
+    conn.send(json.dumps({"type": "hello", "token": TOKEN}))
+    assert json.loads(conn.recv())["type"] == "hello_busy"
+    conn.close()
+    assert session.wait_for_extension(0.5) is False
+
+
+def test_the_target_browser_is_matched_case_insensitively(session, monkeypatch):
+    _targeted(session, r"C:\Program Files\BraveSoftware\brave.exe")
+    monkeypatch.setattr(bridge, "peer_exe",
+                        lambda conn: r"c:\program files\bravesoftware\BRAVE.EXE")
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+    conn.close()
+
+
+def test_an_unidentifiable_peer_is_admitted_rather_than_locked_out(
+        session, monkeypatch):
+    """Ignorance is not evidence. A machine where the owning process cannot
+    be resolved must still be able to run a job; the token stays the gate."""
+    _targeted(session, r"C:\Brave\brave.exe")
+    monkeypatch.setattr(bridge, "peer_exe", lambda conn: None)
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+    conn.close()
+
+
+def test_the_refusal_names_the_browser_but_never_the_path(session, monkeypatch):
+    _targeted(session, r"C:\Users\someone\Brave\brave.exe")
+    monkeypatch.setattr(bridge, "peer_exe",
+                        lambda conn: r"C:\Users\someone\AppData\Chrome\chrome.exe")
+    with Captured(bridge.log) as records:
+        conn = ws_connect(f"ws://127.0.0.1:{session.port}")
+        conn.send(json.dumps({"type": "hello", "token": TOKEN}))
+        conn.recv()
+        conn.close()
+    assert "chrome.exe" in records.text
+    assert "someone" not in records.text
+    assert "AppData" not in records.text
+
+
+def test_a_silent_connection_is_displaced_rather_than_wedging_the_bridge(
+        session, monkeypatch):
+    """Refusing newcomers forever would trade a quota bug for an outage.
+
+    A half-open socket — the browser gone, no FIN delivered — leaves the
+    server holding a connection that will never speak again. The extension
+    pings every 30s, so silence past the grace period is proof of death and
+    the newcomer takes over.
+    """
+    monkeypatch.setattr(bridge, "INCUMBENT_SILENCE", 0.0)
+    first = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+
+    second = _hello(session)          # would raise on a hello_busy
+    assert session.wait_for_extension(SETTLE) is True
+    thread = _responder(second, lambda c: {"type": "result", "id": c["id"],
+                                           "outcome": "submitted"})
+    assert session.submit("sc-domain:example.com", "https://example.com/a",
+                          "0", timeout=10) == "submitted"
+    thread.join(SETTLE)
+    first.close()
+    second.close()
+
+
 # -------------------------------------------------------------------- submit
 
 def test_a_submit_round_trips_its_outcome(session):

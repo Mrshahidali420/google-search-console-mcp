@@ -118,6 +118,10 @@ function pairSelf(port, done) {
         () => finish(true, "paired automatically"));
     } else if (m.type === "pair_denied") {
       finish(false, m.reason || "the tool refused to pair", true);
+    } else if (m.type === "hello_busy") {
+      // Not a refusal to pair — the tool is driving another browser, or is
+      // busy with one. Retry on backoff; do not mark this copy unpaired.
+      finish(false, m.reason || "the tool is busy with another browser");
     }
   };
   sock.onerror = () => finish(false, `no tool listening on port ${port}`);
@@ -132,6 +136,15 @@ function onBridgeMessage(msg) {
     // copy a file — that state used to require a manual fix every time.
     setState("token stale — re-pairing");
     chrome.storage.local.remove("token", () => { try { ws && ws.close(); } catch {} });
+    return;
+  }
+  if (msg.type === "hello_busy") {
+    // A run belongs to ONE browser. Loading this extension into a second one
+    // gives both copies the same ID (it is a hash of the load path), so the
+    // tool cannot tell them apart at the handshake and refuses whichever
+    // arrives second. Keep the token — this is not "you are unpaired" — and
+    // let the reconnect backoff try again.
+    setState(msg.reason ? "standing by — " + msg.reason : "standing by");
     return;
   }
   if (msg.type === "pong") return;

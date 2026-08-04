@@ -31,6 +31,19 @@ def _candidate(brand_key: str = "chrome", directory: str = "Default",
                               score=0, reasons=[])
 
 
+@pytest.fixture(autouse=True)
+def _no_pin(monkeypatch):
+    """No stored settings, unless a test says otherwise.
+
+    Without this the suite reads the REAL config file, so a developer who
+    has pinned a browser with `gsc_use_browser` sees eight failures that
+    say nothing about their change — the pin correctly rejects a fabricated
+    candidate for a browser they did not pin. Tests that exercise pinning
+    pass `settings=` explicitly and are unaffected.
+    """
+    monkeypatch.setattr(target.config, "load", dict)
+
+
 @pytest.fixture
 def one(monkeypatch):
     """A machine with exactly one candidate, and the extension installed."""

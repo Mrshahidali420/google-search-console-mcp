@@ -7,6 +7,7 @@ Protocol (JSON text frames):
     server -> client   {"type":"pair_ok","token":...} | {"type":"pair_denied","reason":...}
     client -> server   {"type":"hello","token":...,"version":...}
     server -> client   {"type":"hello_ok"} | {"type":"hello_denied"}
+                       | {"type":"hello_busy","reason":...}
     server -> client   {"type":"submit","id":...,"property":...,"url":...,"authuser":...}
     client -> server   {"type":"result","id":...,"outcome":...,"detail":...?}
     client -> server   {"type":"progress","id":...,"stage":...}   (informational)
@@ -16,6 +17,14 @@ Protocol (JSON text frames):
 Security: bound to 127.0.0.1 only. The first frame must be a hello carrying
 the shared token, or a pair_request that is verified against the browser
 profile before the token is handed over — see pairing.verify_pair_request.
+
+`hello_busy` is the third answer, and it exists because an unpacked
+extension's ID is a hash of the directory it was loaded from: load the same
+directory into two browsers and both present the same ID and the same
+origin, so neither pairing nor the token can tell them apart. One
+connection owns a run — see _claim — and every other arrival is turned away
+with `hello_busy`, which unlike `hello_denied` does not tell the extension
+to throw its token away.
 
 This module is transport only. It knows nothing about quota, the database,
 or what an outcome means; that is submit.py's job.
@@ -27,6 +36,7 @@ one localhost server, one authenticated connection, one blocking RPC.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import subprocess
 import threading
@@ -68,6 +78,49 @@ KNOWN_OUTCOMES = frozenset({
     "captcha", "captcha_after_click", "auth_required",
     "account_mismatch", "rate_limited", "skipped", "error",
 })
+
+
+#: How long a fresh connection waits for the live one to clear before it is
+#: turned away. Covers the race between a dying handler's release and the
+#: reconnect that follows it; short enough that a second browser retrying on
+#: its 30s alarm is refused long before its next attempt.
+CLAIM_WAIT = 3.0
+
+#: Silence after which the live connection is presumed dead and a newcomer
+#: may take the run. The extension pings every 30s, so three missed pings.
+#: Bounds the damage of a half-open socket to one grace period instead of
+#: the whole run.
+INCUMBENT_SILENCE = 90.0
+
+
+def peer_exe(conn: object) -> str | None:
+    """The executable behind a localhost connection, or None if unknowable.
+
+    Matching is on the loopback port pair, which the kernel guarantees is
+    unique for the life of the connection. Returns None — never raises and
+    never guesses — when psutil is unavailable, the socket has already gone,
+    or the OS declines to name the owner of a process this one does not own.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        remote = conn.remote_address  # type: ignore[attr-defined]
+        port = int(remote[1])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+    try:
+        for candidate in psutil.net_connections(kind="tcp"):
+            if not candidate.laddr or candidate.laddr.port != port:
+                continue
+            if candidate.pid is None:
+                return None
+            return psutil.Process(candidate.pid).exe()
+    except Exception as exc:  # noqa: BLE001 — every psutil path is best-effort
+        log.debug("bridge: could not identify the peer process (%s)",
+                  type(exc).__name__)
+    return None
 
 
 def token_path() -> Path:
@@ -154,6 +207,9 @@ class BridgeSession:
         # rather than on the next poll tick.
         self._conn_cv = threading.Condition(self._conn_lock)
         self._connected = threading.Event()
+        #: When the live connection was last heard from. Read by _claim to
+        #: tell a working connection from a half-open one.
+        self._last_seen = 0.0
         self._pending: dict[str, dict] = {}
         self._pending_lock = threading.Lock()
         self._stopped = False
@@ -466,6 +522,14 @@ class BridgeSession:
                       type(exc).__name__)
             return
 
+        # Before pairing, not after: an unpacked extension's ID is a hash of
+        # the directory it was loaded from, so the same directory loaded into
+        # a second browser produces the same ID and the same origin, and
+        # verify_pair_request would hand that browser the token.
+        if not self._peer_is_the_target(conn):
+            self._refuse_busy(conn, "wrong browser")
+            return
+
         if hello and hello.get("type") == "pair_request":
             self._handle_pair(conn, hello)
             return
@@ -482,23 +546,17 @@ class BridgeSession:
             log.warning("bridge: rejected a connection (bad or missing token)")
             return
 
+        if not self._claim(conn):
+            self._refuse_busy(conn, "another browser holds this run")
+            return
+
         try:
             conn.send(json.dumps({"type": "hello_ok"}))
         except Exception as exc:  # noqa: BLE001 — it hung up mid-handshake
             log.debug("bridge: could not acknowledge a hello (%s)",
                       type(exc).__name__)
+            self._release(conn)
             return
-        with self._conn_cv:
-            self._conn = conn
-            self._gen += 1
-            # Inside the lock, with the _conn publication it belongs to.
-            # Set outside it, a handler parked in the gap while stop() runs
-            # re-set this flag AFTER stop() had cleared it, leaving
-            # wait_for_extension() answering True for a dead session. The
-            # ordering is strictly _conn_lock -> Event and never the
-            # reverse, so there is no deadlock to trade for it.
-            self._connected.set()
-            self._conn_cv.notify_all()
         log.info("bridge: extension connected")
 
         try:
@@ -515,6 +573,10 @@ class BridgeSession:
                     raw = conn.recv(timeout=1.0)
                 except TimeoutError:
                     continue
+                # Any frame at all counts as proof of life, malformed
+                # included: what _claim reads off this is whether the socket
+                # still has a browser behind it, not what it said.
+                self._last_seen = time.monotonic()
                 message = parse_message(raw)
                 if message is None:
                     continue
@@ -522,17 +584,117 @@ class BridgeSession:
         except Exception as exc:  # noqa: BLE001 — a closed socket ends the loop
             log.debug("bridge: connection loop ended (%s)", type(exc).__name__)
         finally:
-            with self._conn_cv:
-                if self._conn is conn:
-                    self._conn = None
-                    # Only clear the ready-signal while this connection is
-                    # still the active one. A reconnecting extension may
-                    # already have set it for the NEW connection; clearing
-                    # unconditionally would hide that and stall
-                    # wait_for_extension.
-                    self._connected.clear()
-                self._conn_cv.notify_all()
+            self._release(conn)
             log.info("bridge: extension disconnected")
+
+    # -- who owns the run -------------------------------------------------
+    def _claim(self, conn: object) -> bool:
+        """Make `conn` the live connection, or refuse it. One owner at a time.
+
+        The rule is first-come: a connection that is already live is never
+        displaced by a new arrival, because displacing one mid-submit makes
+        submit() see a bounce and re-send — which in a second browser is a
+        second Request Indexing click for one recorded quota slot.
+
+        Two things keep that rule from becoming a wedge:
+
+        * A short wait, not an instant refusal. A genuine reconnect after a
+          drop races the dying handler's release; waiting on the condition
+          means the fresh socket is admitted the moment the old one clears
+          rather than being bounced for losing a scheduling race.
+        * A silence limit. A half-open socket — browser gone, no FIN
+          delivered — would otherwise hold the claim forever and lock the
+          bridge out of its own browser. The extension pings every 30s, so
+          silence well past that is proof of death, and the newcomer takes
+          over.
+        """
+        deadline = time.monotonic() + CLAIM_WAIT
+        with self._conn_cv:
+            while self._conn is not None and not self._stopped:
+                silent = time.monotonic() - self._last_seen
+                if silent >= INCUMBENT_SILENCE:
+                    log.warning("bridge: the connected extension has been "
+                                "silent for %ds — handing the run to the "
+                                "connection that just arrived", int(silent))
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._conn_cv.wait(remaining)
+            if self._stopped:
+                return False
+            self._conn = conn
+            self._gen += 1
+            self._last_seen = time.monotonic()
+            # Inside the lock, with the _conn publication it belongs to.
+            # Set outside it, a handler parked in the gap while stop() runs
+            # re-set this flag AFTER stop() had cleared it, leaving
+            # wait_for_extension() answering True for a dead session. The
+            # ordering is strictly _conn_lock -> Event and never the
+            # reverse, so there is no deadlock to trade for it.
+            self._connected.set()
+            self._conn_cv.notify_all()
+        return True
+
+    def _release(self, conn: object) -> None:
+        with self._conn_cv:
+            if self._conn is conn:
+                self._conn = None
+                # Only clear the ready-signal while this connection is
+                # still the active one. A reconnecting extension may
+                # already have set it for the NEW connection; clearing
+                # unconditionally would hide that and stall
+                # wait_for_extension.
+                self._connected.clear()
+            self._conn_cv.notify_all()
+
+    def _refuse_busy(self, conn: object, reason: str) -> None:
+        """Turn a connection away without telling it to throw its token out.
+
+        Deliberately not `hello_denied`: background.js reads that as "your
+        token is stale", drops it and re-pairs. A browser that is merely
+        second in the queue must keep its token and just retry on backoff.
+        """
+        try:
+            conn.send(json.dumps({"type": "hello_busy", "reason": reason}))
+        except Exception as exc:  # noqa: BLE001 — the peer may be gone
+            log.debug("bridge: could not send hello_busy (%s)",
+                      type(exc).__name__)
+        log.info("bridge: turned a connection away (%s)", reason)
+
+    def _peer_is_the_target(self, conn: object) -> bool:
+        """False only when the OS positively names a DIFFERENT browser.
+
+        The extension cannot be asked which browser it is running in: the ID
+        it presents is derived from the load path, so two browsers sharing
+        the extension directory present the same one, and a frame is
+        spoofable in any case. The socket's owning process is not — ask the
+        kernel instead.
+
+        Unknowable is not a refusal. On any machine where the connection or
+        the process cannot be resolved this returns True and the token check
+        remains the gate, because refusing on ignorance would break the
+        normal case on some machines to defend against an abnormal one.
+        """
+        expected = getattr(getattr(self.target, "installed", None),
+                           "exe_path", None)
+        if not expected:
+            return True
+        peer = peer_exe(conn)
+        if peer is None:
+            return True
+        try:
+            same = os.path.normcase(str(peer)) == os.path.normcase(str(expected))
+        except (TypeError, ValueError):
+            return True
+        if not same:
+            # Neither path is logged: they are machine paths and one of them
+            # carries the user's install layout. The name alone is enough to
+            # act on.
+            log.warning("bridge: a connection came from %s, which is not the "
+                        "browser this run is driving — refusing it",
+                        os.path.basename(str(peer)))
+        return same
 
     def _token_matches(self, hello: dict | None) -> bool:
         """A well-formed hello carrying the right token, in constant time."""
