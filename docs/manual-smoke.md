@@ -365,6 +365,13 @@ So:
   is not adjustable downward. A five-URL run is up to fifteen minutes of
   nothing appearing to happen. **That is the tool working.**
 
+- **Load the extension into exactly one browser profile**, and check
+  `gsc_doctor()`'s `extension` detail says so before you start. Copies
+  loaded from one directory all present the same ID, so the bridge cannot
+  tell them apart; only one drives the run, but the one that wins the race
+  may not be the window you are watching. This cost two slots for one URL
+  before the bridge refused the second connection.
+
 Record `gsc_quota()`'s `spendable_free` for the property before you start
 and again at the end; the difference is what this pass cost.
 
@@ -421,18 +428,7 @@ flight.
 - [ ] No further URL is attempted.
 - [ ] The job lands in state `stopped_user`.
 
-### 9.6 A genuine `Quota Exceeded` from Google
-
-The end of the pass, because it costs whatever is left. Keep submitting
-against the same property until Google refuses one.
-
-- [ ] The run stops at that URL rather than trying the rest.
-- [ ] The job lands in state `stopped_throttled`.
-- [ ] `stop_reason` names the refusal.
-- [ ] `gsc_quota()` shows that property at zero `spendable_free`, and the
-      other properties unchanged — the budget is per property.
-
-### 9.7 A restart mid-job
+### 9.6 A restart mid-job
 
 Start a job, then kill the server process while it is running and start it
 again.
@@ -445,6 +441,19 @@ again.
       stops showing a slot stuck in flight. The grace period is
       deliberate: a row opened moments ago may belong to a submission
       another process still has in flight, and closing it would steal it.
+
+### 9.7 A genuine `Quota Exceeded` from Google
+
+**Last, and only last.** It ends with the property at zero, so every step
+above has to be finished before you start it — 9.6 in particular cannot
+begin a job with no slots to spend. Keep submitting against the same
+property until Google refuses one.
+
+- [ ] The run stops at that URL rather than trying the rest.
+- [ ] The job lands in state `stopped_throttled`.
+- [ ] `stop_reason` names the refusal.
+- [ ] `gsc_quota()` shows that property at zero `spendable_free`, and the
+      other properties unchanged — the budget is per property.
 
 ---
 
