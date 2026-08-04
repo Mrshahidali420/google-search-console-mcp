@@ -23,7 +23,7 @@ import pytest
 
 from _logcheck import capturing, logged_text
 from gsc_core import browsers, pairing, profiles
-from gsc_mcp import onboarding, server
+from gsc_mcp import onboarding, server, target
 
 EXTENSION_ID = "b" * 32
 ADDRESS = "operator@example.com"
@@ -219,6 +219,41 @@ def test_extension_present_is_ok_and_defers_worker_liveness(tmp_path,
     assert check["fix"] == ""
     assert "installed" in check["detail"]
     assert "not checked" in check["detail"]
+
+
+def test_a_second_copy_of_the_extension_is_named_in_the_green_check(
+        tmp_path, surveyed):
+    """The state that cost two quota slots for one URL, made visible.
+
+    Copies loaded from one directory all present the same ID, so the bridge
+    cannot tell them apart at the handshake and every copy polls it. Only
+    one connection drives a run now, but which copy wins is a race — and a
+    doctor that says nothing leaves the operator watching the wrong window.
+    """
+    both = [_candidate(tmp_path, brand_key="chrome"),
+            _candidate(tmp_path, brand_key="brave")]
+    surveyed(both)
+    for candidate in both:
+        _write_prefs(candidate, pairing.extension_dir(),
+                     version=_packaged_version())
+    chosen = target.select(both).candidate
+    unused = next(c for c in both if c is not chosen)
+
+    check = onboarding.check_extension()
+    assert check["ok"] is True, "a second copy is a surprise, not a failure"
+    detail = check["detail"]
+    assert "ALSO loaded in" in detail
+    assert unused.installed.brand.label in detail.split("ALSO loaded in")[1]
+
+
+def test_one_copy_carries_no_second_profile_caveat(tmp_path, surveyed):
+    candidate = _candidate(tmp_path, brand_key="chrome")
+    surveyed([candidate])
+    _write_prefs(candidate, pairing.extension_dir(),
+                 version=_packaged_version())
+    check = onboarding.check_extension()
+    assert check["ok"] is True
+    assert "ALSO loaded in" not in check["detail"]
 
 
 def test_an_unrecorded_version_is_not_a_mismatch(tmp_path, surveyed):

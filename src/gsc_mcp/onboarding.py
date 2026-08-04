@@ -611,7 +611,8 @@ def _extension_check(name: str) -> dict:
     if lookup.extension_id is None:
         return _absent(name, best, where, lookup.complete,
                        _elsewhere(candidates, best, ext_dir))
-    return _present(name, best, ext_dir, where, lookup.version)
+    return _present(name, best, ext_dir, where, lookup.version,
+                    _holders(candidates, best, ext_dir))
 
 
 def _elsewhere(candidates: list[profiles.Candidate], best: profiles.Candidate,
@@ -630,21 +631,36 @@ def _elsewhere(candidates: list[profiles.Candidate], best: profiles.Candidate,
     directory is what identifies a profile to a human, and it is what
     gsc_detect_browsers returns already.
     """
+    holders = _holders(candidates, best, ext_dir)
+    if not holders:
+        return ""
+    other = holders[0]
+    return (f" — it IS installed in {other}, so either load it into "
+            f"the profile above as well, or call "
+            f"gsc_use_browser() to pin {other} instead")
+
+
+def _holders(candidates: list[profiles.Candidate], best: profiles.Candidate,
+             ext_dir) -> list[str]:
+    """Every OTHER profile with the extension in it. Never raises.
+
+    Profiles, not browsers. Two profiles of one browser get one copy of the
+    extension each and each copy opens its own connection, so "the same
+    browser" is no defence.
+    """
+    found: list[str] = []
     for candidate in candidates:
         if candidate.profile is best.profile:
             continue
         try:
-            found = pairing.has_extension(candidate.installed,
-                                          candidate.profile, ext_dir=ext_dir)
+            here = pairing.has_extension(candidate.installed,
+                                         candidate.profile, ext_dir=ext_dir)
         except Exception as exc:  # noqa: BLE001 — one profile of many
             log.debug("extension check failed (%s)", type(exc).__name__)
             continue
-        if found:
-            other = _where(candidate)
-            return (f" — it IS installed in {other}, so either load it into "
-                    f"the profile above as well, or call "
-                    f"gsc_use_browser() to pin {other} instead")
-    return ""
+        if here:
+            found.append(_where(candidate))
+    return found
 
 
 def _absent(name: str, best: profiles.Candidate, where: str,
@@ -676,7 +692,7 @@ def _absent(name: str, best: profiles.Candidate, where: str,
 
 
 def _present(name: str, best: profiles.Candidate, ext_dir, where: str,
-             loaded: str | None) -> dict:
+             loaded: str | None, others: list[str] | None = None) -> dict:
     """Found — but possibly a build the browser loaded some releases ago.
 
     A missing version on either side is "cannot compare", never "differs".
@@ -718,7 +734,27 @@ def _present(name: str, best: profiles.Candidate, ext_dir, where: str,
         version = ""
     return _check(name, True,
                   f"the gsc-mcp bridge extension is installed in {where}"
-                  f"{version}{_NOTE_WORKER_UNKNOWN}", "")
+                  f"{version}{_NOTE_WORKER_UNKNOWN}{_also_in(others)}", "")
+
+
+def _also_in(others: list[str] | None) -> str:
+    """The copies that are NOT being driven, named.
+
+    Every copy of the extension polls the bridge every 30s, and they are
+    indistinguishable at the handshake: an unpacked extension's ID is a
+    hash of the load path, so copies loaded from one directory all present
+    the same ID. A run belongs to one connection and the rest are turned
+    away, but which copy gets there first is a race, and the loser is
+    whichever profile the operator was expecting to watch.
+
+    Green, not red: with one connection per run this is a surprise, not a
+    fault, and failing the check would refuse to run a job that works.
+    """
+    if not others:
+        return ""
+    return (f"; it is ALSO loaded in {', '.join(others)} — a run drives one "
+            f"profile and the others are turned away, so remove the copies "
+            f"you are not using to be sure which one you are watching")
 
 
 def _check(name: str, ok: bool, detail: str, fix: str) -> dict:
