@@ -259,6 +259,62 @@ def test_recommend_surveys_the_machine_when_given_nothing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# No authorised address — the state EVERY real machine is in today
+# ---------------------------------------------------------------------------
+#
+# The current scope set (webmasters only) returns no identity claim, so
+# nothing ever writes account_email and every call below arrives with None.
+# Until these tests existed, all thirteen ranking tests supplied an address,
+# and the untested branch is the one that shipped wrong: an unknowable brand
+# outranked a profile with a Google account visibly signed in.
+
+def test_a_visible_google_account_beats_an_unknowable_brand_when_none_is_authorised():
+    # The whole point. Chrome shows a Google account; Brave shows nothing
+    # because Brave cannot show anything. Preferring Brave here means
+    # preferring the browser we know LESS about, and on a machine where
+    # Chrome holds the only Search Console session it is simply wrong.
+    candidates = [_candidate("chrome", "Default", "someone@example.com"),
+                  _candidate("brave", "Default", None)]
+    best = profiles.recommend(candidates, account_email=None)
+    assert best.installed.brand.key == "chrome"
+
+
+def test_no_reason_claims_a_mismatch_that_was_never_checked():
+    # "though not the one you authorised" asserts a comparison. With no
+    # authorised address there was no comparison, so the sentence is a
+    # statement the code cannot support -- and it is shown to the user.
+    candidates = [_candidate("chrome", "Default", "someone@example.com")]
+    best = profiles.recommend(candidates, account_email=None)
+    assert not any("you authorised" in reason for reason in best.reasons)
+
+
+def test_an_unrelated_address_is_still_not_echoed_when_none_is_authorised():
+    candidates = [_candidate("chrome", "Default", "someone@example.com")]
+    best = profiles.recommend(candidates, account_email=None)
+    assert not any("someone@example.com" in reason for reason in best.reasons)
+
+
+def test_an_unknowable_brand_still_beats_a_reporting_brand_signed_out():
+    # The original rationale, which is correct and must survive the fix:
+    # Brave's empty account_info is a fact about the BRAND, so it must not
+    # lose to a Chrome profile that is provably signed out.
+    candidates = [_candidate("chrome", "Default", None),
+                  _candidate("brave", "Profile 2", None)]
+    best = profiles.recommend(candidates, account_email=None)
+    assert best.installed.brand.key == "brave"
+
+
+def test_a_known_mismatch_still_ranks_below_an_unknowable_brand():
+    # The other half of the original rationale. When an address IS known,
+    # "signed in as somebody else" is worse than "cannot tell", because
+    # the wrong account is positive evidence of a session that will fail.
+    candidates = [_candidate("chrome", "Default", "someone@example.com"),
+                  _candidate("brave", "Profile 2", None)]
+    best = profiles.recommend(candidates, account_email="me@example.com")
+    assert best.installed.brand.key == "brave"
+
+
+# ---------------------------------------------------------------------------
 # Brand facts
 # ---------------------------------------------------------------------------
 

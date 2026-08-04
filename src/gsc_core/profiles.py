@@ -218,26 +218,40 @@ def _read_json(path: Path) -> object | None:
 # a STRICTLY stronger one; the arithmetic is checked by _assert_bands below
 # rather than left to the reader to verify.
 #
-# Three account states, not two:
+# Four account states, not three:
 #
 #   MATCHED       the profile is signed in as the account that completed
 #                 OAuth. Proof, and the whole point of the layer.
+#   PRESENT       a Google account is signed in, and there is no authorised
+#                 address to compare it against.
 #   UNKNOWABLE    the brand does not record accounts at all
 #                 (``reports_google_account`` is False), and none was found.
 #                 Nothing is known either way.
-#   SIGNED_IN     signed in as some other account.
+#   MISMATCHED    signed in as some other account — and we KNOW it is some
+#                 other account, because an authorised address was supplied.
 #   (signed out)  the brand does record accounts and none was found. Zero.
 #
-# UNKNOWABLE outranks SIGNED_IN deliberately. Brave ships no Google Sync, so
+# UNKNOWABLE outranks MISMATCHED deliberately. Brave ships no Google Sync, so
 # its ``account_info`` is empty even for a user signed into Google in that
 # browser: treating that as "signed out" would rank the browser this
 # toolkit actually drives below every Chrome profile on a fact about the
-# BRAND rather than about the profile. It stays far below MATCHED, because
-# a profile that provably belongs to the right account is still the better
-# answer whenever one exists.
+# BRAND rather than about the profile. A profile signed in as the WRONG
+# account, by contrast, is positive evidence of a session that will be
+# refused, so it ranks below "cannot tell".
+#
+# PRESENT exists because that argument does not survive the address being
+# unknown, which is the case on every machine today: the current scope set
+# returns no identity claim, so nothing writes account_email and MATCHED is
+# unreachable. Without an address, "signed in to Google" is not evidence of
+# the wrong account — it is the only positive evidence available that a
+# Google session exists at all, and it must outrank knowing nothing.
+# Collapsing PRESENT into MISMATCHED is what made Brave beat a signed-in
+# Chrome on a real machine, and the reason it went unnoticed is that the
+# ranking tests all supplied an address.
 _SCORE_ACCOUNT_MATCHED = 100
+_SCORE_ACCOUNT_PRESENT = 30
 _SCORE_ACCOUNT_UNKNOWABLE = 20
-_SCORE_ACCOUNT_SIGNED_IN = 10
+_SCORE_ACCOUNT_MISMATCHED = 10
 _SCORE_DEFAULT_PROFILE = 1
 _BRAND_BONUS_TOP = 5
 
@@ -345,10 +359,17 @@ def _score_account(profile: Profile, brand: browsers.Brand,
         return (_SCORE_ACCOUNT_MATCHED,
                 [f"it is signed in as {account_email}, the account you "
                  "authorised"])
-    if profile.email:
-        return (_SCORE_ACCOUNT_SIGNED_IN,
+    if profile.email and account_email:
+        return (_SCORE_ACCOUNT_MISMATCHED,
                 ["it is signed in to a Google account, though not the one "
                  "you authorised"])
+    if profile.email:
+        # No authorised address to compare against, so the sentence above
+        # would be asserting a mismatch nobody checked. The address found
+        # here is still never quoted — see Candidate.reasons.
+        return (_SCORE_ACCOUNT_PRESENT,
+                ["it is signed in to a Google account; there is no "
+                 "authorised account on record to compare it against"])
     if not brand.reports_google_account:
         return (_SCORE_ACCOUNT_UNKNOWABLE,
                 [f"{brand.label} does not record which account is signed in, "
@@ -376,8 +397,9 @@ def _assert_bands() -> None:
     proven one produces a plausible-looking wrong recommendation.
     """
     tiebreaks = _BRAND_BONUS_TOP + _SCORE_DEFAULT_PROFILE
-    assert _SCORE_ACCOUNT_UNKNOWABLE + tiebreaks < _SCORE_ACCOUNT_MATCHED
-    assert _SCORE_ACCOUNT_SIGNED_IN + tiebreaks < _SCORE_ACCOUNT_UNKNOWABLE
+    assert _SCORE_ACCOUNT_PRESENT + tiebreaks < _SCORE_ACCOUNT_MATCHED
+    assert _SCORE_ACCOUNT_UNKNOWABLE + tiebreaks < _SCORE_ACCOUNT_PRESENT
+    assert _SCORE_ACCOUNT_MISMATCHED + tiebreaks < _SCORE_ACCOUNT_UNKNOWABLE
 
 
 _assert_bands()
