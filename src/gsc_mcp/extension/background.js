@@ -25,7 +25,7 @@ function pushRecent(url, outcome) {
 // is refused. Nothing here needs a human. The tool only listens while a run is
 // active, so most attempts fail by design — the point is to already be knocking
 // when one starts.
-const VERSION = "1.10.0";
+const VERSION = "1.11.0";
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 15000;
 let retryMs = RETRY_MIN_MS;

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GSC MCP Bridge",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "Drives Search Console Request Indexing for the local gsc-mcp server over a localhost bridge.",
   "permissions": ["storage", "tabs", "alarms", "debugger"],
   "host_permissions": ["https://search.google.com/*"],
