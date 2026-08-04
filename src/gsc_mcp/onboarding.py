@@ -612,6 +612,22 @@ def _present(name: str, best: profiles.Candidate, ext_dir, where: str,
     Telling a user to click Reload because a preferences entry happened to
     omit a manifest snapshot would be a fabricated instruction, and they
     would do it.
+
+    For US that missing snapshot is not a rarity, it is the rule. Chromium
+    records a manifest for extensions it keeps its own copy of and records
+    none for an unpacked one, which it re-reads from disk at every load —
+    and unpacked is the only way this bridge is ever installed. So ``loaded``
+    arrives None on every real machine and the mismatch branch below cannot
+    fire in production. It is kept because it is correct, and because the
+    day this ships packed it starts working; the version the browser is
+    RUNNING has to come from the extension itself, over the bridge.
+
+    Which leaves the trap this function fell into: with only the disk number
+    in hand, printing it as "installed ... at version X" states a fact about
+    the browser that was read from a file. It is wrong precisely when it
+    matters — just after an upgrade, when disk has moved on and the browser
+    is still running the old code, the exact case the mismatch branch was
+    written for. Say which number is known, and say the other cannot be had.
     """
     packaged = pairing.extension_version(ext_dir)
     if loaded and packaged and loaded != packaged:
@@ -621,8 +637,14 @@ def _present(name: str, best: profiles.Candidate, ext_dir, where: str,
             f"{loaded}, but the copy on disk is now version {packaged}",
             f"Click Reload on the gsc-mcp extension in "
             f"{best.installed.brand.extensions_url}.")
-    shown = loaded or packaged
-    version = f" at version {shown}" if shown else ""
+    if loaded:
+        version = f" at version {loaded}"
+    elif packaged:
+        version = (f"; the copy on disk is version {packaged}, and the "
+                   f"version the browser has actually loaded cannot be read "
+                   f"for an unpacked extension")
+    else:
+        version = ""
     return _check(name, True,
                   f"the gsc-mcp bridge extension is installed in {where}"
                   f"{version}{_NOTE_WORKER_UNKNOWN}", "")

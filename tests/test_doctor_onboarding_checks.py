@@ -75,12 +75,22 @@ def surveyed(monkeypatch):
     return _set
 
 
-def _write_prefs(candidate, ext_dir, *, version="1.10.0", ext_id=EXTENSION_ID):
-    """The Preferences entry Chromium writes for a loaded unpacked extension.
+def _write_prefs(candidate, ext_dir, *, version=None, ext_id=EXTENSION_ID):
+    """The Preferences entry Chromium writes for a loaded extension.
 
-    Chromium records the whole manifest it read at load time, which is what
-    makes "the copy on disk has moved on since you loaded it" detectable at
-    all: the extracted manifest is refreshed by pip, this snapshot is not.
+    ``version`` defaults to None because that is what an UNPACKED extension
+    looks like, and unpacked is the only way this bridge is ever installed.
+    Chromium snapshots a manifest for extensions it owns a copy of — store,
+    sideloaded, component — and records none for one it re-reads from your
+    disk on every load. Measured on a real profile: 22 of 22 packed entries
+    carried a snapshot, the single unpacked entry carried none.
+
+    This default used to be a version string, and that is exactly how the
+    bug it now guards got in. Every test inherited a manifest snapshot that
+    real Chromium never writes for our case, so the whole version-comparison
+    path was only ever exercised in a state that cannot occur, and the
+    branch that DOES occur went unchecked. Pass ``version=`` explicitly to
+    model a packed install.
     """
     entry: dict = {"path": str(ext_dir)}
     if version is not None:
@@ -214,10 +224,11 @@ def test_extension_present_is_ok_and_defers_worker_liveness(tmp_path,
 def test_an_unrecorded_version_is_not_a_mismatch(tmp_path, surveyed):
     """"Cannot compare" is not "differs".
 
-    A preferences entry that carries no manifest snapshot is an ordinary
-    state — Chromium's file, Chromium's rules. Reporting a mismatch there
-    would tell the user to click Reload for nothing, and they would do it,
-    and it would not help, and they would stop trusting the tool.
+    A preferences entry that carries no manifest snapshot is not an edge
+    case — for an unpacked extension it is the ONLY case, and unpacked is
+    the only way this bridge is installed. Reporting a mismatch here would
+    tell the user to click Reload for nothing, and they would do it, and it
+    would not help, and they would stop trusting the tool.
     """
     candidate = _candidate(tmp_path, brand_key="chrome")
     surveyed([candidate])
@@ -225,6 +236,44 @@ def test_an_unrecorded_version_is_not_a_mismatch(tmp_path, surveyed):
     check = onboarding.check_extension()
     assert check["ok"] is True
     assert "Reload" not in check["fix"]
+
+
+def test_the_disk_version_is_never_reported_as_the_one_the_browser_loaded(
+        tmp_path, surveyed):
+    """The claim the doctor is not entitled to make.
+
+    With no snapshot to read, the only version in hand is the one on disk.
+    Printing it as "installed ... at version X" states a fact about the
+    browser that came from a file read, and it is wrong in the one case
+    that matters: straight after an upgrade, when disk has moved and the
+    browser is still running last release's code. Observed live at version
+    99.0.0 on disk while Chrome ran 1.10.0, reported green.
+    """
+    candidate = _candidate(tmp_path, brand_key="chrome")
+    surveyed([candidate])
+    _write_prefs(candidate, pairing.extension_dir(), version=None)
+    check = onboarding.check_extension()
+    packaged = _packaged_version()
+    assert check["ok"] is True
+    assert f"at version {packaged}" not in check["detail"]
+    assert "on disk" in check["detail"]
+
+
+def test_an_unreadable_loaded_version_says_so_rather_than_going_quiet(
+        tmp_path, surveyed):
+    """Silence would read as agreement.
+
+    Dropping the version entirely would be honest but useless: the user
+    gets no way to tell whether the upgrade they just ran is live. Say
+    which number is known, and say plainly that the other one cannot be
+    read from outside the browser.
+    """
+    candidate = _candidate(tmp_path, brand_key="chrome")
+    surveyed([candidate])
+    _write_prefs(candidate, pairing.extension_dir(), version=None)
+    detail = onboarding.check_extension()["detail"]
+    assert _packaged_version() in detail
+    assert "cannot be read" in detail
 
 
 def test_unreadable_preferences_is_not_reported_as_not_installed(
