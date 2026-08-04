@@ -5,10 +5,16 @@
 The automated suite proves that the code does the right thing when handed
 fabricated browsers, fabricated preferences files and a fake Google. It
 cannot prove that a real person can sign in, because every OAuth path in it
-is exercised against fakes and no real Google account has ever
-authenticated against this code. This checklist is what stands in for that,
-and until someone has run it, "you can sign in with gsc-mcp" is a claim the
-repository cannot support.
+is exercised against fakes. This checklist is what stands in for that.
+
+**Steps 1-8 have been walked end to end, once, on Windows 11, against a
+real Google account with nine properties (2026-08-04).** They found two
+real defects, both since fixed — a profile ranking that crashed when no
+account was on record, and an extension check that reported a version off
+the disk as though it were the one the browser was running. That is the
+argument for running this rather than trusting the suite. **Step 9 has
+never been run by anyone**, so every claim about submission in this
+repository still rests on code review alone.
 
 It comes in two passes. **Steps 1-8 spend no indexing quota** — the most
 expensive call in them is `sites.list` — and are the read-only path.
@@ -93,7 +99,9 @@ launches the server itself from a config file, put the variables in that
 config's `env` block instead and confirm the client was restarted
 afterwards.
 
-- [ ] The client lists eight `gsc_*` tools.
+- [ ] The client lists fifteen `gsc_*` tools. (The count is asserted by
+      `tests/test_server_smoke.py`; if your client shows a different
+      number it is showing you a stale server, not a finding.)
 
 ## 3. First `gsc_setup()` — expect a consent URL
 
@@ -144,9 +152,23 @@ account you just authorised.** Check the avatar in the top right.
 
 - [ ] The recommended profile really is signed in as that account.
 
-If it is not, that is the finding this step exists for. Note what
-`signed_in`, `account_discoverable` and `matches_authorised_account` said
-for it, and file all three.
+If it is not, note what `signed_in`, `account_discoverable` and
+`matches_authorised_account` said for it and file all three — the ranking
+picking the wrong profile is worth knowing about. Then **pin the right one
+and carry on with the rest of the checklist against it**:
+
+```
+gsc_use_browser(browser="brave", profile="Default")
+```
+
+using the `browser_key` and `profile` from the entry you actually want.
+Every step below follows the pin. `gsc_use_browser(clear=True)` puts it
+back. This is not a workaround for a broken step — the detector ranks what
+it can see and cannot know which browser you keep the account in, so a
+recommendation you disagree with is a supported state, not a failure.
+
+- [ ] After pinning, `gsc_detect_browsers()` reports `pinned` naming your
+      choice, and `recommended` is that same entry.
 
 Two things you must **not** treat as failures:
 
@@ -178,7 +200,14 @@ In the recommended browser and profile:
 2. Turn on **Developer mode**.
 3. Choose **Load unpacked** and select the folder from `next.path`.
 
-- [ ] The extension appears in the list, named "GSC Indexer Bridge".
+- [ ] The extension appears in the list, named "GSC MCP Bridge".
+
+If you load it into a *different* profile than the selected one — easily
+done, since it goes wherever the browser was open at the time — the
+`extension` check in step 7 will say it is not installed **and name the
+profile that does have it**. That is the expected output, not a
+contradiction: either load it into the selected profile as well, or pin
+the other one with `gsc_use_browser()`.
 
 > **You will now see a warning banner. It is expected and it is correct.**
 > Chromium will show a bar saying an extension is debugging your browser,
@@ -202,9 +231,11 @@ Call `gsc_doctor()`.
 - [ ] There are exactly seven checks, named in this order: `oauth_client`,
       `token`, `config`, `store`, `properties`, `browser`, `extension`.
 - [ ] `properties` reports the number of properties you actually have.
-- [ ] `browser` names the profile you loaded the extension into.
-- [ ] `extension` reports it as installed, at the version in the packaged
-      `manifest.json`.
+- [ ] `browser` names the profile you loaded the extension into — and says
+      it is pinned, if you pinned it in step 5.
+- [ ] `extension` reports it as installed, gives the version of the copy
+      **on disk**, and says the version the browser has actually loaded
+      cannot be read. All three parts matter; see 7b for why.
 - [ ] **No email address appears in any `detail` or `fix`.** Search the raw
       JSON for `@`.
 
@@ -232,17 +263,37 @@ diagnostics, and the diagnostics are most of what shipped.
 
 Load it again and confirm the check goes green.
 
-**7b. Force a version mismatch.** This reproduces the one situation the
-mismatch state exists for: you upgraded gsc-mcp, the extracted copy moved
-on, and the browser is still running the build it loaded last week.
+**7b. Force a version mismatch — and confirm the doctor does NOT claim to
+have caught it.** This reproduces the one situation the mismatch state
+exists for: you upgraded gsc-mcp, the extracted copy moved on, and the
+browser is still running the build it loaded last week.
 
-> **Edit the *packaged* manifest, not the extracted one.** Editing the
-> extracted copy does nothing: `extension_dir()` compares it against the
-> packaged version on every call, sees they differ, and silently
-> re-extracts *before* the check compares anything. The check comes back
-> green and you learn nothing. This is the same fact that makes the state
-> detectable at all — what the browser recorded at load time is the only
-> number that can go stale.
+> ### Read this before you run 7b — the expected result changed
+>
+> **This step used to say the check goes red and names both versions. It
+> does not, it cannot today, and a run that produced that output would
+> itself be the finding.**
+>
+> The comparison needs the version the BROWSER loaded, which the doctor
+> reads from Chromium's preferences file. Chromium records a manifest
+> snapshot there for extensions it keeps its own copy of — Web Store,
+> sideloaded, component — and records **none** for an unpacked extension,
+> which it re-reads from your disk at every load. Unpacked is the only way
+> this bridge is ever installed. Measured on a real profile: 22 of 22
+> packed entries carried a snapshot, the one unpacked entry carried none.
+>
+> So the mismatch branch cannot fire on any real machine. It is kept
+> because it is correct and starts working the day this ships packed, but
+> the number it needs has to come from the extension itself over the
+> bridge (`chrome.runtime.getManifest().version`), and that is **deferred**
+> — it is a bridge protocol change, not a doctor change, and the bridge is
+> not yet exercised against a real submission.
+>
+> What was fixed instead is the lie this step used to hide: the doctor was
+> reporting the DISK version inside a sentence claiming the browser had
+> loaded it, and returning green. It was wrong in exactly the case the
+> mismatch branch was written for. It now names the number it actually has
+> and says the other one cannot be read.
 
 Find the packaged manifest:
 
@@ -254,13 +305,16 @@ Note its current `version` so you can put it back. Change it to something
 obviously different, e.g. `"99.0.0"`. Do **not** reload the extension in
 the browser. Call `gsc_doctor()`.
 
-- [ ] The `extension` check is `ok: false`.
-- [ ] Its `detail` names **both** numbers — the one the browser loaded and
-      the one now on disk.
-- [ ] Its `fix` tells you to click **Reload**, and does *not* tell you to
-      Load unpacked again.
+- [ ] The `extension` check is still `ok: true`. The extension IS
+      installed; that part of the claim is true and unaffected.
+- [ ] Its `detail` gives `99.0.0` as the version **on disk** and says the
+      loaded version cannot be read for an unpacked extension.
+- [ ] Its `detail` does **not** say "installed at version 99.0.0", or
+      anything else asserting the browser is running that build. It is
+      not: the browser is still running the old one. If you see that
+      wording, the fix in `acabdcc` has regressed — file it.
 
-Then click Reload in the browser and confirm the check goes green.
+There is nothing to reload; the check was never going to change colour.
 
 **Put the packaged manifest back** when you are done. If you are running
 from a checkout, `git checkout -- src/gsc_mcp/extension/manifest.json` is
@@ -269,11 +323,12 @@ file reformatted. `git diff` should be empty before you report. Re-running
 step 1 with a fresh `GSC_MCP_HOME` will *not* undo this edit; only
 restoring the file will.
 
-For reference, this sequence has been walked end to end without a browser,
-with the Preferences entry written by hand. The extracted version tracks
-the packaged one to `99.0.0` while the recorded one stays behind, and the
-check reports `loaded at version <old>, but the copy on disk is now version
-99.0.0` with a Reload fix. If you see anything else, that is a finding.
+For reference, this sequence was run for real on 2026-08-04 against Chrome
+with the extension loaded from the extraction directory. The extracted copy
+tracked the packaged manifest to `99.0.0` — that half works, and is why the
+warning above about editing the right file still stands — while Chrome kept
+running `1.10.0` and recorded nothing about either. That run is what turned
+this step from a passing test into a bug report.
 
 ## 8. `gsc_list_sites()` — real properties
 

@@ -16,7 +16,7 @@
 
 **Pre-alpha. The whole surface is wired up, including submission; none of it has met a real Google account yet.**
 
-Fifteen tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in and submission both exist end to end in code and can be walked by hand — see [docs/manual-smoke.md](docs/manual-smoke.md) — but no real Google account has authenticated against this code, and no URL has been submitted through it; see Known gaps.
+Fifteen tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in has been walked for real, once, on Windows against a live Google account — see [docs/manual-smoke.md](docs/manual-smoke.md), which is also where the two defects that run found are recorded. Submission exists end to end in code and no URL has been submitted through it; see Known gaps.
 
 | Milestone | Scope | State |
 |---|---|---|
@@ -263,8 +263,9 @@ MCP-speaking client that can launch a stdio server works the same way —
 the entry point is the `gsc-mcp` console script installed above, and the
 server talks the standard MCP stdio transport (`gsc_mcp.server:main`).
 
-This has not yet been exercised against a real Claude Desktop session or
-a real Google account; see Known gaps.
+This has been exercised against a real Google account through a real MCP
+client session on Windows; it has not been run against Claude Desktop
+specifically, nor on macOS or Linux. See Known gaps.
 
 ## Getting started
 
@@ -421,7 +422,8 @@ Stated plainly, because they are the things a reviewer should look at first:
 
 - No test proves `icacls` actually applied an ACL on Windows — the Windows test only observes that the call was made, so `_harden` could no-op there and the suite would stay green. The POSIX equivalents now execute on Linux and macOS on every push, so this gap is Windows-only.
 - **The submission path exists in code and has never submitted a URL.** Every layer of it — the extension bridge, the pacing, the quota reservation, the run loop, the job worker — is exercised against fakes only. No browser has been driven, no Request Indexing button has been clicked, and no slot has been spent by this code. The states a fake cannot reach are the submission pass in [docs/manual-smoke.md](docs/manual-smoke.md); until someone walks it, "it submits URLs" is a claim the test suite cannot support.
-- **No real Google account has authenticated against this code.** Every OAuth path is exercised against fakes; the live path is [docs/manual-smoke.md](docs/manual-smoke.md), and that checklist has not yet been run for real. Until it has, "you can sign in" is a claim the test suite cannot support.
+- The sign-in path has now been walked for real — once, on one machine (Windows 11, Chrome, Python 3.13, 2026-08-04), against an account with nine properties. Steps 1-8 of [docs/manual-smoke.md](docs/manual-smoke.md) pass. One run on one platform is not coverage: it found two defects that the whole automated suite had missed, which is the argument for running it again on macOS and Linux rather than for trusting it.
+- **The doctor cannot detect a stale extension build**, and no longer pretends to. Chromium records no manifest snapshot for an unpacked extension — and unpacked is the only way this bridge is installed — so the version the browser is actually running cannot be read from disk at all. The check now reports the version on disk and says the loaded one is unreadable, rather than passing the first off as the second. Closing this needs the extension to report `chrome.runtime.getManifest().version` over the bridge, which is a protocol change and is deferred until the bridge has been exercised against a real submission.
 - **The bridge port is fixed at 8765 with no collision handling.** A second `gsc-mcp` process, or anything else already on that port, fails to bind and the submission tool reports it as an unexpected error. Making the port dynamic needs a matching extension change.
 - macOS and Linux browser detection has only ever run against fixtures, never on real hardware, here or in CI. The first person to run the smoke checklist on a Mac or a Linux box is performing that test.
 - `gsc_detect_browsers` reports `matches_authorised_account` as `null` on every real machine today. The flag reads an `account_email` key from the stored token, and nothing writes it: the current scope set returns no identity claim and the consent step does not record the authorising account. The plumbing is correct and inert. Treat the field as "unknown", not as "does not match".
