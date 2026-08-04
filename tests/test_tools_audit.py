@@ -24,6 +24,16 @@ from gsc_mcp import deps, tools_audit
 
 PROPERTY = "https://example.com/"
 
+# The shape api.list_properties ACTUALLY returns — entries straight from
+# Google, not bare URLs. This constant exists because the fake here used to
+# return `[PROPERTY]`, and that one-character-cheaper lie kept the whole
+# module green while both tools were refusing every property in
+# production: `"https://example.com/" not in [{...}]` is always True.
+# Fake the shape the real function documents, never the shape the caller
+# wishes it had.
+def _entries(*properties: str) -> list[dict]:
+    return [{"siteUrl": p, "permissionLevel": "siteOwner"} for p in properties]
+
 # A message shaped like the ones that must never escape: it carries an
 # absolute path with an account name in it. Every failure-path test raises
 # an exception carrying this and asserts both the envelope and the log are
@@ -46,7 +56,8 @@ def _ok_provider() -> Any:
 def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(deps, "oauth_client", lambda: ("id", "secret"))
     monkeypatch.setattr(deps, "provider", lambda: _ok_provider())
-    monkeypatch.setattr(api, "list_properties", lambda provider: [PROPERTY])
+    monkeypatch.setattr(api, "list_properties",
+                        lambda provider: _entries(PROPERTY))
 
 
 def _assert_clean(out: dict) -> None:
@@ -136,7 +147,8 @@ def test_find_unindexed_probes_the_token_before_fetching_a_sitemap(
 
     monkeypatch.setattr(deps, "oauth_client", lambda: ("id", "secret"))
     monkeypatch.setattr(deps, "provider", lambda: _Provider())
-    monkeypatch.setattr(api, "list_properties", lambda provider: [PROPERTY])
+    monkeypatch.setattr(api, "list_properties",
+                        lambda provider: _entries(PROPERTY))
     monkeypatch.setattr(
         tools_audit.discovery, "find_unindexed",
         lambda *a, **k: fetched.append("fetched") or {})
@@ -510,3 +522,43 @@ def test_the_api_error_arm_logs_the_status_and_nothing_else(
         tools_audit.audit(PROPERTY)
 
     _assert_log_clean(caplog, "503")
+
+
+# ------------------------------------------- the shape the stub must not lie about
+
+def test_the_stubbed_property_list_matches_what_the_api_really_returns():
+    """The guard for the defect this module shipped with.
+
+    Every test above stubs `api.list_properties`, and a stub is worth only
+    what its SHAPE is worth. This one drives the real function over a fake
+    HTTP response and asserts it produces exactly what `_entries` produces,
+    so a stub that drifts back to a list of bare URLs fails here — in a
+    named test about shape — rather than in production, where the only
+    symptom was `unknown_property` for every property the account owns and
+    the suite stayed green throughout.
+    """
+    from test_api import FakeProvider, FakeResponse, FakeSession
+
+    session = FakeSession(FakeResponse(200, {"siteEntry": _entries(PROPERTY)}))
+    assert api.list_properties(FakeProvider(), session=session) == _entries(PROPERTY)
+
+
+@pytest.mark.parametrize("call", ("find_unindexed", "audit"))
+def test_a_property_the_account_owns_is_never_reported_unknown(
+        home: Path, monkeypatch: pytest.MonkeyPatch, call: str) -> None:
+    """The production symptom, asserted directly.
+
+    `site not in properties` against a list of dicts is valid Python and
+    quietly always True, so both tools refused every property that existed.
+    Nothing downstream of the check can be reached while it is wrong, which
+    is why this asserts the negative — not that the tool succeeded, but
+    that it did not stop at the gate.
+    """
+    _configured(monkeypatch)
+    # Stopped one step PAST the gate on purpose: reaching the store is not
+    # what is under test, getting through the property check is.
+    monkeypatch.setattr(deps, "connection", _raiser(OSError("stopped here")))
+
+    out = getattr(tools_audit, call)(PROPERTY)
+
+    assert out.get("error") != "unknown_property"

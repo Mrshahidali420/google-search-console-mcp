@@ -48,6 +48,25 @@ def _bad_limit(limit: object) -> bool:
     return isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
 
 
+def _property_urls(provider: object) -> list[str]:
+    """The property URLs alone, not the API's entries.
+
+    `api.list_properties` returns `{"siteUrl", "permissionLevel"}` dicts
+    straight from Google, and both tools in this module want the URLs on
+    their own: one to check the caller's `site` against, the other to hand
+    to `routing.route_all`, which is annotated `list[str]` and means it.
+
+    Doing the conversion once, here, is what stops `site not in properties`
+    from comparing a string against a list of dicts — an expression that is
+    valid Python, quietly always True, and therefore refuses every property
+    the account actually owns. The type checker cannot see it because
+    `in` accepts any container, and the tests could not see it because
+    their fake returned the shape the caller wanted rather than the shape
+    the real function documents.
+    """
+    return [entry["siteUrl"] for entry in api.list_properties(provider)]
+
+
 def find_unindexed(site: str, source: str = "both",
                    limit: int | None = None) -> dict:
     """Which of a property's URLs are not indexed, and why.
@@ -78,7 +97,7 @@ def find_unindexed(site: str, source: str = "both",
         # confident answer built entirely out of failures.
         provider.access_token()
 
-        properties = api.list_properties(provider)
+        properties = _property_urls(provider)
         if site not in properties:
             return {"ok": False, "error": "unknown_property",
                     "fix": envelopes.FIX_UNKNOWN_PROPERTY}
@@ -121,7 +140,7 @@ def audit(site: str) -> dict:
     try:
         deps.oauth_client()
         provider = deps.provider()
-        properties = api.list_properties(provider)
+        properties = _property_urls(provider)
         if site not in properties:
             return {"ok": False, "error": "unknown_property",
                     "fix": envelopes.FIX_UNKNOWN_PROPERTY}
