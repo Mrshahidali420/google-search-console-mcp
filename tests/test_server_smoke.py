@@ -28,6 +28,8 @@ EXPECTED = {
     "gsc_list_sites", "gsc_doctor", "gsc_check_status",
     "gsc_quota", "gsc_performance", "gsc_submit_sitemaps",
     "gsc_detect_browsers", "gsc_setup",
+    # D8 — the operator's override of the detector's ranking.
+    "gsc_use_browser",
     # Plan 3, browser-driven submission — registered in its final task.
     "gsc_request_indexing", "gsc_start_indexing_job",
     "gsc_job_status", "gsc_stop_job",

@@ -894,6 +894,44 @@ def gsc_detect_browsers() -> dict:
 
 
 @mcp.tool()
+def gsc_use_browser(browser: str | None = None, profile: str | None = None,
+                   clear: bool = False) -> dict:
+    """Choose which browser profile this server drives, overriding detection.
+
+    Local-only: writes one preference to this server's config file, makes
+    no network call, spends no quota, needs no token, and opens no browser.
+    Use it when gsc_detect_browsers recommends a profile that is not the
+    one holding your Search Console account — the detector can rank the
+    profiles it finds, but it cannot know which browser you work in.
+
+    `browser` is the `browser_key` from gsc_detect_browsers ("chrome",
+    "brave", "edge", "vivaldi", "opera", "chromium") — the key, not the
+    display label. `profile` is the `profile` field from the same entry
+    (the profile DIRECTORY, e.g. "Default" or "Profile 3"); omit it to take
+    that browser's default profile. `clear=True` removes the pin and
+    returns to the detector's recommendation, and ignores the other two.
+
+    The pair is checked against the profiles that actually exist BEFORE it
+    is saved. A pair that matches nothing is refused with `{"ok": False,
+    "error": "browser_not_found", ...}` whose `fix` lists the pairs that
+    would work, so a typo is answered immediately rather than becoming a
+    browser that silently never opens.
+
+    Once pinned, the choice is absolute: gsc_setup, gsc_doctor and every
+    tool that drives the browser use it, and the ranking is not consulted.
+    If the pinned profile later disappears — browser uninstalled, profile
+    deleted — nothing falls back to a different one. Every affected tool
+    stops and says the pin is dangling, because driving the wrong profile
+    would submit URLs from whichever account happens to be signed in there.
+
+    The pin survives restarts. Returns `{"ok": True, "pinned": "<browser> /
+    <profile>" or null, "note": ...}`.
+    """
+    return tools_browsers.use_browser(browser=browser, profile=profile,
+                                      clear=clear)
+
+
+@mcp.tool()
 def gsc_setup(open_browser: bool = True) -> dict:
     """Set this server up, one step at a time. Call it, do what it says,
     call it again — repeat until `ok` is true.

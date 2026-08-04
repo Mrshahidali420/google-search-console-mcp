@@ -16,7 +16,7 @@
 
 **Pre-alpha. The whole surface is wired up, including submission; none of it has met a real Google account yet.**
 
-Fourteen tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in and submission both exist end to end in code and can be walked by hand — see [docs/manual-smoke.md](docs/manual-smoke.md) — but no real Google account has authenticated against this code, and no URL has been submitted through it; see Known gaps.
+Fifteen tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in and submission both exist end to end in code and can be walked by hand — see [docs/manual-smoke.md](docs/manual-smoke.md) — but no real Google account has authenticated against this code, and no URL has been submitted through it; see Known gaps.
 
 | Milestone | Scope | State |
 |---|---|---|
@@ -42,6 +42,7 @@ Shipped and registered on the MCP server today:
 | `gsc_submit_sitemaps` | Submit or resubmit sitemaps to a property |
 | `gsc_setup` | Walk through sign-in and setup; idempotent, returns the single next step |
 | `gsc_detect_browsers` | Locate installed browsers and profiles for browser-driven submission |
+| `gsc_use_browser` | Pin the browser profile to drive, overriding the detector's recommendation |
 | `gsc_request_indexing` | Submit up to five URLs for indexing, one at a time. **Blocks for minutes** — see [Submitting URLs](#submitting-urls) |
 | `gsc_start_indexing_job` | Queue a background submission run over any number of URLs; returns at once |
 | `gsc_job_status` | Progress and state for one submission job, or the most recent |

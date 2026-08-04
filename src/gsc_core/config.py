@@ -1,8 +1,14 @@
 """User-tunable settings.
 
-Deliberately small. Sites come from the Search Console API, and browsers come
-from the detector — neither belongs in a config file a human has to write.
-What remains is genuinely a preference.
+Deliberately small. Sites come from the Search Console API, and which browsers
+EXIST comes from the detector — neither belongs in a config file a human has
+to write. What remains is genuinely a preference, and which of the detected
+browsers to drive turns out to be one of them: the detector can rank the
+profiles it finds, but it cannot know that the operator keeps their Search
+Console work in Brave and their personal mail in Chrome. That choice is
+recorded here by gsc_use_browser rather than in the server's memory, because
+an MCP server is respawned at every session start and a preference that dies
+with the process is not a preference.
 """
 from __future__ import annotations
 
@@ -41,6 +47,13 @@ DEFAULTS: dict = {
     "authuser": "0",             # the /u/N index of the Google account in GSC
     "auto_launch_browser": True,
     "bridge_connect_timeout": 60,  # seconds to wait for the extension to appear
+
+    # Browser choice — null means "let the detector rank them", which is the
+    # right answer for almost everyone. Set by gsc_use_browser, never by hand
+    # if it can be helped: the tool validates the pair against the profiles
+    # that actually exist, and a typo here is a browser that cannot be found.
+    "browser": None,          # a brand KEY, e.g. "brave" — not the label
+    "browser_profile": None,  # a profile DIRECTORY, e.g. "Default"
 }
 
 
@@ -158,4 +171,32 @@ def validate(data: dict) -> list[str]:
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
         problems.append("bridge_connect_timeout must be a positive integer")
 
+    problems.extend(_browser_problems(data))
+    return problems
+
+
+def _browser_problems(data: dict) -> list[str]:
+    """The pinned browser, if there is one — shape only, not existence.
+
+    Whether the pinned profile is still on the machine is a question for the
+    detector, and asking it here would make validate() read six browsers'
+    state files. This checks the two things that can be known from the text:
+    that each value is a non-empty string when present, and that a profile is
+    never pinned without a browser. A bare profile is not a near-miss to be
+    guessed at — "Default" names a directory in every brand installed, so
+    resolving it alone would pick one at random.
+    """
+    problems: list[str] = []
+    browser = data.get("browser")
+    profile = data.get("browser_profile")
+
+    for key, value in (("browser", browser), ("browser_profile", profile)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            problems.append(f"{key} must be null or a non-empty string")
+
+    if profile is not None and browser is None:
+        problems.append(
+            "browser_profile is set but browser is not — pin both with "
+            "gsc_use_browser, or neither"
+        )
     return problems

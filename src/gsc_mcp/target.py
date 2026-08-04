@@ -14,9 +14,103 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from gsc_core import browsers, pairing, profiles, runlog
+from gsc_core import browsers, config, pairing, profiles, runlog
 
 log = runlog.get(__name__)
+
+
+@dataclass(frozen=True)
+class Selection:
+    """Which profile won, and whether the user or the ranker chose it.
+
+    Three states, and the third is the reason this is a dataclass rather
+    than a Candidate-or-None:
+
+      * ``candidate`` set, ``pin`` None — nobody expressed a preference and
+        profiles.recommend() ranked the ones it found.
+      * ``candidate`` set, ``pin`` set — the user's pin matched a profile
+        that is on the machine, and it wins outright. recommend() is not
+        consulted at all; a ranking that can override an explicit choice is
+        not a preference, it is a suggestion.
+      * ``candidate`` None, ``pin`` set — the pinned profile is GONE. This
+        must never quietly become "so use the recommended one instead". The
+        pin exists because the operator's Search Console account lives in
+        that browser and not the other one, so falling back would drive a
+        profile signed in as somebody else, and the first anyone would know
+        of it is a submission against the wrong property. Callers refuse;
+        the doctor explains.
+    """
+
+    candidate: profiles.Candidate | None
+    pin: str | None
+
+    @property
+    def missing(self) -> bool:
+        """A pin was set and nothing on this machine matches it."""
+        return self.candidate is None and self.pin is not None
+
+
+def select(candidates: list[profiles.Candidate],
+           account_email: str | None = None,
+           settings: dict | None = None) -> Selection:
+    """The pin if there is one, otherwise the ranking. Never raises.
+
+    Every call site that used to call profiles.recommend() directly goes
+    through here instead, for the reason this module already exists: three
+    places deriving the same answer is three places that can disagree, and
+    a pin honoured by the bridge but ignored by the doctor would produce a
+    green check for a browser the server is not driving.
+
+    profiles.py stays a pure ranker and never learns that config exists —
+    it is given a list and returns the best of it, which is testable with
+    no filesystem at all. Reconciling that ranking with a stored preference
+    is a server concern, so it lives on this side of the line.
+    """
+    settings = config.load() if settings is None else settings
+    brand_key = settings.get("browser")
+    if not isinstance(brand_key, str) or not brand_key.strip():
+        return Selection(profiles.recommend(candidates,
+                                            account_email=account_email), None)
+
+    directory = settings.get("browser_profile")
+    directory = directory.strip() if isinstance(directory, str) and directory.strip() \
+        else None
+    return Selection(find(candidates, brand_key.strip(), directory),
+                     pin_label(brand_key.strip(), directory))
+
+
+def pin_label(brand_key: str, directory: str | None) -> str:
+    """How a pin is named back to a human.
+
+    The brand KEY, not the label, because when the pin matches nothing there
+    is no Installed to read a label off, and a pin that is described one way
+    when it works and another way when it breaks is a pin the user cannot
+    find in their config file to correct.
+    """
+    return f"{brand_key} / {directory}" if directory else brand_key
+
+
+def find(candidates: list[profiles.Candidate], brand_key: str,
+          directory: str | None) -> profiles.Candidate | None:
+    """The pinned profile among the detected ones, or None.
+
+    Case-folded on both sides: a user typing "Brave" into gsc_use_browser
+    means the brand whose key is "brave", and being told their own browser
+    does not exist over a capital letter is indefensible.
+
+    With no profile pinned, the FIRST candidate of that brand wins, and
+    survey()'s order is what makes that meaningful rather than arbitrary —
+    it is Default-first, which is the profile a user who named only a brand
+    is asking for.
+    """
+    wanted = brand_key.casefold()
+    slot = directory.casefold() if directory else None
+    for candidate in candidates:
+        if candidate.installed.brand.key.casefold() != wanted:
+            continue
+        if slot is None or candidate.profile.directory.casefold() == slot:
+            return candidate
+    return None
 
 
 @dataclass(frozen=True)
@@ -47,14 +141,21 @@ def resolve(account_email: str | None = None) -> Target | None:
     account_email reaches profiles.recommend() and nothing else. It is the
     only way the ranker can prefer the profile that is signed in as the
     user, and it is never logged here.
+
+    A pin that matches nothing returns None too, and deliberately does not
+    fall back to the ranking — see Selection. "No target" stops a run with
+    an explanation; the wrong target submits somebody else's URLs.
     """
     try:
-        candidates = profiles.survey()
-        best = profiles.recommend(candidates, account_email=account_email)
+        selection = select(profiles.survey(), account_email=account_email)
     except Exception as exc:  # noqa: BLE001 — detection reads other apps' files
         log.debug("no browser could be resolved (%s)", type(exc).__name__)
         return None
+    best = selection.candidate
     if best is None:
+        if selection.missing:
+            log.warning("the pinned browser profile was not found; "
+                        "run gsc_doctor")
         return None
 
     try:

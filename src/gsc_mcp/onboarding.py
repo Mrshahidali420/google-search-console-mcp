@@ -72,7 +72,7 @@ from dataclasses import dataclass
 
 from gsc_core import gauth, pairing, profiles, runlog
 
-from . import deps, shipped_client
+from . import deps, shipped_client, target
 
 log = runlog.get(__name__)
 
@@ -143,6 +143,26 @@ _FIX_EXTENSION_UNEXPECTED = (
     "from your browser's extensions page."
 )
 _DETAIL_NO_BROWSER = "no Chromium browser found on this machine"
+#: A pin that matches nothing is reported as a FAILURE, never as a fallback
+#: to the recommendation. The pin exists because the operator's Search
+#: Console account lives in one particular browser; quietly driving another
+#: one would submit from whichever account happens to be signed in there,
+#: and a wrong submission cannot be taken back. So this stops, and says
+#: which pin is dangling and how to correct it.
+_DETAIL_PIN_MISSING = (
+    "the browser pinned with gsc_use_browser ({pin}) is not installed on "
+    "this machine, or that profile no longer exists"
+)
+_ACTION_PIN_MISSING = (
+    "call gsc_detect_browsers() to see the profiles that do exist, then "
+    "gsc_use_browser() to pin one of them — or gsc_use_browser(clear=True) "
+    "to go back to the recommended profile. Nothing will drive a browser "
+    "until one or the other is done."
+)
+#: Said whenever a pin is in force, everywhere the chosen profile is named.
+#: Without it the doctor reports a profile the ranker would not have picked
+#: and gives no hint why, which reads as a detection bug.
+_NOTE_PINNED = " (pinned with gsc_use_browser, not chosen by detection)"
 _COULD_NOT_CHECK = (
     "whether the gsc-mcp bridge extension is installed in {where} could not "
     "be checked"
@@ -260,10 +280,15 @@ def _setup(open_browser: bool) -> dict:
         return _result(done, consent)
     done.append("consent")
 
-    candidates = profiles.survey()
-    best = profiles.recommend(candidates)
+    selection = target.select(profiles.survey())
+    best = selection.candidate
     if best is None:
-        return _result(done, {"step": "browser", "action": _ACTION_BROWSER})
+        # A dangling pin is its own step failure with its own remedy: told
+        # to "install a browser" the user would go looking for a fault that
+        # is not there, when the fix is one call to gsc_use_browser.
+        action = (_DETAIL_PIN_MISSING.format(pin=selection.pin) + " — "
+                  + _ACTION_PIN_MISSING) if selection.missing else _ACTION_BROWSER
+        return _result(done, {"step": "browser", "action": action})
     done.append("browser")
 
     extension = _extension_step(best)
@@ -518,15 +543,21 @@ def check_browser() -> dict:
     """
     name = "browser"
     try:
-        best = profiles.recommend(profiles.survey())
+        selection = target.select(profiles.survey())
     except Exception as exc:  # noqa: BLE001 — see docstring
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return _check(name, False, type(exc).__name__, _FIX_BROWSER_UNEXPECTED)
 
+    if selection.missing:
+        return _check(name, False,
+                      _DETAIL_PIN_MISSING.format(pin=selection.pin),
+                      _ACTION_PIN_MISSING)
+    best = selection.candidate
     if best is None:
         return _check(name, False, _DETAIL_NO_BROWSER, _ACTION_BROWSER)
 
     detail = (f"{_where(best)} is the profile to use"
+              + (_NOTE_PINNED if selection.pin else "")
               + _account_caveat(best.profile, best.installed.brand))
     return _check(name, True, detail, "")
 
@@ -555,7 +586,13 @@ def check_extension() -> dict:
 
 
 def _extension_check(name: str) -> dict:
-    best = profiles.recommend(profiles.survey())
+    candidates = profiles.survey()
+    selection = target.select(candidates)
+    if selection.missing:
+        return _check(name, False,
+                      _DETAIL_PIN_MISSING.format(pin=selection.pin),
+                      _ACTION_PIN_MISSING)
+    best = selection.candidate
     if best is None:
         return _check(name, False, _DETAIL_NO_BROWSER, _ACTION_BROWSER)
 
@@ -572,12 +609,46 @@ def _extension_check(name: str) -> dict:
     lookup = pairing.look_up_extension(best.installed, best.profile,
                                        ext_dir=ext_dir)
     if lookup.extension_id is None:
-        return _absent(name, best, where, lookup.complete)
+        return _absent(name, best, where, lookup.complete,
+                       _elsewhere(candidates, best, ext_dir))
     return _present(name, best, ext_dir, where, lookup.version)
 
 
+def _elsewhere(candidates: list[profiles.Candidate], best: profiles.Candidate,
+               ext_dir) -> str:
+    """"You DID install it — just not here." Empty when that is not the case.
+
+    The single most likely way to arrive at "not installed": the extension
+    goes wherever the user's browser was open at the time, which is not
+    always the profile that ends up selected. Told only "not installed in
+    Google Chrome / Default", a user who has just installed it reasonably
+    concludes the check is broken and installs it a second time. Naming the
+    profile that has it turns a contradiction into a two-way choice — move
+    the extension, or move the pin.
+
+    Never raises and never reports a path: brand label plus profile
+    directory is what identifies a profile to a human, and it is what
+    gsc_detect_browsers returns already.
+    """
+    for candidate in candidates:
+        if candidate.profile is best.profile:
+            continue
+        try:
+            found = pairing.has_extension(candidate.installed,
+                                          candidate.profile, ext_dir=ext_dir)
+        except Exception as exc:  # noqa: BLE001 — one profile of many
+            log.debug("extension check failed (%s)", type(exc).__name__)
+            continue
+        if found:
+            other = _where(candidate)
+            return (f" — it IS installed in {other}, so either load it into "
+                    f"the profile above as well, or call "
+                    f"gsc_use_browser() to pin {other} instead")
+    return ""
+
+
 def _absent(name: str, best: profiles.Candidate, where: str,
-            complete: bool) -> dict:
+            complete: bool, elsewhere: str = "") -> dict:
     """Not found — and whether that is an answer or a shrug.
 
     The extraction directory is deliberately NOT interpolated here, even
@@ -594,7 +665,7 @@ def _absent(name: str, best: profiles.Candidate, where: str,
     if complete:
         return _check(name, False,
                       f"the gsc-mcp bridge extension is not installed in "
-                      f"{where}",
+                      f"{where}{elsewhere}",
                       f"To install it: {install}")
     return _check(name, False,
                   _COULD_NOT_CHECK.format(where=where)

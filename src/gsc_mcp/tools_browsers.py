@@ -57,9 +57,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gsc_core import gauth, pairing, profiles, runlog
+from gsc_core import config, gauth, pairing, profiles, runlog
 
-from . import envelopes
+from . import envelopes, target
 
 log = runlog.get(__name__)
 
@@ -75,6 +75,21 @@ _FIX_UNEXPECTED = (
     "to use instead."
 )
 _REDACTED_ACCOUNT = "the account you authorised"
+_FIX_PIN_UNEXPECTED = (
+    "The browser choice could not be saved. The log file records the failure "
+    "type; retry, and if it persists check that the config directory is "
+    "writable."
+)
+_NOTE_PINNED = (
+    "This profile is now used by every tool that drives the browser, whatever "
+    "the detector would have recommended. Load the bridge extension into it "
+    "if you have not already — gsc_doctor will tell you. Call "
+    "gsc_use_browser(clear=True) to go back to the recommendation."
+)
+_NOTE_CLEARED = (
+    "No browser is pinned. The detector's recommendation is used again; run "
+    "gsc_detect_browsers to see what it picks."
+)
 
 
 def detect_browsers() -> dict:
@@ -93,10 +108,14 @@ def _report() -> dict:
     account_email = _authorised_email()
     candidates = profiles.survey()
 
-    # ONE call, and the only source of the recommendation. Re-ranking here,
-    # or picking a "best" from the list below, is the two-call-sites-
-    # disagree defect the whole stack is shaped to prevent.
-    best = profiles.recommend(candidates, account_email=account_email)
+    # ONE call, and the only source of the answer. Re-ranking here, or
+    # picking a "best" from the list below, is the two-call-sites-disagree
+    # defect the whole stack is shaped to prevent — which is also why this
+    # goes through target.select() rather than profiles.recommend(): a pin
+    # the bridge honours and this report ignores would show the user a
+    # green tick beside a profile the server is not driving.
+    selection = target.select(candidates, account_email=account_email)
+    best = selection.candidate
 
     # survey()'s order is already deterministic — BRANDS order, then
     # profiles.py's Default-first numeric sort. Re-sorting on the score
@@ -113,14 +132,111 @@ def _report() -> dict:
     report = {
         "ok": True,
         "profiles": listed,
+        # "the one that will be used", which is the question a caller is
+        # actually asking. When a pin is in force that is the pinned entry
+        # and `pinned` below says so; `reasons` is empty in that case
+        # because the ranker was never consulted and inventing a reason for
+        # a choice the user made would be a fabrication.
         "recommended": next((entry for entry in listed if entry["recommended"]),
                             None),
+        "pinned": selection.pin,
         "reasons": [_redact(reason, account_email)
-                    for reason in (best.reasons if best else [])],
+                    for reason in (best.reasons if best and not selection.pin
+                                   else [])],
     }
     if not listed:
         report["note"] = _NOTE_NONE_FOUND
+    elif selection.missing:
+        report["note"] = (
+            f"the browser pinned with gsc_use_browser ({selection.pin}) is "
+            f"not among the profiles found on this machine, so no browser "
+            f"will be driven at all. Pin one of the profiles listed here, or "
+            f"call gsc_use_browser(clear=True)."
+        )
     return report
+
+
+def use_browser(browser: str | None = None, profile: str | None = None,
+                clear: bool = False) -> dict:
+    """gsc_use_browser's body: override the detector's choice. Never raises.
+
+    The detector ranks what it finds; it cannot know which browser the
+    operator keeps their Search Console account in. This is the override,
+    and it is written to the config file rather than held in memory because
+    an MCP server is respawned at every session start.
+
+    Validated against the profiles that are actually on the machine, at pin
+    time, and refused with the real list when it does not match. The
+    alternative — accept anything and fail later — turns one typo into a
+    browser that silently never opens, and the user has no way to tell a
+    misspelling from a bug. The same list is already safe to return: it is
+    brand keys and profile directory names, which gsc_detect_browsers
+    returns too, and no address or path is among them.
+    """
+    try:
+        return _pin(browser, profile, clear)
+    except Exception as exc:  # noqa: BLE001 — the tool must never raise
+        return envelopes.unexpected("gsc_use_browser", exc, _FIX_PIN_UNEXPECTED)
+
+
+def _pin(browser: str | None, profile: str | None, clear: bool) -> dict:
+    settings = config.load()
+    if clear:
+        return _write(settings, None, None, _NOTE_CLEARED)
+
+    if not isinstance(browser, str) or not browser.strip():
+        return envelopes.refuse(
+            "no_browser_named", "no browser was named",
+            "Call gsc_use_browser(browser=\"brave\", profile=\"Default\") "
+            "using a browser_key and profile from gsc_detect_browsers, or "
+            "gsc_use_browser(clear=True) to go back to the recommendation.")
+
+    browser = browser.strip()
+    profile = profile.strip() if isinstance(profile, str) and profile.strip() \
+        else None
+
+    candidates = profiles.survey()
+    match = target.find(candidates, browser, profile)
+    if match is None:
+        return envelopes.refuse(
+            "browser_not_found",
+            f"no profile matching {target.pin_label(browser, profile)} was "
+            f"found on this machine",
+            f"Choose one of these instead: {_choices(candidates)}. The "
+            f"browser is the browser_key from gsc_detect_browsers, not its "
+            f"display label.")
+
+    # Stored as the user typed it only after it matched, and normalised to
+    # what the detector reports: a pin recorded as "Brave" would read back
+    # correctly forever but never equal a brand key in a log line or a
+    # config file the user is comparing by eye.
+    return _write(settings, match.installed.brand.key, match.profile.directory,
+                  _NOTE_PINNED)
+
+
+def _write(settings: dict, brand_key: str | None, directory: str | None,
+           note: str) -> dict:
+    """Save the pin, and report back what a human can act on.
+
+    The whole config is written, not a patch: config.save() replaces the
+    file, so saving anything less would silently drop every other setting
+    the user has.
+    """
+    settings["browser"] = brand_key
+    settings["browser_profile"] = directory
+    config.save(settings)
+    label = target.pin_label(brand_key, directory) if brand_key else None
+    return {"ok": True, "pinned": label, "note": note}
+
+
+def _choices(candidates: list[profiles.Candidate]) -> str:
+    """The pins that would work, as text. No paths, no names, no addresses."""
+    if not candidates:
+        return "none — no Chromium browser was found on this machine"
+    return ", ".join(
+        f'browser="{candidate.installed.brand.key}", '
+        f'profile="{candidate.profile.directory}"'
+        for candidate in candidates)
 
 
 def _entry(candidate: profiles.Candidate, best: profiles.Candidate | None,

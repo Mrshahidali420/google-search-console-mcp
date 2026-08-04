@@ -103,6 +103,11 @@ _TOOL_ARGS = {
     "gsc_performance": (("sc-domain:example.com",), {}),
     "gsc_submit_sitemaps": ((["https://example.com/sitemap.xml"],), {}),
     "gsc_detect_browsers": ((), {}),
+    # Called with nothing to pin, which refuses before it writes: the sweep
+    # runs against a throwaway home, but a tool that saved a config file as
+    # a side effect of a stdout check would be doing it on the developer's
+    # machine the first time the fixture changed.
+    "gsc_use_browser": ((), {}),
     "gsc_setup": ((), {"open_browser": False}),
     "gsc_request_indexing": ((["https://example.com/a"],), {}),
     "gsc_start_indexing_job": ((["https://example.com/a"],), {}),

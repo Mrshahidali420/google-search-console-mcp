@@ -315,7 +315,7 @@ def test_concurrent_access_token_calls_refresh_exactly_once(tmp_path):
 
 _REAL_TOOLS = {"gsc_doctor", "gsc_list_sites", "gsc_check_status",
                "gsc_quota", "gsc_performance", "gsc_submit_sitemaps",
-               "gsc_detect_browsers", "gsc_setup",
+               "gsc_detect_browsers", "gsc_setup", "gsc_use_browser",
                "gsc_request_indexing", "gsc_start_indexing_job",
                "gsc_job_status", "gsc_stop_job",
                "gsc_find_unindexed", "gsc_audit"}
