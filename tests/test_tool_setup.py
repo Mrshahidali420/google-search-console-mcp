@@ -22,12 +22,39 @@ CLIENT_SECRET = "client-secret-456"
 EXTENSION_ID = "a" * 32
 
 
+class _Provider:
+    """Stands in for deps.provider(). Records whether it was asked."""
+
+    def __init__(self, on_call=None):
+        self.calls = 0
+        self._on_call = on_call
+
+    def access_token(self) -> str:
+        self.calls += 1
+        if self._on_call is not None:
+            raise self._on_call
+        return "fresh-at"
+
+
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
     onboarding._reset_pending()          # test seam, documented in the module
     yield
     onboarding._reset_pending()          # release the loopback sockets
+
+
+@pytest.fixture(autouse=True)
+def _no_live_refresh(monkeypatch):
+    """No test in this file may reach Google's token endpoint.
+
+    Checking a stored token now renews it first, so a test that supplies a
+    token without stubbing the provider would POST to Google for real —
+    which is slow, flaky, and would spend the operator's own refresh token
+    if it ever ran outside a sandbox. Tests that care about the refresh
+    install their own provider over this one.
+    """
+    monkeypatch.setattr(onboarding.deps, "provider", lambda: _Provider())
 
 
 @pytest.fixture
@@ -313,6 +340,116 @@ def test_a_rejected_grant_does_start_a_fresh_consent(configured, monkeypatch):
     monkeypatch.setattr(onboarding.gauth, "verify_token", refused)
     result = onboarding.setup(open_browser=False)
     assert result["next"]["url"].startswith("https://accounts.google.com/")
+
+
+# ---------------------------------------------------------------------------
+# Step 2, continued: the stored access token is an hour old, not wrong
+# ---------------------------------------------------------------------------
+#
+# An access token lives about an hour; the refresh token is what makes a
+# sign-in durable. Every one of these starts from a token that is stored,
+# valid, and stale — the state a session is in whenever it opens more than
+# an hour after the last call, which is most of them.
+
+
+@pytest.fixture
+def stale(monkeypatch):
+    """A stored token whose access half is expired and refresh half is good.
+
+    `verify_token` here is the real contract in miniature: it accepts the
+    refreshed access token and refuses the stale one, exactly as Google's
+    sites.list does with a 401.
+    """
+    stored = {"refresh_token": "rt", "access_token": "stale-at"}
+    monkeypatch.setattr(onboarding.gauth, "load_token", lambda *a, **k: stored)
+
+    def verify(token, *a, **k):
+        if token.get("access_token") == "stale-at":
+            raise onboarding.gauth.ConsentFailed(
+                "Search Console rejected the new token (HTTP 401)")
+        return 3
+
+    monkeypatch.setattr(onboarding.gauth, "verify_token", verify)
+    return stored
+
+
+def test_a_stale_access_token_is_refreshed_not_re_consented(
+        configured, monkeypatch, stale):
+    """The regression that sent a signed-in user back through consent.
+
+    Re-consent is not a harmless extra step: the consent URL carries
+    prompt=consent, so obeying it makes Google rotate a refresh token that
+    was working, destroying the sign-in the false alarm was reporting on.
+    """
+    provider = _Provider()
+    monkeypatch.setattr(onboarding.deps, "provider", lambda: provider)
+    # The refresh writes the new token where load_token will find it.
+    monkeypatch.setattr(onboarding.gauth, "load_token",
+                        lambda *a, **k: (stale if provider.calls == 0
+                                         else {"refresh_token": "rt",
+                                               "access_token": "fresh-at"}))
+
+    result = onboarding.setup(open_browser=False)
+
+    assert provider.calls == 1, "a stale access token must be refreshed"
+    assert "consent" in result["done"]
+    assert result["next"] is None or result["next"]["step"] != "consent"
+    assert onboarding._peek_pending(CLIENT_ID) is None
+
+
+def test_a_refresh_google_refuses_does_start_a_fresh_consent(
+        configured, monkeypatch, stale):
+    """A dead grant still has to reach consent. AuthRequired is how the
+    token endpoint says invalid_grant, and re-consent really is the fix."""
+    provider = _Provider(on_call=onboarding.gauth.AuthRequired("rejected"))
+    monkeypatch.setattr(onboarding.deps, "provider", lambda: provider)
+
+    result = onboarding.setup(open_browser=False)
+
+    assert result["next"]["url"].startswith("https://accounts.google.com/")
+
+
+def test_a_refresh_that_cannot_reach_google_does_not_force_consent(
+        configured, monkeypatch, stale):
+    """Same reasoning as the verify path: a network fault is not evidence
+    the stored sign-in is bad."""
+    provider = _Provider(on_call=ConnectionError("no route to host"))
+    monkeypatch.setattr(onboarding.deps, "provider", lambda: provider)
+
+    result = onboarding.setup(open_browser=False)
+
+    assert result["next"]["step"] == "consent"
+    assert "url" not in result["next"]
+    assert "reached" in result["next"]["action"]
+    assert onboarding._peek_pending(CLIENT_ID) is None
+
+
+def test_a_token_with_no_refresh_token_never_reaches_the_provider(
+        configured, monkeypatch):
+    """Nothing to refresh with, so asking Google would spend a round trip
+    to learn what the token already says. Consent is the only way out."""
+    monkeypatch.setattr(onboarding.gauth, "load_token",
+                        lambda *a, **k: {"access_token": "at"})
+    provider = _Provider()
+    monkeypatch.setattr(onboarding.deps, "provider", lambda: provider)
+
+    result = onboarding.setup(open_browser=False)
+
+    assert provider.calls == 0
+    assert result["next"]["url"].startswith("https://accounts.google.com/")
+
+
+def test_no_token_material_reaches_a_log_line_while_refreshing(
+        configured, monkeypatch, stale, captured_log):
+    """The refresh path handles the same secrets the consent path does."""
+    provider = _Provider(on_call=ConnectionError("no route to host"))
+    monkeypatch.setattr(onboarding.deps, "provider", lambda: provider)
+
+    onboarding.setup(open_browser=False)
+
+    text = logged_text(captured_log)
+    for secret in ("rt", "stale-at", "fresh-at", CLIENT_SECRET):
+        assert secret not in text.split()
 
 
 # ---------------------------------------------------------------------------

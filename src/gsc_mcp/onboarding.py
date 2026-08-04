@@ -341,12 +341,51 @@ def _stored_token_state() -> str:
     kept apart, exactly as `has_extension` keeps "no" apart from "could not
     check".
 
+    THE ACCESS TOKEN IS REFRESHED BEFORE IT IS VERIFIED, and that ordering
+    is the whole point of this function. `verify_token` sends the access
+    token as it finds it; it was written for a token seconds old, straight
+    out of `exchange_code`, where being live is a given. A STORED token is
+    live for about an hour and durable only through its refresh token, so
+    verifying one directly reports every session that opens more than an
+    hour after the last call as signed out. That misreport is not a
+    cosmetic one: the consent URL it leads to carries prompt=consent, so a
+    user who follows the instruction makes Google rotate the refresh token
+    that was working perfectly.
+
     Never raises and never logs a token field.
     """
     try:
         token = gauth.load_token()
     except Exception as exc:  # noqa: BLE001 — an unreadable token is "not signed in"
         log.debug("stored token unreadable (%s)", type(exc).__name__)
+        return "missing"
+    if not isinstance(token, dict) or not token:
+        return "missing"
+    has_refresh = bool(token.get("refresh_token"))
+    del token
+    if not has_refresh:
+        # Nothing to renew with. Asking Google would spend a round trip to
+        # be told what the token already says, and re-consent is the fix.
+        return "missing"
+
+    # Through deps.provider(), not a bare refresh: the provider holds the
+    # single-flight lock that stops two callers each spending a refresh
+    # token Google rotates on use, and it persists what it gets back.
+    try:
+        deps.provider().access_token()
+    except deps.NotConfigured:
+        return "missing"
+    except gauth.AuthRequired:
+        # invalid_grant and its siblings — revoked, expired, or withdrawn.
+        return "missing"
+    except Exception as exc:  # noqa: BLE001 — transport, DNS, proxy
+        log.debug("token refresh unreachable (%s)", type(exc).__name__)
+        return "unreachable"
+
+    try:
+        token = gauth.load_token()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("refreshed token unreadable (%s)", type(exc).__name__)
         return "missing"
     if not isinstance(token, dict) or not token:
         return "missing"
