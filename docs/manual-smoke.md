@@ -397,15 +397,34 @@ Close the browser entirely, then call `gsc_request_indexing` with one URL.
 - [ ] `auto_launch_browser` opens it.
 - [ ] The extension connects and the URL is submitted without a second call.
 
-### 9.3 The MV3 service worker has been evicted
+### 9.3 The MV3 service worker is not running when the run starts
 
-Leave the browser open and completely idle for five minutes or more, so
-Chromium tears the extension's background worker down, then submit.
+Do **not** try to produce this by idling. The earlier instruction — leave
+the browser idle five minutes and Chromium tears the worker down — does
+not hold, and a run against it tests nothing. The worker has top-level
+listeners on `chrome.tabs.onRemoved`, `chrome.debugger.onDetach`,
+`chrome.runtime.onConnect` and `onMessage`, plus a 30s keepalive alarm,
+so ordinary browser activity restarts it. Measured on Brave: after an
+explicit stop it was connected again in 0.3s, 1.8s and 3.0s across three
+attempts, and a liveness probe confirmed a real worker behind the socket
+each time — not the half-open corpse of §9.2.
 
-- [ ] The bridge's fast wait expires without a connection.
-- [ ] The wake poke opens `connect.html`.
-- [ ] The extension connects and the run proceeds.
+Stop it deliberately instead: `brave://serviceworker-internals/`, find the
+`chrome-extension://<id>/` scope, click **Stop**, then submit one URL.
+
+- [ ] The extension reconnects and the run proceeds.
 - [ ] It does **not** fail with `extension_not_connected`.
+- [ ] `gsc.log` shows one submission, not two — a worker that restarts
+      mid-flight must not produce a second Request Indexing click.
+
+The wake poke is a fallback here, not the expected path. Expect the
+worker to beat the 8s fast wait on its own, so `extension asleep after
+8s` will usually be absent from the log; its absence is a pass. The poke
+itself is covered automatically by `test_wake_launches_the_extension_page`
+and its never-raises sibling in `tests/test_pairing_verify.py` — there is
+no way to isolate its effect by hand on a browser that is in use, because
+the tab the poke opens is itself an event that would have woken the
+worker anyway.
 
 ### 9.4 The network drops mid-URL
 
