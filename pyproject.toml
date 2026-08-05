@@ -87,9 +87,11 @@ gsc-mcp = "gsc_mcp.server:main"
 gsc-indexer-mcp = "gsc_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/Mrshahidali420/google-search-console-mcp"
+Homepage = "https://www.shahidali.co/tools/gsc-mcp/"
+Documentation = "https://www.shahidali.co/tools/gsc-mcp/"
 Repository = "https://github.com/Mrshahidali420/google-search-console-mcp"
 Issues = "https://github.com/Mrshahidali420/google-search-console-mcp/issues"
+Changelog = "https://github.com/Mrshahidali420/google-search-console-mcp/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # pytest 9.1 is the floor, not 8.x: the runlog tests rely on caplog attaching

@@ -16,6 +16,9 @@
 
 > Built for SEO practitioners tired of checking index status and submitting sitemaps by hand, one property at a time, and for the AI agents that can do it for them.
 
+**[shahidali.co/tools/gsc-mcp](https://www.shahidali.co/tools/gsc-mcp/)** is the project page: the same install
+lines, the tool list, and what the quota rules actually are, written for people who have not opened this repo.
+
 ## Add it to your agent
 
 [![Install in VS Code](https://img.shields.io/badge/VS_Code-install-0098FF?logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=gsc&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22gsc-indexer-mcp%22%5D%7D)
