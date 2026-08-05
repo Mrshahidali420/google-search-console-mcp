@@ -4,7 +4,12 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
-## [Unreleased]
+## [0.1.0a2] — 2026-08-05
+
+The first version intended for a package index. Version bumped rather than
+reusing `0.1.0a1`, because that number is already spent on a GitHub release
+wheel that **does** carry the embedded OAuth client — two different artefacts
+under one version is the kind of ambiguity that costs an afternoon later.
 
 ### Changed
 
