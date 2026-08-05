@@ -31,3 +31,9 @@ src/gsc_mcp/_embedded.py
 # repository content but not release assets, so committing this is the one
 # move that could get the client revoked by Google.
 /client.json
+
+# Live smoke-run findings. These name real client properties and real URLs
+# from the operator's own Search Console, which the public repo must never
+# carry. Keep the notes locally; port only the scrubbed defect descriptions
+# into docs/ or an issue.
+/docs/findings-*.md
