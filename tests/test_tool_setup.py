@@ -152,8 +152,16 @@ def test_the_download_failure_is_explained_not_just_the_fix(undownloadable):
 
 def test_a_downloaded_client_satisfies_the_step(downloadable):
     """A source checkout with a working network gets past step one without
-    the user configuring anything, which is the whole point of D1."""
-    result = onboarding.setup()
+    the user configuring anything, which is the whole point of D1.
+
+    `open_browser=False` is not tidiness: this is the only test in the file
+    that reaches the consent step with a client id, so the default opened a
+    REAL tab on a consent URL built from the placeholder id, landing the
+    operator on Google's "OAuth client was not found" page once per suite
+    run. It passed the whole time, because `onboarding._open` swallows every
+    exception.
+    """
+    result = onboarding.setup(open_browser=False)
     assert "oauth_client" in result["done"]
     assert result["next"]["step"] == "consent"
 

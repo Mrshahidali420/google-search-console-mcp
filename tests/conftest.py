@@ -12,6 +12,8 @@ opened and closed around the test.
 """
 from __future__ import annotations
 
+import webbrowser
+
 import pytest
 
 from gsc_core import store
@@ -68,6 +70,39 @@ def _no_client_download(monkeypatch):
         )
 
     monkeypatch.setattr(shipped_client.requests, "get", forbidden)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser(monkeypatch):
+    """No test may open a real browser window.
+
+    One that slips through is not a quiet failure: it launches the
+    operator's actual browser onto a Google consent URL built from a
+    placeholder client id, which lands on an "OAuth client was not found"
+    error page. During a run of the full suite that happens every few
+    minutes with no indication of which test did it.
+
+    Patched on the `webbrowser` module itself, so it covers every importer.
+    A test that legitimately exercises the opening path patches the same
+    name later and wins, which is what makes this safe to apply everywhere.
+
+    It raises a BaseException, not an AssertionError, and that detail is the
+    whole guard. `onboarding._open` catches `Exception` on purpose — a
+    headless machine has no browser and the URL is returned regardless — so
+    an AssertionError here was caught, logged at debug and the test passed
+    while the tab still opened. Only something outside `Exception` gets out.
+    """
+    class RealBrowserOpened(BaseException):
+        pass
+
+    def forbidden(url, *args, **kwargs):
+        raise RealBrowserOpened(
+            f"this test tried to open a real browser window at {url}; "
+            "patch webbrowser.open in the test, or pass open_browser=False"
+        )
+
+    for name in ("open", "open_new", "open_new_tab"):
+        monkeypatch.setattr(webbrowser, name, forbidden, raising=False)
 
 
 @pytest.fixture()
