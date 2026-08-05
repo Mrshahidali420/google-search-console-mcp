@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.mrshahidali420/gsc-indexer-mcp",
-  "description": "Google Search Console for AI agents: index status, unindexed-URL discovery, browser-driven Request Indexing, sitemap submission and search analytics.",
+  "description": "Search Console for agents: index status, unindexed-URL discovery, Request Indexing, sitemaps.",
   "repository": {
     "url": "https://github.com/Mrshahidali420/google-search-console-mcp",
     "source": "github"
