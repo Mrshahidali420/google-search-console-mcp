@@ -24,6 +24,10 @@ jobs:
     name: Build wheel with embedded client
     runs-on: ubuntu-latest
 
+    # Needed to create the release and the tag that goes with it.
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v5
 
@@ -72,3 +76,32 @@ jobs:
         with:
           name: wheel
           path: dist/*.whl
+
+      # The artifact above expires in 90 days and is only reachable from the
+      # run page. The release is the durable copy, and it is created here
+      # rather than by hand because doing it by hand is how the GitHub release
+      # and the PyPI version drifted three versions apart the first time.
+      #
+      # Not marked --prerelease, deliberately. GitHub hides pre-releases from
+      # /releases/latest and from the repo sidebar, so the flag makes a release
+      # look like no release at all. The gate that stops an accidental install
+      # is PEP 440: the `aN` in the version means pip refuses without --pre,
+      # and that is true regardless of anything GitHub labels it.
+      - name: Create or update the release for this version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python -c "import re, pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/gsc_mcp/__init__.py').read_text()).group(1))")
+          tag="v$version"
+          notes="Wheel with the OAuth client embedded, so no Cloud Console setup is needed.
+
+          The PyPI build of the same version deliberately omits the client and downloads it at first setup: \`pip install --pre gsc-indexer-mcp\`.
+
+          What changed: https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists; replacing the wheel"
+            gh release upload "$tag" dist/*.whl --clobber
+          else
+            gh release create "$tag" dist/*.whl \
+              --title "$tag" --notes "$notes" --latest
+          fi
