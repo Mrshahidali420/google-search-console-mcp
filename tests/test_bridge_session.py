@@ -45,7 +45,12 @@ SETTLE = 5
 
 @pytest.fixture
 def session():
-    sess = bridge.BridgeSession(port=0, token=TOKEN, connect_timeout=SETTLE)
+    # probe_wait is SETTLE rather than the production 1.5s on purpose. The
+    # displacement tests assert the RULE — a live incumbent keeps the run —
+    # and a Windows runner has been measured starving the responder thread
+    # past 1.5s, which turned that rule into a coin flip in CI.
+    sess = bridge.BridgeSession(port=0, token=TOKEN, connect_timeout=SETTLE,
+                                probe_wait=SETTLE)
     thread = threading.Thread(target=sess.start, daemon=True)
     thread.start()
     assert sess.ready.wait(SETTLE), "the server never bound its socket"

@@ -61,3 +61,34 @@ def test_skipped_is_in_the_vocabulary():
     # content.js emits "skipped" in five places. Coercing it to "error" would
     # charge a quota slot for a URL that was never submitted.
     assert "skipped" in bridge.KNOWN_OUTCOMES
+
+
+# The two below run on every OS on purpose. The bug they pin passed on
+# Windows for the whole of this project's history and failed on Linux and
+# macOS the first time CI ran there, because os.path.basename and
+# os.path.normcase answer according to the machine running them rather than
+# the machine that produced the path.
+
+@pytest.mark.parametrize("path, name", [
+    (r"C:\Users\someone\AppData\Chrome\chrome.exe", "chrome.exe"),
+    ("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+     "Brave Browser"),
+    ("/usr/bin/google-chrome", "google-chrome"),
+    ("chrome.exe", "chrome.exe"),
+])
+def test_the_exe_name_is_the_last_segment_whatever_the_separator(path, name):
+    # This one is a privacy rule, not a cosmetic one: the refusal log prints
+    # this and nothing else, so a segment left on the front is the user's
+    # install layout in a log file.
+    assert bridge._exe_name(path) == name
+
+
+@pytest.mark.parametrize("a, b, same", [
+    (r"C:\Program Files\BraveSoftware\brave.exe",
+     r"c:\program files\bravesoftware\BRAVE.EXE", True),
+    (r"C:\Program Files\BraveSoftware\brave.exe",
+     "C:/Program Files/BraveSoftware/brave.exe", True),
+    (r"C:\Users\a\Brave\brave.exe", r"C:\Users\a\Chrome\chrome.exe", False),
+])
+def test_two_paths_name_the_same_binary_regardless_of_host_os(a, b, same):
+    assert bridge._same_exe(a, b) is same

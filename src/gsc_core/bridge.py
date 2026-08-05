@@ -37,14 +37,12 @@ one localhost server, one authenticated connection, one blocking RPC.
 from __future__ import annotations
 
 import json
-import os
 import secrets
 import subprocess
 import threading
 import time
 import uuid
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Iterator
 
 from websockets.sync.server import serve as ws_serve
@@ -97,6 +95,35 @@ INCUMBENT_SILENCE = 90.0
 #: concluding there is no JavaScript behind it. One local round trip is
 #: sub-millisecond; this is slack for a busy worker, not a timeout to tune.
 PROBE_WAIT = 1.5
+
+
+def _exe_name(path: object) -> str:
+    """The last segment of an executable path, whatever separator it uses.
+
+    `os.path.basename` splits on the separator of the machine RUNNING it,
+    not the one that produced the string, so on Linux it returns a whole
+    Windows path unsplit — which is how the refusal below came to log the
+    user's install layout on POSIX while passing on Windows. Split on both
+    separators and the answer no longer depends on where this runs.
+    """
+    text = str(path).rstrip("\\/")
+    for sep in ("\\", "/"):
+        text = text.rsplit(sep, 1)[-1]
+    return text
+
+
+def _same_exe(a: object, b: object) -> bool:
+    """Do two executable paths name the same binary?
+
+    `os.path.normcase` case-folds on Windows and is the identity everywhere
+    else, so the same two paths compared equal on one OS and unequal on
+    another. Fold explicitly instead: a machine with two browsers whose
+    paths differ only in case or in separator does not exist, and a refusal
+    that depends on the host OS does.
+    """
+    def norm(p: object) -> str:
+        return str(p).replace("\\", "/").casefold()
+    return norm(a) == norm(b)
 
 
 def peer_exe(conn: object) -> str | None:
@@ -193,10 +220,15 @@ class BridgeSession:
     """
 
     def __init__(self, port: int, token: str, *, connect_timeout: int = 60,
-                 target: object | None = None) -> None:
+                 target: object | None = None,
+                 probe_wait: float = PROBE_WAIT) -> None:
         self.port = port
         self.token = token
         self.connect_timeout = connect_timeout
+        # Overridable only so tests can be generous. A CI runner can starve a
+        # responder thread for longer than the production slack allows, and
+        # the displacement rule under test is not the number of seconds.
+        self.probe_wait = probe_wait
         # target is what makes self-pairing possible: verifying a pair_request
         # means looking the claimed ID up in the browser profile it names.
         # Without one, pairing is refused rather than waved through.
@@ -665,7 +697,7 @@ class BridgeSession:
             log.debug("bridge: probe could not be sent (%s)",
                       type(exc).__name__)
             return False
-        deadline = mark + PROBE_WAIT
+        deadline = mark + self.probe_wait
         while time.monotonic() < deadline:
             if self._last_seen > mark:
                 return True
@@ -792,7 +824,7 @@ class BridgeSession:
         if peer is None:
             return True
         try:
-            same = os.path.normcase(str(peer)) == os.path.normcase(str(expected))
+            same = _same_exe(peer, expected)
         except (TypeError, ValueError):
             return True
         if not same:
@@ -801,7 +833,7 @@ class BridgeSession:
             # act on.
             log.warning("bridge: a connection came from %s, which is not the "
                         "browser this run is driving — refusing it",
-                        os.path.basename(str(peer)))
+                        _exe_name(peer))
         return same
 
     def _token_matches(self, hello: dict | None) -> bool:
@@ -863,7 +895,7 @@ def _browser_running(target: object) -> bool:
     Split out as its own function purely so tests can stub it: the real
     check walks the process table, which no unit test should depend on.
     """
-    exe_name = Path(target.installed.exe_path).name.lower()
+    exe_name = _exe_name(target.installed.exe_path).lower()
     try:
         import psutil  # noqa: PLC0415 — optional; absence is not an error
     except ImportError:
