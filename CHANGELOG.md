@@ -4,6 +4,29 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
+## [Unreleased]
+
+The first CI run on Linux and macOS found two bugs that a Windows-only test
+history could not.
+
+### Fixed
+
+- **The bridge's browser match was Windows-only.** `os.path.normcase` folds
+  case on Windows and is the identity everywhere else, and `os.path.basename`
+  splits on the separator of the machine running it rather than the one that
+  produced the path. Both decide whether a connection came from the browser
+  this run is driving, so on Linux and macOS the match was case-sensitive and
+  the refusal logged the peer's whole path — the user's install layout — where
+  it was meant to log the executable name and nothing else.
+- **A liveness probe answered inside one clock tick read as no answer.**
+  `time.monotonic()` on Windows resolves to ~15.6ms before Python 3.13, and a
+  loopback round trip is well inside one tick, so an extension that answered
+  immediately stamped the same timestamp the probe was sent at. Equal is not
+  greater, so the quickest possible answer counted as silence and the live
+  connection was displaced — which makes `submit()` see a bounce and re-send,
+  and a re-sent Request Indexing is a second real click against one recorded
+  quota slot. Frames are counted now; a counter cannot tie.
+
 ## [0.1.0a4] — 2026-08-05
 
 Same code as 0.1.0a3. The registry namespace turned out to be case-sensitive —
