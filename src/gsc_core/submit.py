@@ -68,6 +68,18 @@ _THROTTLE_OUTCOMES = frozenset({"rate_limited"})
 # reached Google on that path — if that is not certain, leave it out.
 _NO_CLICK_OUTCOMES = frozenset({"already_indexed", "skipped"})
 
+# Stages the extension reports on its way TO the Request Indexing click.
+# A failure at one of these cannot have clicked, so re-sending the URL
+# cannot submit it twice — which is the only reason a retry is allowed at
+# all. Everything else, including an unreported stage, is treated as
+# possibly-post-click and never retried.
+#
+# This is an allowlist and must stay one. A stage added to the extension
+# before the click is merely not retried until it is added here; a stage
+# added at or after the click, in a deny-list world, would silently become
+# retryable and double-submit. The failure directions are not symmetrical.
+_PRE_CLICK_STAGES = frozenset({"navigating", "in_place", "inspecting"})
+
 
 def disposition_for(outcome: str, *, stop_on_throttle: bool) -> Disposition:
     """The ledger and run effect of one outcome. Raises KeyError if unknown.
@@ -181,6 +193,11 @@ class Sender(Protocol):
 
     def submit(self, property: str, url: str, authuser: str) -> str: ...
 
+    #: The last stage reported for the submit that just returned, or None.
+    #: Read only through _last_stage() below, which treats a sender that
+    #: does not carry one as "unknown" — the no-retry answer.
+    last_stage: str | None
+
 
 @dataclass(frozen=True)
 class Attempt:
@@ -256,6 +273,60 @@ def _report(on_progress: Callable[[Attempt], None] | None,
         log.warning("progress callback failed (%s)", type(exc).__name__)
 
 
+def _failed_before_the_click(sender: Sender) -> bool:
+    """Did the submit that just failed give up before Request Indexing?
+
+    Unknown counts as no. A sender that reports no stage — an older
+    extension, a test double, a command that never reached the browser —
+    gives no evidence either way, and the cost of the two mistakes is not
+    the same: not retrying loses one URL from a run the caller can see,
+    while retrying after a click spends a second irrecoverable quota slot
+    and asks Google to index the same page twice.
+    """
+    return getattr(sender, "last_stage", None) in _PRE_CLICK_STAGES
+
+
+def _submit_once(sender: Sender, property: str, url: str, authuser: str) -> str:
+    """One send. A raising sender becomes "error" so the row still settles.
+
+    Leaving the submission row open would have quota.used() count it as
+    spent until reconcile() swept it, silently shrinking the budget. Type
+    name only in the log: the exception text can carry the account.
+    """
+    try:
+        return sender.submit(property, url, authuser)
+    except Exception as exc:  # noqa: BLE001 — the row MUST still settle
+        log.warning("submit failed for one URL (%s)", type(exc).__name__)
+        return "error"
+
+
+def _submit_with_retries(sender: Sender, property: str, url: str,
+                         authuser: str, *, retries: int) -> str:
+    """Send one URL, re-sending only when the failure preceded the click.
+
+    A transient browser-side failure used to drop the URL silently: the run
+    logged "error" and moved on, and the caller's only clue was a result
+    line among many. Two live runs lost URLs this way.
+
+    Only "error" is retried, and only on a pre-click stage. "timeout" is
+    never retried however far it got: bridge.submit() returns it precisely
+    when a submit frame reached the socket and no verdict came back, so a
+    click may already have landed. The same reservation is held across the
+    attempts and settled once with the final outcome — the failed attempt
+    spent no slot, and re-reserving mid-URL could refuse a slot the URL
+    already holds.
+    """
+    outcome = _submit_once(sender, property, url, authuser)
+    for attempt in range(max(0, retries)):
+        if outcome != "error" or not _failed_before_the_click(sender):
+            return outcome
+        log.info("a URL failed at the %s stage, before Request Indexing was "
+                 "clicked — re-sending it (retry %d of %d)",
+                 sender.last_stage, attempt + 1, retries)
+        outcome = _submit_once(sender, property, url, authuser)
+    return outcome
+
+
 def run(conn: sqlite3.Connection, sender: Sender, urls: list[str], *,
         properties: list[str], account: str, job_id: str | None, cfg: dict,
         sleep: Callable[[float], None] = time.sleep,
@@ -289,6 +360,7 @@ def run(conn: sqlite3.Connection, sender: Sender, urls: list[str], *,
     stop_reason: str | None = None
     stop_on_throttle = bool(cfg.get("stop_on_throttle", True))
     authuser = str(cfg.get("authuser", "0"))
+    submit_retries = int(cfg.get("submit_retries", 1))
     pending_delay: float | None = None
 
     for index, url in enumerate(urls):
@@ -322,14 +394,8 @@ def run(conn: sqlite3.Connection, sender: Sender, urls: list[str], *,
                 break
             continue
 
-        try:
-            outcome = sender.submit(target_property, url, authuser)
-        except Exception as exc:  # noqa: BLE001 — the row MUST still settle
-            # Leaving the row open would have quota.used() count it as spent
-            # until reconcile() swept it, silently shrinking the budget.
-            # Type name only: the exception text can carry the account.
-            log.warning("submit failed for one URL (%s)", type(exc).__name__)
-            outcome = "error"
+        outcome = _submit_with_retries(sender, target_property, url, authuser,
+                                       retries=submit_retries)
 
         disposition = settle(conn, reservation.submission_id, outcome,
                              stop_on_throttle=stop_on_throttle)

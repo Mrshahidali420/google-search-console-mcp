@@ -104,6 +104,18 @@ def test_validate_rejects_non_boolean_stop_on_throttle():
     assert "stop_on_throttle must be true or false" in config.validate(broken)
 
 
+def test_validate_rejects_an_oversized_retry_budget():
+    """Every retry is another full trip through the browser UI — a live
+    failure took over two minutes to arrive — so a big number turns one
+    broken URL into a stalled run."""
+    broken = {**config.DEFAULTS, "submit_retries": 9}
+    assert "submit_retries must be between 0 and 3" in config.validate(broken)
+
+
+def test_validate_accepts_retries_turned_off():
+    assert config.validate({**config.DEFAULTS, "submit_retries": 0}) == []
+
+
 def test_validate_rejects_boolean_slots():
     """bool subclasses int, so a bare isinstance check would accept true."""
     broken = {**config.DEFAULTS, "property_slots": True}

@@ -217,6 +217,13 @@ class BridgeSession:
         self._last_seen = 0.0
         self._pending: dict[str, dict] = {}
         self._pending_lock = threading.Lock()
+        #: The last stage the extension reported for the submit that just
+        #: finished, or None if it reported none. Read by the run loop to
+        #: tell a failure BEFORE the Request Indexing click — which is safe
+        #: to retry — from one at or after it, which never is. Only ever
+        #: meaningful straight after submit() returns, and submits are
+        #: serial by construction: the bridge carries one at a time.
+        self.last_stage: str | None = None
         self._stopped = False
         # Bumped on each (re)connection, so submit() can notice a bounce
         # mid-flight and re-send on the fresh connection.
@@ -389,9 +396,13 @@ class BridgeSession:
         worth more than that slot.
         """
         cmd_id = uuid.uuid4().hex
-        waiter: dict = {"event": threading.Event(), "outcome": None}
+        waiter: dict = {"event": threading.Event(), "outcome": None,
+                        "stage": None}
         with self._pending_lock:
             self._pending[cmd_id] = waiter
+        # Cleared up front so a failure that reports no stage at all cannot
+        # be read as the previous URL's stage and retried on its evidence.
+        self.last_stage = None
         deadline = time.monotonic() + timeout
         resends = 0
         # Whether this command ever reached the wire. It is the ONLY thing
@@ -448,6 +459,7 @@ class BridgeSession:
         finally:
             with self._pending_lock:
                 self._pending.pop(cmd_id, None)
+            self.last_stage = waiter.get("stage")
 
     def _expired(self, timeout: int, sent: bool) -> str:
         """The `timeout` budget ran out. Which of the two that is depends
@@ -805,8 +817,15 @@ class BridgeSession:
         if kind == "ping":
             conn.send(json.dumps({"type": "pong"}))
         elif kind == "progress":
-            log.info("bridge progress [%s]: %s",
-                     message.get("id", "?"), message.get("stage"))
+            stage = message.get("stage")
+            log.info("bridge progress [%s]: %s", message.get("id", "?"), stage)
+            # Kept on the waiter, not on the session, so a stray progress
+            # frame for a command that has already settled cannot overwrite
+            # the stage of the one now in flight.
+            with self._pending_lock:
+                waiter = self._pending.get(message.get("id"))
+            if waiter is not None and isinstance(stage, str):
+                waiter["stage"] = stage
         elif kind == "result":
             # `detail` carries the extension's diagnostics. Dropping it once
             # made a silent-success path impossible to audit.

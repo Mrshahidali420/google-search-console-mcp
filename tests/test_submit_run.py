@@ -527,3 +527,123 @@ def test_an_ordinary_submission_does_not_fill_the_ledger(conn):
     _run(conn, sender, ["https://example.com/a"])
 
     assert quota.free(conn, PROPERTY) == 10
+
+
+# --- retrying only what cannot have clicked ----------------------------------
+
+
+class StagedSender(FakeSender):
+    """A sender that also reports where the extension got to.
+
+    Stages are scripted alongside outcomes because the pair is what the
+    retry decision is made from; a sender that reported an outcome without
+    a stage would be testing the unknown-stage path instead.
+    """
+
+    def __init__(self, outcomes: list[str], stages: list[str | None]) -> None:
+        super().__init__(outcomes)
+        self.stages = list(stages)
+        self.last_stage: str | None = None
+
+    def submit(self, property: str, url: str, authuser: str) -> str:
+        self.last_stage = self.stages.pop(0) if self.stages else None
+        return super().submit(property, url, authuser)
+
+
+def test_a_failure_before_the_click_is_re_sent(conn):
+    """The live loss this fixes: a URL failed at "inspecting" -- no click
+    issued, no slot spent -- and the run dropped it and moved on."""
+    sender = StagedSender(["error", "submitted"], ["inspecting", None])
+
+    result = _run(conn, sender, ["https://example.com/a"])
+
+    assert len(sender.calls) == 2
+    assert [attempt.outcome for attempt in result.attempts] == ["submitted"]
+
+
+def test_a_failure_at_the_click_is_never_re_sent(conn):
+    """The double-submission hazard. An error here may follow a click that
+    already reached Google, and a re-send would ask for the same page twice
+    at the cost of a second irrecoverable slot."""
+    sender = StagedSender(["error"], ["clicking request indexing"])
+
+    result = _run(conn, sender, ["https://example.com/a"])
+
+    assert len(sender.calls) == 1
+    assert [attempt.outcome for attempt in result.attempts] == ["error"]
+
+
+def test_a_failure_with_no_stage_reported_is_not_re_sent(conn):
+    """No evidence is not evidence of no click. An older extension reports
+    no stage at all, and guessing in the retry direction spends slots."""
+    sender = StagedSender(["error"], [None])
+
+    _run(conn, sender, ["https://example.com/a"])
+
+    assert len(sender.calls) == 1
+
+
+def test_a_sender_that_reports_no_stage_at_all_is_not_re_sent(conn):
+    """FakeSender has no last_stage attribute -- the pre-bridge case."""
+    sender = FakeSender(["error"])
+
+    _run(conn, sender, ["https://example.com/a"])
+
+    assert len(sender.calls) == 1
+
+
+def test_a_timeout_is_never_re_sent_however_early_it_looks(conn):
+    """"timeout" means a submit frame reached the socket and no verdict came
+    back. The stage is stale evidence at that point: the click may have
+    landed after the last progress frame, which is why the disposition table
+    charges a slot for it."""
+    sender = StagedSender(["timeout"], ["inspecting"])
+
+    _run(conn, sender, ["https://example.com/a"])
+
+    assert len(sender.calls) == 1
+
+
+def test_the_retry_budget_is_not_exceeded(conn):
+    """One retry by default: a failing URL must not stall the whole run.
+    Each attempt costs a full trip through the browser UI."""
+    sender = StagedSender(["error", "error"], ["inspecting", "inspecting"])
+
+    result = _run(conn, sender, ["https://example.com/a"])
+
+    assert len(sender.calls) == 2
+    assert [attempt.outcome for attempt in result.attempts] == ["error"]
+
+
+def test_retries_can_be_turned_off_entirely(conn):
+    sender = StagedSender(["error"], ["inspecting"])
+
+    _run(conn, sender, ["https://example.com/a"],
+         cfg={**CFG, "submit_retries": 0})
+
+    assert len(sender.calls) == 1
+
+
+def test_a_re_sent_url_spends_one_slot_not_two(conn):
+    """The reservation is held across the attempts and settled once. The
+    failed attempt clicked nothing, so charging it would waste a slot the
+    property never spent."""
+    from gsc_core import quota
+
+    sender = StagedSender(["error", "submitted"], ["inspecting", None])
+
+    _run(conn, sender, ["https://example.com/a"])
+
+    assert quota.free(conn, PROPERTY) == 10
+
+
+def test_a_retry_that_succeeds_still_paces_the_next_url(conn):
+    """A successful re-send is still a click, so the next URL owes a gap."""
+    waits: list[float] = []
+    sender = StagedSender(["error", "submitted", "submitted"],
+                          ["inspecting", None, None])
+
+    _run(conn, sender, ["https://example.com/a", "https://example.com/b"],
+         sleep=waits.append)
+
+    assert len(waits) == 1

@@ -901,3 +901,84 @@ def test_bridge_session_raises_a_readable_error_when_nothing_connects(monkeypatc
     # callers catching the broad type keep working.
     assert isinstance(excinfo.value, bridge.ExtensionNotConnected)
     assert issubclass(bridge.ExtensionNotConnected, RuntimeError)
+
+
+# --- the stage a failure reached --------------------------------------------
+
+
+def test_the_last_stage_reached_is_readable_after_a_submit(session):
+    """The run loop retries a failure only when it can prove no click was
+    issued, and this is the proof. Without it the stage is logged and lost."""
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+
+    def run() -> None:
+        command = json.loads(conn.recv())
+        for stage in ("navigating", "in_place", "inspecting"):
+            conn.send(json.dumps({"type": "progress", "id": command["id"],
+                                  "stage": stage}))
+        conn.send(json.dumps({"type": "result", "id": command["id"],
+                              "outcome": "error"}))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    assert session.submit("sc-domain:example.com", "https://example.com/a",
+                          "0", timeout=15) == "error"
+    assert session.last_stage == "inspecting"
+    thread.join(SETTLE)
+    conn.close()
+
+
+def test_a_submit_that_reports_no_stage_leaves_the_stage_unknown(session):
+    """A stale stage from the previous URL would be read as evidence that
+    this one failed before its click, and earn it a re-send it never
+    justified."""
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+
+    def reply(outcome: str, with_stage: bool) -> None:
+        command = json.loads(conn.recv())
+        if with_stage:
+            conn.send(json.dumps({"type": "progress", "id": command["id"],
+                                  "stage": "inspecting"}))
+        conn.send(json.dumps({"type": "result", "id": command["id"],
+                              "outcome": outcome}))
+
+    first = threading.Thread(target=reply, args=("error", True), daemon=True)
+    first.start()
+    session.submit("sc-domain:example.com", "https://example.com/a", "0",
+                   timeout=15)
+    first.join(SETTLE)
+    assert session.last_stage == "inspecting"
+
+    second = threading.Thread(target=reply, args=("error", False), daemon=True)
+    second.start()
+    session.submit("sc-domain:example.com", "https://example.com/b", "0",
+                   timeout=15)
+    second.join(SETTLE)
+    assert session.last_stage is None
+    conn.close()
+
+
+def test_a_progress_frame_for_a_settled_command_is_ignored(session):
+    """Keyed on the command id, so a late frame from the URL before cannot
+    rewrite the stage of the one in flight."""
+    conn = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+
+    def run() -> None:
+        command = json.loads(conn.recv())
+        conn.send(json.dumps({"type": "progress", "id": "a-dead-command",
+                              "stage": "clicking request indexing"}))
+        conn.send(json.dumps({"type": "progress", "id": command["id"],
+                              "stage": "inspecting"}))
+        conn.send(json.dumps({"type": "result", "id": command["id"],
+                              "outcome": "error"}))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    session.submit("sc-domain:example.com", "https://example.com/a", "0",
+                   timeout=15)
+    assert session.last_stage == "inspecting"
+    thread.join(SETTLE)
+    conn.close()

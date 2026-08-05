@@ -33,6 +33,7 @@ DEFAULTS: dict = {
     "account_slots": None,       # tracked, not enforced — no ceiling observed
     "daily_reserve": 0,          # per property; unspendable by any tool
     "submit_delay_range": [130, 180],   # seconds; proven against live runs
+    "submit_retries": 1,         # re-sends allowed ONLY before the click
 
     # URL Inspection
     "inspect_concurrency": 20,   # api.MAX_WORKERS; the 600/min gate is upstream
@@ -133,6 +134,15 @@ def validate(data: dict) -> list[str]:
         problems.append(
             "submit_delay_range must be [low, high] seconds with low <= high"
         )
+
+    # Capped low on purpose. A retry only ever re-sends a URL that failed
+    # before the click, but each one costs another trip through the browser
+    # UI — a live failure took 2m18s to arrive — so a large number turns one
+    # broken URL into a stalled run.
+    retries = data.get("submit_retries")
+    if (not isinstance(retries, int) or isinstance(retries, bool)
+            or not 0 <= retries <= 3):
+        problems.append("submit_retries must be between 0 and 3")
 
     concurrency = data.get("inspect_concurrency")
     if (not isinstance(concurrency, int) or isinstance(concurrency, bool)
