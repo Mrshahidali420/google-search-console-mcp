@@ -4,6 +4,35 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
+## [0.1.0a3] — 2026-08-05
+
+A listing release. Nothing in the server changed; what changed is how you find
+it and how many steps it takes to add it. The version had to move anyway,
+because PyPI stores a README **per version** and the ownership marker the MCP
+Registry checks for was not in the one 0.1.0a2 shipped.
+
+### Added
+
+- **Listed in the official MCP Registry** as
+  `io.github.mrshahidali420/gsc-indexer-mcp`, via `server.json` and
+  `.github/workflows/mcp-registry.yml`. The registry is the upstream that
+  Smithery, PulseMCP, Docker Hub's catalogue and GitHub's own registry read
+  from, so one entry is what makes this discoverable in all of them.
+  Authentication is GitHub OIDC — the `io.github.<owner>/` namespace is granted
+  by the token's claim rather than asserted by us, and there is no credential
+  stored anywhere.
+- **One-click install buttons** for VS Code, Cursor and LM Studio, plus
+  `claude mcp add gsc -- uvx gsc-indexer-mcp`, at the top of the README. All of
+  them run `uvx gsc-indexer-mcp`, which fetches and runs the package with
+  nothing installed first.
+- **`.mcp.json` in the repo root**, so a clone is also a working config.
+
+### Changed
+
+- The README now documents the install that actually exists. Until 0.1.0a2 was
+  published it said there was no package index to install from; that was true
+  when written and is not now.
+
 ## [0.1.0a2] — 2026-08-05
 
 The first version intended for a package index. Version bumped rather than

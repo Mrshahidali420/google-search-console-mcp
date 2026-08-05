@@ -1,0 +1,75 @@
+name: Publish to the MCP Registry
+
+# Lists this server in the official Model Context Protocol registry, which is
+# what Smithery, PulseMCP, Docker Hub's MCP catalogue and GitHub's own registry
+# read from. The registry stores a pointer, not the code: it records that
+# `io.github.mrshahidali420/gsc-indexer-mcp` at version N is the PyPI package
+# `gsc-indexer-mcp` at version N, and clients install it with uvx from there.
+#
+# TWO THINGS MUST BE TRUE BEFORE THIS RUN CAN SUCCEED, and both fail loudly
+# rather than silently listing something wrong:
+#
+#   1. The version in server.json must already be live on PyPI. Run
+#      pypi-publish.yml first. The registry fetches the package metadata and
+#      rejects a version it cannot find.
+#
+#   2. The README stored ON PYPI for that version must contain the line
+#      `mcp-name: io.github.mrshahidali420/gsc-indexer-mcp`. That marker is the
+#      ownership proof -- it is how the registry knows whoever controls this
+#      repo also controls that PyPI project. It lives at the top of README.md
+#      as an HTML comment, and PyPI stores the README per-version, so a marker
+#      added after a release is not in that release. That is precisely why
+#      0.1.0a3 exists: 0.1.0a2's stored README predates the marker.
+#
+# AUTHENTICATION: GitHub OIDC, same shape as trusted publishing -- no token to
+# store, and the `io.github.<owner>/` namespace is granted by the OIDC claim
+# rather than asserted by us. The interactive `mcp-publisher login github`
+# device flow does the same thing on a laptop; this exists so nobody has to.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish server.json to the registry
+    runs-on: ubuntu-latest
+
+    # The OIDC token is the credential. Without this the login step has nothing
+    # to present and the namespace claim cannot be made.
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check server.json agrees with the shipped version
+        # A registry entry pointing at a version that is not on PyPI installs
+        # nothing. Catching the mismatch here costs a second; catching it after
+        # publication costs a version number.
+        run: |
+          python - <<'PY'
+          import json, pathlib, re, sys
+          spec = json.loads(pathlib.Path("server.json").read_text())
+          init = pathlib.Path("src/gsc_mcp/__init__.py").read_text()
+          shipped = re.search(r'__version__ = "([^"]+)"', init).group(1)
+          versions = {spec["version"]} | {p["version"] for p in spec["packages"]}
+          if versions != {shipped}:
+              sys.exit(f"server.json says {sorted(versions)}, package is {shipped}")
+          marker = f"mcp-name: {spec['name']}"
+          if marker not in pathlib.Path("README.md").read_text():
+              sys.exit(f"README.md is missing the ownership marker: {marker}")
+          print(f"server.json, package and README all agree on {shipped}")
+          PY
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
+            | tar xz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Log in with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish

@@ -1,7 +1,13 @@
+<!-- The MCP Registry reads this marker out of the PyPI description to prove
+     the package and the registry entry have the same owner. It must match
+     `name` in server.json exactly, and it must survive any README rewrite.
+     mcp-name: io.github.mrshahidali420/gsc-indexer-mcp -->
+
 # Google Search Console MCP Server
 
 **An MCP server that gives Claude and other AI agents real control over Google Search Console** — list your properties, check whether a URL is indexed, submit sitemaps, pull search analytics, and diagnose setup problems, all from a conversation.
 
+[![PyPI](https://img.shields.io/pypi/v/gsc-indexer-mcp?label=pypi%20gsc-indexer-mcp&color=blue)](https://pypi.org/project/gsc-indexer-mcp/)
 [![CI](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-green)](LICENSE)
@@ -9,6 +15,35 @@
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 > Built for SEO practitioners tired of checking index status and submitting sitemaps by hand, one property at a time, and for the AI agents that can do it for them.
+
+## Add it to your agent
+
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-install-0098FF?logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=gsc&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22gsc-indexer-mcp%22%5D%7D)
+[![Install in Cursor](https://img.shields.io/badge/Cursor-install-000000?logo=cursor&logoColor=white)](https://cursor.com/install-mcp?name=gsc&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJnc2MtaW5kZXhlci1tY3AiXX0%3D)
+[![Install in LM Studio](https://img.shields.io/badge/LM_Studio-install-4A4A4A)](lmstudio://add_mcp?name=gsc&config=eyJuYW1lIjoiZ3NjIiwiY29tbWFuZCI6InV2eCIsImFyZ3MiOlsiZ3NjLWluZGV4ZXItbWNwIl19)
+
+Claude Code, in one command:
+
+```bash
+claude mcp add gsc -- uvx gsc-indexer-mcp
+```
+
+Anything else that speaks MCP, by hand — this is the whole config:
+
+```json
+{
+  "mcpServers": {
+    "gsc": { "command": "uvx", "args": ["gsc-indexer-mcp"] }
+  }
+}
+```
+
+`uvx` fetches and runs the published package with nothing installed first, which
+is why every button above is a one-liner. A [`.mcp.json`](.mcp.json) with exactly
+that content sits in this repo, so cloning it is also enough.
+
+No API key goes in any of these. Sign-in happens once, in your browser, when you
+first call `gsc_setup()` — see [The OAuth client is handled for you](#the-oauth-client-is-handled-for-you).
 
 ---
 
@@ -140,17 +175,21 @@ on PyPI is an unrelated project by another author, so installing that name gets
 you someone else's server. Everything inside this one is still `gsc_mcp` — the
 import package, the console script, the config directory.
 
-**It is not on PyPI yet** — that step is pending, and this section will say so
-until it has actually happened. When it does, it will be a pre-release, so pip
-will need `--pre`:
+It is a pre-release, so pip needs `--pre`:
 
 ```bash
-pip install --pre gsc-indexer-mcp   # not published yet
+pip install --pre gsc-indexer-mcp
 ```
 
-Today, install from the wheel on the
-[latest release](https://github.com/Mrshahidali420/google-search-console-mcp/releases/latest),
-or from a checkout — which is what you want if you intend to change anything:
+Or skip installing entirely and let `uvx gsc-indexer-mcp` fetch it on demand,
+which is what the buttons at the top of this page do.
+
+You can also take the wheel from the
+[latest release](https://github.com/Mrshahidali420/google-search-console-mcp/releases/latest)
+— that one differs in one way, described below: it carries the OAuth client,
+where the PyPI build downloads it at first setup.
+
+Or from a checkout, which is what you want if you intend to change anything:
 
 ```bash
 git clone https://github.com/Mrshahidali420/google-search-console-mcp.git
@@ -445,7 +484,7 @@ Stated plainly, because they are the things a reviewer should look at first:
 - macOS and Linux browser detection has only ever run against fixtures, never on real hardware, here or in CI. The first person to run the smoke checklist on a Mac or a Linux box is performing that test.
 - `gsc_detect_browsers` reports `matches_authorised_account` as `null` on every real machine today. The flag reads an `account_email` key from the stored token, and nothing writes it: the current scope set returns no identity claim and the consent step does not record the authorising account. The plumbing is correct and inert. Treat the field as "unknown", not as "does not match".
 - The `extension` check reports whether the extension is **registered**, not whether it is working. Only the bridge learns whether the MV3 worker is alive, and only at submission time.
-- **No wheel has reached a package index yet.** `v0.1.0a1` is published as a GitHub release with the wheel attached, and the `client` release asset means a source checkout downloads the OAuth client on first `gsc_setup()` — a path exercised against the live URL. PyPI is still pending, so `pip install` from an index is not yet a thing anyone can do. When it happens the name will be `gsc-indexer-mcp`, because `gsc-mcp` on PyPI belongs to an unrelated project. Note that the PyPI wheel will deliberately **not** carry the embedded OAuth client the GitHub wheel does — a secret on a public index is a revoked secret — so an installed-from-PyPI user takes the download-at-setup path instead.
+- **The published package is on PyPI as `gsc-indexer-mcp`, not `gsc-mcp`** — that name belongs to an unrelated project by another author, and installing it gets you their server, not this one. The two distribution channels also differ in one substantive way: the **GitHub release wheel embeds this project's OAuth client**, while the **PyPI wheel deliberately does not** (a secret on a public index is a revoked secret), so a PyPI install downloads the client from the `client` release asset at first `gsc_setup()`. Both paths have been exercised, but they are not the same path, and a bug in one would not show up in the other.
 - `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright — confirmed directly against the 2.0 wheel, which has no `fastmcp` module at all — so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to whatever construction API replaced it.
 
 ## Contributing
