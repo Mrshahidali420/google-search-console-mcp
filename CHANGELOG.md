@@ -4,6 +4,15 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
+## [0.1.0a4] — 2026-08-05
+
+Same code as 0.1.0a3. The registry namespace turned out to be case-sensitive —
+GitHub OIDC grants `io.github.Mrshahidali420/*` spelled exactly as the account
+is — and the ownership marker must match the server name character for
+character in the README **PyPI has stored**. Correcting the casing therefore
+costs a version, because the stored README of a published version cannot be
+edited.
+
 ## [0.1.0a3] — 2026-08-05
 
 A listing release. Nothing in the server changed; what changed is how you find

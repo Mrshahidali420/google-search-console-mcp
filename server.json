@@ -6,12 +6,12 @@
     "url": "https://github.com/Mrshahidali420/google-search-console-mcp",
     "source": "github"
   },
-  "version": "0.1.0a3",
+  "version": "0.1.0a4",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "gsc-indexer-mcp",
-      "version": "0.1.0a3",
+      "version": "0.1.0a4",
       "transport": {
         "type": "stdio"
       }

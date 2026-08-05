@@ -19,4 +19,4 @@ from __future__ import annotations
 # That matches the Pre-Alpha classifier and the Known gaps in the README --
 # nobody should land on this by accident while the submission path is still
 # this young. Drop the suffix when the gaps close, not before.
-__version__ = "0.1.0a3"
+__version__ = "0.1.0a4"
