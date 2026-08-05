@@ -45,12 +45,7 @@ SETTLE = 5
 
 @pytest.fixture
 def session():
-    # probe_wait is SETTLE rather than the production 1.5s on purpose. The
-    # displacement tests assert the RULE — a live incumbent keeps the run —
-    # and a Windows runner has been measured starving the responder thread
-    # past 1.5s, which turned that rule into a coin flip in CI.
-    sess = bridge.BridgeSession(port=0, token=TOKEN, connect_timeout=SETTLE,
-                                probe_wait=SETTLE)
+    sess = bridge.BridgeSession(port=0, token=TOKEN, connect_timeout=SETTLE)
     thread = threading.Thread(target=sess.start, daemon=True)
     thread.start()
     assert sess.ready.wait(SETTLE), "the server never bound its socket"
@@ -309,6 +304,27 @@ def test_an_incumbent_that_never_answers_the_probe_loses_the_run_at_once(
     thread.join(SETTLE)
     dead.close()
     live.close()
+
+
+def test_an_answer_inside_one_clock_tick_still_counts(session, monkeypatch):
+    """The fastest possible answer must not read as no answer at all.
+
+    `_answers_a_probe` used to ask whether `_last_seen` had moved PAST the
+    instant the probe went out. `time.monotonic()` on Windows resolves to
+    ~15.6ms before Python 3.13, and a loopback round trip is far inside one
+    tick, so both timestamps landed on the same value — equal, not greater,
+    and a healthy extension was judged dead and displaced mid-session. That
+    is the double-submit the first-come rule exists to prevent, so it is
+    pinned here with the clock frozen, which reproduces on every OS.
+    """
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: 1234.0)
+
+    class InstantPeer:
+        """Answers before send() returns — the worst case for a timestamp."""
+        def send(self, _frame: str) -> None:
+            session._frames_seen += 1
+
+    assert session._answers_a_probe(InstantPeer()) is True
 
 
 def test_an_incumbent_that_answers_the_probe_keeps_the_run(session):

@@ -220,15 +220,10 @@ class BridgeSession:
     """
 
     def __init__(self, port: int, token: str, *, connect_timeout: int = 60,
-                 target: object | None = None,
-                 probe_wait: float = PROBE_WAIT) -> None:
+                 target: object | None = None) -> None:
         self.port = port
         self.token = token
         self.connect_timeout = connect_timeout
-        # Overridable only so tests can be generous. A CI runner can starve a
-        # responder thread for longer than the production slack allows, and
-        # the displacement rule under test is not the number of seconds.
-        self.probe_wait = probe_wait
         # target is what makes self-pairing possible: verifying a pair_request
         # means looking the claimed ID up in the browser profile it names.
         # Without one, pairing is refused rather than waved through.
@@ -246,8 +241,19 @@ class BridgeSession:
         self._conn_cv = threading.Condition(self._conn_lock)
         self._connected = threading.Event()
         #: When the live connection was last heard from. Read by _claim to
-        #: tell a working connection from a half-open one.
+        #: tell a working connection from a half-open one. A duration, so
+        #: the clock's resolution does not matter to it.
         self._last_seen = 0.0
+        #: How many frames the live connection has delivered. The probe waits
+        #: on THIS rather than on _last_seen moving, because "did a frame
+        #: arrive after this instant" is a question a coarse clock answers
+        #: wrongly: time.monotonic() on Windows before Python 3.13 ticks
+        #: every ~15.6ms, and a healthy extension answering a loopback probe
+        #: inside one tick stamps _last_seen with the instant the probe was
+        #: sent. Equal is not greater, so the fastest possible answer read as
+        #: no answer at all, and the incumbent was displaced for being quick.
+        #: A counter cannot tie.
+        self._frames_seen = 0
         self._pending: dict[str, dict] = {}
         self._pending_lock = threading.Lock()
         #: The last stage the extension reported for the submit that just
@@ -652,6 +658,7 @@ class BridgeSession:
                 # included: what _claim reads off this is whether the socket
                 # still has a browser behind it, not what it said.
                 self._last_seen = time.monotonic()
+                self._frames_seen += 1
                 message = parse_message(raw)
                 if message is None:
                     continue
@@ -689,20 +696,26 @@ class BridgeSession:
         arriving afterwards as the answer — a ping that crosses the probe is
         proof of life just as good as a probe_ack, and an extension too old
         to know the word "probe" still pings.
+
+        Counted rather than timed. See `_frames_seen`: comparing timestamps
+        made the answer depend on the clock's resolution, and on Windows
+        under Python 3.11 and 3.12 that resolution is coarser than a
+        loopback round trip — so the quickest possible answer was read as
+        silence and a live extension lost the run mid-session.
         """
-        mark = time.monotonic()
+        before = self._frames_seen
         try:
             conn.send(json.dumps({"type": "probe"}))  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 — a gone peer is a dead one
             log.debug("bridge: probe could not be sent (%s)",
                       type(exc).__name__)
             return False
-        deadline = mark + self.probe_wait
+        deadline = time.monotonic() + PROBE_WAIT
         while time.monotonic() < deadline:
-            if self._last_seen > mark:
+            if self._frames_seen != before:
                 return True
             time.sleep(0.02)
-        return self._last_seen > mark
+        return self._frames_seen != before
 
     def _claim(self, conn: object) -> bool:
         """Make `conn` the live connection, or refuse it. One owner at a time.
