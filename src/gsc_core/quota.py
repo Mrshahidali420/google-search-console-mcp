@@ -1,12 +1,20 @@
 """Request-Indexing slot accounting.
 
 The limit is PER PROPERTY, not per account: roughly 11 slots per property,
-each freeing 24h + 1min after its own use. Properties are fully independent,
-so a user with eight properties has eight independent budgets.
+each freeing 24h + 1min after its own use. Properties are independent, so a
+user with eight properties has eight budgets. Re-confirmed live 2026-08-05,
+against a refusal that looked at first like proof of a shared account budget.
 
 The previous implementation keyed its ledger by account email, which modelled
 the limit as per-account and under-counted capacity badly — one account with
 seventeen properties was being capped at eleven submissions total.
+
+What this ledger CANNOT see is the thing to keep in mind before trusting it:
+it counts only the slots this tool spent. Manual submissions in the browser,
+another machine, and a URL resubmitted by hand are all invisible, so `free`
+is an upper bound on real capacity, never a guarantee. That is why a refusal
+from Google is treated as authoritative — see mark_full() — and why nothing
+should conclude anything about Google's rules from these numbers alone.
 """
 from __future__ import annotations
 
@@ -106,6 +114,48 @@ def next_free(conn: sqlite3.Connection, property: str, *,
     return datetime.fromisoformat(row["oldest"]) + timedelta(
         minutes=SLOT_WINDOW_MINUTES
     )
+
+
+def mark_full(conn: sqlite3.Connection, account: str, property: str, *,
+              slots: int = DEFAULT_PROPERTY_SLOTS,
+              now: datetime | None = None) -> int:
+    """Backfill the ledger so this property reads as fully spent. Returns rows added.
+
+    Called when Google itself answers "Quota Exceeded". That answer is
+    ground truth and the ledger is only an estimate, so the estimate yields
+    to it -- without this, a refusal left `free` reporting spare capacity
+    and the very next caller submitted straight into another refusal.
+
+    The gap being closed is not a bug in the accounting. The ledger can only
+    ever count consumption IT caused: a slot spent by hand in the browser, by
+    another machine, or by a resubmission of a URL this tool already sent, is
+    invisible here. All of those are ordinary user behaviour. So a refusal on
+    a property the ledger believes is untouched is expected, not a defect --
+    and it carries exactly one piece of information worth writing down, which
+    is that every slot is in fact gone.
+
+    Synthetic rows are stamped `now`, which makes them age out on the normal
+    24h+1min window rather than needing their own expiry path. That is
+    deliberately pessimistic: the real slots were spent at some earlier,
+    unknowable moment, so the ledger will free them slightly LATE. Late costs
+    a wait; early costs another hard refusal, and refusals are what this
+    function exists to stop.
+
+    Does not open its own transaction -- callers wrap this in store.tx(),
+    like every other accounting write in this module.
+    """
+    moment = now or datetime.now(UTC)
+    deficit = slots - used(conn, property, now=moment)
+    if deficit <= 0:
+        return 0
+    stamp = utc_iso(moment)
+    conn.executemany(
+        "INSERT INTO quota_slots (account, property, used_at) VALUES (?, ?, ?)",
+        [(account, property, stamp)] * deficit,
+    )
+    log.info("quota refused by Google for %s; ledger backfilled by %d",
+             property, deficit)
+    return deficit
 
 
 @dataclass(frozen=True)

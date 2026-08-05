@@ -268,7 +268,14 @@ def list_sitemaps(property: str, provider: TokenProvider,
 # have. Every other bias in this module and in quota.py runs the other way:
 # over-count, never under-count.
 
-MAX_WORKERS = 15
+# 20, matching the ceiling proven in the bulk URL-inspection tool this design
+# came from. Raising it does NOT raise how much quota a run can spend: the
+# minute and daily windows are enforced by _reserve() BEFORE any worker
+# starts, so the pool can only ever drain calls that were already granted.
+# Workers govern how fast a granted batch goes out, nothing else -- which is
+# why the old 15/8 pair cost a live 15-URL run over two minutes and forced
+# the MCP tool call to be backgrounded twice.
+MAX_WORKERS = 20
 MAX_REVERIFY_ROUNDS = 4
 REVERIFY_COOLDOWN_S = 5.0     # doubles each round
 REVERIFY_GAP_S = 1.0          # between sequential re-checks within a round
@@ -285,7 +292,7 @@ _WHY_BUDGET = "time budget spent"
 
 def check_status(
     conn: sqlite3.Connection, urls: list[str], provider: TokenProvider,
-    properties: list[str], concurrency: int = 8, time_budget_s: float = 900.0,
+    properties: list[str], concurrency: int = 20, time_budget_s: float = 900.0,
     max_suspects_per_round: int = 200, now: datetime | None = None,
     session: requests.Session | None = None,
     sleep: Callable[[float], None] = time.sleep,

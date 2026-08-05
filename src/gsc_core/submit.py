@@ -333,6 +333,19 @@ def run(conn: sqlite3.Connection, sender: Sender, urls: list[str], *,
 
         disposition = settle(conn, reservation.submission_id, outcome,
                              stop_on_throttle=stop_on_throttle)
+
+        # Google just said the property is out of slots, on a property our
+        # own ledger believed had capacity. Believe Google. The ledger only
+        # counts what this tool spent, so manual submissions elsewhere -- or
+        # a URL resubmitted by hand -- leave it legitimately short; the
+        # refusal is the only signal that will ever correct it. Without this
+        # the next caller reads the same stale free count and walks into the
+        # same wall.
+        if disposition.label == "quota_exceeded":
+            with store.tx(conn):
+                quota.mark_full(conn, account, target_property,
+                                slots=int(cfg.get("property_slots", 11)))
+
         _report(on_progress, attempts,
                 Attempt(url, target_property, disposition.label,
                         disposition.spends_slot))

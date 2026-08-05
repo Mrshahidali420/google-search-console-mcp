@@ -145,3 +145,68 @@ def test_next_free_is_set_when_open_submissions_fill_the_property(tmp_path):
     expected = (datetime.fromisoformat(store.utc_iso(oldest))
                 + timedelta(minutes=quota.SLOT_WINDOW_MINUTES))
     assert quota.next_free(conn, PROP_A, now=now) == expected
+
+
+# --- mark_full: Google's refusal overrides our estimate -----------------------
+#
+# The ledger can only count what this tool spent. A slot spent by hand in the
+# browser, from another machine, or by resubmitting a URL this tool already
+# sent, never reaches it -- all ordinary user behaviour, none of it a defect.
+# So a refusal on a property the ledger believes is empty is expected, and it
+# carries one fact worth recording: every slot is gone.
+
+
+def test_mark_full_leaves_no_free_slots(tmp_path):
+    conn = _conn(tmp_path)
+
+    added = quota.mark_full(conn, ACCOUNT, PROP_A)
+
+    assert added == quota.DEFAULT_PROPERTY_SLOTS
+    assert quota.free(conn, PROP_A) == 0
+
+
+def test_mark_full_only_backfills_the_shortfall(tmp_path):
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    _spend(conn, PROP_A, now - timedelta(minutes=5))
+    _spend(conn, PROP_A, now - timedelta(minutes=5))
+
+    added = quota.mark_full(conn, ACCOUNT, PROP_A, now=now)
+
+    assert added == quota.DEFAULT_PROPERTY_SLOTS - 2
+    assert quota.used(conn, PROP_A, now=now) == quota.DEFAULT_PROPERTY_SLOTS
+
+
+def test_mark_full_on_an_already_full_property_writes_nothing(tmp_path):
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    for _ in range(quota.DEFAULT_PROPERTY_SLOTS):
+        _spend(conn, PROP_A, now - timedelta(minutes=5))
+
+    assert quota.mark_full(conn, ACCOUNT, PROP_A, now=now) == 0
+    assert quota.used(conn, PROP_A, now=now) == quota.DEFAULT_PROPERTY_SLOTS
+
+
+def test_mark_full_does_not_touch_another_property(tmp_path):
+    conn = _conn(tmp_path)
+
+    quota.mark_full(conn, ACCOUNT, PROP_A)
+
+    assert quota.free(conn, PROP_B) == quota.DEFAULT_PROPERTY_SLOTS
+
+
+def test_backfilled_slots_age_out_on_the_normal_window(tmp_path):
+    """Stamped `now`, so they expire late rather than early.
+
+    The real slots were spent at some earlier, unknowable moment, so freeing
+    on our own stamp is pessimistic by design: late costs a wait, early costs
+    another hard refusal -- which is the thing this exists to prevent.
+    """
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+
+    quota.mark_full(conn, ACCOUNT, PROP_A, now=now)
+
+    later = now + timedelta(minutes=quota.SLOT_WINDOW_MINUTES + 1)
+    assert quota.free(conn, PROP_A, now=now) == 0
+    assert quota.free(conn, PROP_A, now=later) == quota.DEFAULT_PROPERTY_SLOTS

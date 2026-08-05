@@ -35,7 +35,7 @@ DEFAULTS: dict = {
     "submit_delay_range": [130, 180],   # seconds; proven against live runs
 
     # URL Inspection
-    "inspect_concurrency": 8,    # 600/min per property allows well above this
+    "inspect_concurrency": 20,   # api.MAX_WORKERS; the 600/min gate is upstream
     "inspection_ttl_days": 7,
 
     # Behaviour

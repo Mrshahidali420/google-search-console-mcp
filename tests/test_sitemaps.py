@@ -205,6 +205,49 @@ def test_a_loc_that_is_not_http_is_dropped_from_the_url_set():
     assert result.urls == ["https://example.com/ok"]
 
 
+def test_image_locs_are_not_mistaken_for_pages():
+    """A `<image:loc>` has the local name "loc" and must NOT become a page.
+
+    Regression for a live Yoast sitemap that reported 121 candidates for 50
+    pages: the extra 71 were images, they sorted ahead of every real path,
+    and a capped inspection run spent its entire budget on JPEGs before
+    offering them as Request-Indexing candidates — which spends daily slots
+    that cannot be recovered on URLs that can never index as pages.
+    """
+    body = """<?xml version="1.0"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://example.com/page</loc>
+    <image:image><image:loc>https://example.com/a.jpg</image:loc></image:image>
+    <image:image><image:loc>https://example.com//b.jpg</image:loc></image:image>
+  </url>
+</urlset>"""
+    session = _FakeSession({"https://example.com/s.xml": _Resp(body.encode())})
+
+    result = sitemaps.fetch_urls("https://example.com/s.xml", session)
+
+    assert result.urls == ["https://example.com/page"]
+
+
+def test_a_sitemapindex_child_is_read_from_its_sitemap_element():
+    """The index side takes the same structural path, so it is pinned too."""
+    body = """<?xml version="1.0"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://example.com/page-sitemap.xml</loc></sitemap>
+</sitemapindex>"""
+    pages = b"<urlset><url><loc>https://example.com/a</loc></url></urlset>"
+    session = _FakeSession({
+        "https://example.com/s.xml": _Resp(body.encode()),
+        "https://example.com/page-sitemap.xml": _Resp(pages),
+    })
+
+    result = sitemaps.fetch_urls("https://example.com/s.xml", session)
+
+    assert result.urls == ["https://example.com/a"]
+    assert result.failures == []
+
+
 def test_a_urlset_without_a_namespace_still_yields_its_urls():
     body = b"<urlset><url><loc>https://example.com/a</loc></url></urlset>"
     session = _FakeSession({"https://example.com/s.xml": _Resp(body)})

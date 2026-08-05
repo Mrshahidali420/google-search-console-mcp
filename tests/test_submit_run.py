@@ -486,3 +486,44 @@ def test_an_empty_url_list_is_a_no_op(conn):
     assert result.attempts == []
     assert result.stopped_early is False
     assert result.stop_reason is None
+
+
+# --- a refusal from Google overrides the ledger ------------------------------
+
+
+def test_a_quota_refusal_fills_the_ledger_for_that_property(conn):
+    """Google said the property is empty; our estimate yields to that.
+
+    Before this, a refusal left `free` still advertising a slot, so the very
+    next caller read spare capacity and submitted into a second refusal. The
+    ledger cannot see manual submissions or a URL resubmitted by hand, so the
+    refusal is the only signal that will ever correct it.
+    """
+    from gsc_core import quota
+
+    sender = FakeSender(["quota_exceeded"])
+
+    result = _run(conn, sender, ["https://example.com/a"])
+
+    assert result.stop_reason == "quota_exceeded"
+    assert quota.free(conn, PROPERTY) == 0
+
+
+def test_a_quota_refusal_does_not_fill_a_different_property(conn):
+    sender = FakeSender(["quota_exceeded"])
+    from gsc_core import quota
+
+    _run(conn, sender, ["https://example.com/a"])
+
+    assert quota.free(conn, OTHER_PROPERTY) == 11
+
+
+def test_an_ordinary_submission_does_not_fill_the_ledger(conn):
+    """Only a refusal backfills. A good run must still spend one slot, not all."""
+    from gsc_core import quota
+
+    sender = FakeSender(["submitted"])
+
+    _run(conn, sender, ["https://example.com/a"])
+
+    assert quota.free(conn, PROPERTY) == 10

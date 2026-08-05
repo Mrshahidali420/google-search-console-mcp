@@ -238,10 +238,10 @@ def _parse(body: bytes, max_bytes: int) -> tuple[list[str], list[str], str | Non
 
     tag = _local(root.tag)
     if tag == "sitemapindex":
-        children = [_text(n) for n in root.iter() if _local(n.tag) == "loc"]
+        children = _locs_under(root, "sitemap")
         return [c for c in children if _http(c)], [], None
     if tag == "urlset":
-        found = [_text(n) for n in root.iter() if _local(n.tag) == "loc"]
+        found = _locs_under(root, "url")
         return [], [f for f in found if _http(f)], None
 
     # Well-formed XML, but neither shape sitemaps.org defines (an RSS/Atom
@@ -294,6 +294,35 @@ def _gunzip_capped_fileobj(fileobj: object, max_bytes: int) -> tuple[bytes | Non
     if len(data) > max_bytes:
         return None, True
     return data, False
+
+
+def _locs_under(root: object, parent_name: str) -> list[str]:
+    """Text of every <loc> that is a DIRECT CHILD of a <parent_name> element.
+
+    Structural rather than by-tag-name, and that distinction is the entire
+    point. `_local()` strips namespaces on purpose, so a document-wide scan
+    for elements named "loc" also matches `<image:loc>`, `<video:loc>` and
+    anything else a media extension nests inside a `<url>`. One live Yoast
+    sitemap that way turned 50 pages into 121 "pages", 63 of which were
+    JPEGs -- and because the extras sorted first, a capped run spent its
+    whole inspection budget on images and reported the site as unindexed.
+    Worse, they were then offered as Request-Indexing candidates, which
+    spends unrecoverable daily slots on URLs that cannot index as pages.
+
+    Selecting on the PARENT is what excludes them, and it does so without a
+    deny-list of media namespaces to keep current: `<image:loc>` lives at
+    `url > image:image > image:loc`, so its parent is not a `url`. Matching
+    the parent by local name and scanning it from `root.iter()` keeps every
+    bit of the namespace tolerance `_local()` exists for -- a sitemap with
+    the sitemaps.org namespace, a different one, or none at all all still
+    read the same.
+    """
+    out: list[str] = []
+    for parent in root.iter():  # type: ignore[attr-defined]
+        if _local(parent.tag) != parent_name:
+            continue
+        out.extend(_text(n) for n in parent if _local(n.tag) == "loc")
+    return out
 
 
 def _local(tag: str) -> str:

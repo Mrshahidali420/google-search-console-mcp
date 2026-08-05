@@ -42,7 +42,7 @@ SOURCES = frozenset({"sitemap", "store", "both"})
 def find_unindexed(
     conn: sqlite3.Connection, property: str, provider: Any,
     properties: list[str], *, source: str = "both", limit: int | None = None,
-    ttl_days: int = 7, concurrency: int = 8,
+    ttl_days: int = 7, concurrency: int = 20,
     session: requests.Session | None = None, now: datetime | None = None,
     _fetch: Callable[..., sitemaps.SitemapResult] | None = None,
     _check: Callable[..., dict] | None = None,

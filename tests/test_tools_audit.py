@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from gsc_core import api, gauth
+from gsc_core import api, config, gauth
 from gsc_mcp import deps, tools_audit
 
 PROPERTY = "https://example.com/"
@@ -284,9 +284,18 @@ def test_find_unindexed_survives_an_oserror_from_the_store(
 
 def test_find_unindexed_passes_the_configured_concurrency_and_ttl(
         home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CONFIGURED values reach discovery, not this layer's own idea of them.
+
+    Both values are written here rather than left to fall through, and both
+    are deliberately unlike any default. Asserting the defaults instead —
+    which this test used to do — passes just as well when the settings are
+    dropped on the floor and discovery's own defaults answer for them, and
+    it turns every tuning change into a spurious failure here.
+    """
     seen: dict = {}
 
     _configured(monkeypatch)
+    config.save({"inspect_concurrency": 3, "inspection_ttl_days": 2})
 
     def _spy(conn: Any, property: str, provider: Any,
              properties: list[str], **kwargs: Any) -> dict:
@@ -299,8 +308,8 @@ def test_find_unindexed_passes_the_configured_concurrency_and_ttl(
 
     assert seen["source"] == "store"
     assert seen["limit"] == 5
-    assert seen["ttl_days"] == 7
-    assert seen["concurrency"] == 8
+    assert seen["ttl_days"] == 2
+    assert seen["concurrency"] == 3
 
 
 def test_find_unindexed_passes_the_property_and_the_property_list(
