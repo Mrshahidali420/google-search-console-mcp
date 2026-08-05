@@ -1,7 +1,7 @@
 <!-- The MCP Registry reads this marker out of the PyPI description to prove
      the package and the registry entry have the same owner. It must match
      `name` in server.json exactly, and it must survive any README rewrite.
-     mcp-name: io.github.mrshahidali420/gsc-indexer-mcp -->
+     mcp-name: io.github.Mrshahidali420/gsc-indexer-mcp -->
 
 # Google Search Console MCP Server
 
