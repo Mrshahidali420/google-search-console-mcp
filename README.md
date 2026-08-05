@@ -14,19 +14,19 @@
 
 ## Project status
 
-**Pre-alpha. The whole surface is wired up, including submission; none of it has met a real Google account yet.**
+**Pre-alpha. The whole surface is wired up, and it has now met a real Google account — on one operating system, driven by one person.**
 
-Fifteen tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in has been walked for real, once, on Windows against a live Google account — see [docs/manual-smoke.md](docs/manual-smoke.md), which is also where the two defects that run found are recorded. Submission exists end to end in code and no URL has been submitted through it; see Known gaps.
+Fifteen tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in has been walked for real, on Windows against a live Google account — see [docs/manual-smoke.md](docs/manual-smoke.md), which is also where the defects that run found are recorded. Submission has since driven a real browser and had Google confirm real Request Indexing calls, in Chrome and in Brave, against live properties. That is one platform and one operator, and every automated assertion about it is still made against a fake; see Known gaps for what that does and does not buy you.
 
 | Milestone | Scope | State |
 |---|---|---|
 | 1. Foundation | Paths, logging, SQLite store, quota engine, OAuth + PKCE, config | **Done** |
 | 2. MCP surface | The tools below, exposed over MCP | **Done** |
 | 3A. Onboarding | Guided sign-in, browser/profile detection, the bridge extension | **Done** |
-| 3B. Submission | Browser-driven Request Indexing, job control | **Code complete, unverified** |
-| 4. Reporting | Indexation discovery and audits | **Code complete, unverified** |
+| 3B. Submission | Browser-driven Request Indexing, job control | **Verified live on Windows** |
+| 4. Reporting | Indexation discovery and audits | **Verified live on Windows** |
 
-Watch or star the repo if you want to know when the milestones above are verified against live properties.
+Released versions and what changed in them are in [CHANGELOG.md](CHANGELOG.md). Watch or star the repo if you want to know when the milestones above are verified on a platform other than Windows.
 
 ## Tools
 
@@ -421,7 +421,7 @@ One path is the exception, and it is deliberate. When `gsc_setup` finds the brid
 Stated plainly, because they are the things a reviewer should look at first:
 
 - No test proves `icacls` actually applied an ACL on Windows — the Windows test only observes that the call was made, so `_harden` could no-op there and the suite would stay green. The POSIX equivalents now execute on Linux and macOS on every push, so this gap is Windows-only.
-- **The submission path exists in code and has never submitted a URL.** Every layer of it — the extension bridge, the pacing, the quota reservation, the run loop, the job worker — is exercised against fakes only. No browser has been driven, no Request Indexing button has been clicked, and no slot has been spent by this code. The states a fake cannot reach are the submission pass in [docs/manual-smoke.md](docs/manual-smoke.md); until someone walks it, "it submits URLs" is a claim the test suite cannot support.
+- **The submission path has now submitted real URLs, but the test suite still cannot prove it.** As of 2026-08-05 it has driven a real browser, clicked Request Indexing, and had Google confirm the request — on Windows 11, in both Chrome and Brave, across several days and several properties, including running the quota ledger up against a real refusal from Google. What the automated suite exercises is still fakes only: every assertion about the extension bridge, the pacing, the quota reservation, the run loop and the job worker is made against a stand-in. So "it submits URLs" is now supported by a manual log rather than by CI, and the states a fake cannot reach remain the submission pass in [docs/manual-smoke.md](docs/manual-smoke.md). Live running has found defects the suite missed at a steady rate; assume it has not run out of them.
 - The sign-in path has now been walked for real — once, on one machine (Windows 11, Chrome, Python 3.13, 2026-08-04), against an account with nine properties. Steps 1-8 of [docs/manual-smoke.md](docs/manual-smoke.md) pass. One run on one platform is not coverage: it found two defects that the whole automated suite had missed, which is the argument for running it again on macOS and Linux rather than for trusting it.
 - **The doctor cannot detect a stale extension build**, and no longer pretends to. Chromium records no manifest snapshot for an unpacked extension — and unpacked is the only way this bridge is installed — so the version the browser is actually running cannot be read from disk at all. The check now reports the version on disk and says the loaded one is unreadable, rather than passing the first off as the second. Closing this needs the extension to report `chrome.runtime.getManifest().version` over the bridge, which is a protocol change and is deferred until the bridge has been exercised against a real submission.
 - **The bridge port is fixed at 8765 with no collision handling.** A second `gsc-mcp` process, or anything else already on that port, fails to bind and the submission tool reports it as an unexpected error. Making the port dynamic needs a matching extension change.

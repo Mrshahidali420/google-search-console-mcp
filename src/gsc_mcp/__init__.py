@@ -13,4 +13,10 @@ from __future__ import annotations
 # cannot drift apart. Keeping it in __init__ rather than in pyproject also
 # means it is readable without the package being installed, which is how
 # this repo is run during development.
-__version__ = "0.1.0"
+#
+# The `a1` suffix is load-bearing, not decoration: PEP 440 makes it a
+# pre-release, so pip will not install it unless the caller passes --pre.
+# That matches the Pre-Alpha classifier and the Known gaps in the README --
+# nobody should land on this by accident while the submission path is still
+# this young. Drop the suffix when the gaps close, not before.
+__version__ = "0.1.0a1"
