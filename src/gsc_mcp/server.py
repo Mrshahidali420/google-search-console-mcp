@@ -198,9 +198,22 @@ def _check_store() -> dict:
         log.warning("doctor: %s check raised %s", name, type(exc).__name__)
         return {"name": name, "ok": False, "detail": type(exc).__name__,
                 "fix": f"Could not open the database ({type(exc).__name__})."}
-    if version != store.SCHEMA_VERSION:
-        fix = (f"Database schema is version {version}, expected "
-               f"{store.SCHEMA_VERSION}. Delete {paths.db_path()} to rebuild.")
+    if version > store.SCHEMA_VERSION:
+        # A newer gsc-mcp opened this database. store.connect() leaves the
+        # stamp alone rather than downgrading it, and the fix is to run the
+        # newer build -- NOT to delete anything. The old advice was to
+        # rebuild, which on this branch would have thrown away the quota
+        # ledger over a version stamp that is one migration ahead.
+        fix = (f"Database schema is version {version}, newer than this "
+               f"build expects ({store.SCHEMA_VERSION}). Update gsc-mcp, or "
+               "restart it if you have just upgraded. Do not delete the "
+               "database: it holds the quota ledger.")
+        return {"name": name, "ok": False,
+                "detail": f"schema version {version}", "fix": fix}
+    if version < store.SCHEMA_VERSION:
+        fix = (f"Database schema is version {version}, older than expected "
+               f"({store.SCHEMA_VERSION}), and did not migrate on open. "
+               f"Delete {paths.db_path()} to rebuild.")
         return {"name": name, "ok": False,
                 "detail": f"schema version {version}", "fix": fix}
     return {"name": name, "ok": True, "detail": f"schema version {version}",
