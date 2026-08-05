@@ -92,6 +92,11 @@ CLAIM_WAIT = 3.0
 #: the whole run.
 INCUMBENT_SILENCE = 90.0
 
+#: How long a newcomer waits for the live connection to answer a probe before
+#: concluding there is no JavaScript behind it. One local round trip is
+#: sub-millisecond; this is slack for a busy worker, not a timeout to tune.
+PROBE_WAIT = 1.5
+
 
 def peer_exe(conn: object) -> str | None:
     """The executable behind a localhost connection, or None if unknowable.
@@ -514,11 +519,33 @@ class BridgeSession:
                           type(exc).__name__)
 
     # -- connection handler (one per client; only the authed one is kept) --
+    @staticmethod
+    def _tag(conn: object) -> str:
+        """A short, stable label for one connection, for the log only.
+
+        Every interesting bridge fault is a question about WHICH socket did
+        what — which one holds the run, whether the one being refused is the
+        same one that connected a minute ago, whether the silent incumbent
+        ever came back. Without a per-connection label the log answers none
+        of them, because every line reads "extension connected".
+
+        The remote port is the discriminator (the address is always
+        127.0.0.1, which is why binding is restricted to it). It is a
+        loopback ephemeral port: it identifies a socket for as long as that
+        socket exists and says nothing about the user, the profile, or the
+        token.
+        """
+        try:
+            return f"c{conn.remote_address[1]}"
+        except Exception:  # noqa: BLE001 — a closing socket has no peer
+            return "c?"
+
     def _handler(self, conn: object) -> None:
+        tag = self._tag(conn)
         try:
             hello = parse_message(conn.recv(timeout=10))
         except Exception as exc:  # noqa: BLE001 — a client that never spoke
-            log.debug("bridge: client sent no usable hello (%s)",
+            log.debug("bridge: %s sent no usable hello (%s)", tag,
                       type(exc).__name__)
             return
 
@@ -548,6 +575,9 @@ class BridgeSession:
 
         if not self._claim(conn):
             self._refuse_busy(conn, "another browser holds this run")
+            log.debug("bridge: %s refused — %s holds the run", tag,
+                      self._tag(self._conn) if self._conn is not None
+                      else "nothing")
             return
 
         try:
@@ -557,7 +587,7 @@ class BridgeSession:
                       type(exc).__name__)
             self._release(conn)
             return
-        log.info("bridge: extension connected")
+        log.info("bridge: extension connected (%s)", tag)
 
         try:
             while not self._stopped:
@@ -580,14 +610,55 @@ class BridgeSession:
                 message = parse_message(raw)
                 if message is None:
                     continue
+                # The frame TYPE only. Payloads carry URLs and job ids, and
+                # this is the line that answers "was the incumbent alive?".
+                log.debug("bridge: %s -> %s", tag, message.get("type"))
                 self._dispatch(conn, message)
         except Exception as exc:  # noqa: BLE001 — a closed socket ends the loop
-            log.debug("bridge: connection loop ended (%s)", type(exc).__name__)
+            log.debug("bridge: %s loop ended (%s)", tag, type(exc).__name__)
         finally:
             self._release(conn)
-            log.info("bridge: extension disconnected")
+            log.info("bridge: extension disconnected (%s)", tag)
 
     # -- who owns the run -------------------------------------------------
+    def _work_in_flight(self) -> bool:
+        """Is a command out with the browser right now?
+
+        The bridge's own registry answers this exactly; nothing needs to be
+        inferred from timing. This is the question first-come protection was
+        actually written to answer.
+        """
+        with self._pending_lock:
+            return bool(self._pending)
+
+    def _answers_a_probe(self, conn: object) -> bool:
+        """Is there running JavaScript behind `conn`, or just a socket?
+
+        A protocol-level ping cannot tell the difference and was measured
+        failing to: when Brave kills the extension's service worker during
+        session restore the socket is never FIN'd, and the browser's network
+        stack goes on answering pings on the dead worker's behalf. The
+        connection looks healthy for as long as the browser is running.
+
+        So ask a question only the worker can answer, and treat ANY frame
+        arriving afterwards as the answer — a ping that crosses the probe is
+        proof of life just as good as a probe_ack, and an extension too old
+        to know the word "probe" still pings.
+        """
+        mark = time.monotonic()
+        try:
+            conn.send(json.dumps({"type": "probe"}))  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — a gone peer is a dead one
+            log.debug("bridge: probe could not be sent (%s)",
+                      type(exc).__name__)
+            return False
+        deadline = mark + PROBE_WAIT
+        while time.monotonic() < deadline:
+            if self._last_seen > mark:
+                return True
+            time.sleep(0.02)
+        return self._last_seen > mark
+
     def _claim(self, conn: object) -> bool:
         """Make `conn` the live connection, or refuse it. One owner at a time.
 
@@ -607,15 +678,39 @@ class BridgeSession:
           bridge out of its own browser. The extension pings every 30s, so
           silence well past that is proof of death, and the newcomer takes
           over.
+
+        The rule is narrower than it looks, and deliberately so. What makes
+        displacement dangerous is a command IN FLIGHT, not a connection as
+        such: with nothing pending there is nothing for a re-send to
+        duplicate, so an incumbent that cannot work has no business holding
+        the exclusive right to work. In that state the newcomer probes it
+        and takes the run in a second or two rather than in a minute and a
+        half. With something pending, first-come stands exactly as written
+        above, silence limit and all.
         """
+        incumbent = self._conn
+        if (incumbent is not None and not self._work_in_flight()
+                and not self._answers_a_probe(incumbent)):
+            with self._conn_cv:
+                if self._conn is incumbent:
+                    log.warning("bridge: the connected extension (%s) did not "
+                                "answer a probe and has no work in flight — "
+                                "handing the run to %s", self._tag(incumbent),
+                                self._tag(conn))
+                    self._conn = None
+                    self._connected.clear()
+                    self._conn_cv.notify_all()
+
         deadline = time.monotonic() + CLAIM_WAIT
         with self._conn_cv:
             while self._conn is not None and not self._stopped:
                 silent = time.monotonic() - self._last_seen
                 if silent >= INCUMBENT_SILENCE:
-                    log.warning("bridge: the connected extension has been "
-                                "silent for %ds — handing the run to the "
-                                "connection that just arrived", int(silent))
+                    log.warning("bridge: the connected extension (%s) has "
+                                "been silent for %ds — handing the run to "
+                                "%s, which just arrived",
+                                self._tag(self._conn), int(silent),
+                                self._tag(conn))
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

@@ -63,11 +63,33 @@ def _hello(sess) -> object:
     return conn
 
 
-def _responder(conn, reply) -> threading.Thread:
-    """Answer exactly one command, in a thread the caller joins."""
+def _responder(conn, reply=None) -> threading.Thread:
+    """Stand in for a live extension, in a thread the caller joins.
+
+    Answers the bridge's liveness probes for as long as `conn` is open,
+    which is not incidental: a connection that cannot prove a worker is
+    behind it is displaceable, so a test that wants its incumbent left alone
+    has to speak for one. With `reply`, the first non-probe frame is
+    answered with it and the thread stops there — exactly one command, which
+    is what the double-submit tests are counting. Without, the thread just
+    keeps the connection alive until the test closes it.
+
+    Only one thread may read a websockets connection, so a test using this
+    must not also call `conn.recv()` itself.
+    """
     def run() -> None:
-        command = json.loads(conn.recv())
-        conn.send(json.dumps(reply(command)))
+        while True:
+            try:
+                message = json.loads(conn.recv())
+            except Exception:       # noqa: BLE001 — the test closed it
+                return
+            if message.get("type") == "probe":
+                conn.send(json.dumps({"type": "probe_ack"}))
+                continue
+            if reply is None:
+                continue
+            conn.send(json.dumps(reply(message)))
+            return
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
@@ -123,6 +145,17 @@ def test_a_second_browser_is_refused_while_the_first_is_connected(session):
     """
     first = _hello(session)
     assert session.wait_for_extension(SETTLE) is True
+    # Proof of life is what buys the incumbent its protection now: a socket
+    # with no worker behind it is displaceable (see the probe tests below),
+    # so a test that wants the first-come rule has to present a connection
+    # that is actually alive.
+    commands: list[dict] = []
+
+    def reply(command: dict) -> dict:
+        commands.append(command)
+        return {"type": "result", "id": command["id"], "outcome": "submitted"}
+
+    thread = _responder(first, reply)
 
     second = ws_connect(f"ws://127.0.0.1:{session.port}")
     second.send(json.dumps({"type": "hello", "token": TOKEN,
@@ -132,13 +165,6 @@ def test_a_second_browser_is_refused_while_the_first_is_connected(session):
 
     # The incumbent still owns the run, and a submit reaches it once —
     # no bounce, so no resend, so no second click in another window.
-    commands: list[dict] = []
-
-    def reply(command: dict) -> dict:
-        commands.append(command)
-        return {"type": "result", "id": command["id"], "outcome": "submitted"}
-
-    thread = _responder(first, reply)
     assert session.submit("sc-domain:example.com", "https://example.com/a",
                           "0", timeout=10) == "submitted"
     thread.join(SETTLE)
@@ -244,6 +270,83 @@ def test_a_silent_connection_is_displaced_rather_than_wedging_the_bridge(
     thread.join(SETTLE)
     first.close()
     second.close()
+
+
+def test_an_incumbent_that_never_answers_the_probe_loses_the_run_at_once(
+        session):
+    """The cold-start wedge, reproduced against a live socket.
+
+    Brave starts the extension's worker, the worker connects, and Brave then
+    kills it during session restore WITHOUT the socket closing. Chrome's
+    network stack keeps answering at the protocol level, so the connection
+    looks perfectly healthy and simply never speaks — measured on a real
+    cold start: one socket held the run for 91 seconds having sent zero
+    frames, while seventeen live sockets were refused behind it.
+
+    A protocol-level ping cannot tell this apart (the dead worker's socket
+    pongs), so the bridge asks a question only running JavaScript can
+    answer. No answer inside the probe window and the run moves on, in
+    seconds rather than in a minute and a half.
+    """
+    dead = _hello(session)            # connects, then never speaks again
+    assert session.wait_for_extension(SETTLE) is True
+
+    started = time.monotonic()
+    live = _hello(session)            # would raise on a hello_busy
+    assert time.monotonic() - started < bridge.INCUMBENT_SILENCE
+
+    # The run is genuinely the newcomer's: a submit reaches it, not the
+    # socket that was holding the claim.
+    thread = _responder(live, lambda c: {"type": "result", "id": c["id"],
+                                         "outcome": "submitted"})
+    assert session.submit("sc-domain:example.com", "https://example.com/a",
+                          "0", timeout=10) == "submitted"
+    thread.join(SETTLE)
+    dead.close()
+    live.close()
+
+
+def test_an_incumbent_that_answers_the_probe_keeps_the_run(session):
+    """Answering proves a worker is running, which is the whole question."""
+    first = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+    keeper = _responder(first)
+
+    second = ws_connect(f"ws://127.0.0.1:{session.port}")
+    second.send(json.dumps({"type": "hello", "token": TOKEN}))
+    assert json.loads(second.recv())["type"] == "hello_busy"
+    second.close()
+    first.close()
+    keeper.join(SETTLE)
+
+
+def test_a_silent_incumbent_mid_submit_is_still_not_displaced(session):
+    """The one case where first-come must hold even against silence.
+
+    Displacing a connection with a command in flight makes submit() see a
+    bounce and re-send, and a re-sent Request Indexing is a second real
+    click for one recorded slot. That is the bug the first-come rule was
+    written for, and the probe must not reopen it: while `_pending` holds a
+    command, the incumbent keeps the run whatever it does or does not say.
+    """
+    first = _hello(session)
+    assert session.wait_for_extension(SETTLE) is True
+
+    # A submit that is never answered — the connection goes silent with a
+    # command outstanding, which is exactly the dangerous shape.
+    sender = threading.Thread(
+        target=lambda: session.submit("sc-domain:example.com",
+                                      "https://example.com/a", "0", timeout=8),
+        daemon=True)
+    sender.start()
+    assert json.loads(first.recv())["type"] == "submit"   # it is in flight
+
+    second = ws_connect(f"ws://127.0.0.1:{session.port}")
+    second.send(json.dumps({"type": "hello", "token": TOKEN}))
+    assert json.loads(second.recv())["type"] == "hello_busy"
+    second.close()
+    sender.join(SETTLE * 3)
+    first.close()
 
 
 # -------------------------------------------------------------------- submit
