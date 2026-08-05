@@ -62,6 +62,12 @@ DISPOSITIONS: dict[str, Disposition] = {
 # submit into a guaranteed refusal whatever the user configured.
 _THROTTLE_OUTCOMES = frozenset({"rate_limited"})
 
+# Outcomes the extension reports WITHOUT having clicked Request Indexing.
+# The run loop reads this to decide whether the next URL owes a gap; see the
+# comment at the foot of run(). Adding an outcome here asserts that no click
+# reached Google on that path — if that is not certain, leave it out.
+_NO_CLICK_OUTCOMES = frozenset({"already_indexed", "skipped"})
+
 
 def disposition_for(outcome: str, *, stop_on_throttle: bool) -> Disposition:
     """The ledger and run effect of one outcome. Raises KeyError if unknown.
@@ -335,6 +341,18 @@ def run(conn: sqlite3.Connection, sender: Sender, urls: list[str], *,
             stop_reason = disposition.label
             break
 
-        pending_delay = _delay(cfg)
+        # Only a click earns a gap. The extension inspects before it clicks,
+        # so on these two outcomes Request Indexing was never touched and
+        # there is no burst for the next URL to be part of. Pacing them
+        # anyway made a five-URL batch of mostly-indexed pages sit silent for
+        # ten minutes to perform one submission.
+        #
+        # Deliberately NOT keyed on `spends_slot`, which looks like the same
+        # question and is not: "error" spends no slot and can still land
+        # after a send has left the socket (see bridge.submit()). The ledger
+        # under-counts there on purpose; the clock must not, because being
+        # wrong costs a burst Google can see rather than one unspent slot.
+        if outcome not in _NO_CLICK_OUTCOMES:
+            pending_delay = _delay(cfg)
 
     return RunResult(attempts, stop_reason is not None, stop_reason)

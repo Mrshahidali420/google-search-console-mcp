@@ -316,6 +316,59 @@ def test_no_delay_is_requested_after_the_last_actual_send(conn):
     assert slept == []
 
 
+def test_a_url_google_never_saw_a_click_for_is_not_paced_after(conn):
+    """`already_indexed` and `skipped` cost no gap, because they cost no click.
+
+    The extension inspects before it clicks, and on a URL Google already has
+    it returns without touching Request Indexing at all. Pacing exists to
+    space real submissions far enough apart that Google does not read them as
+    a burst; there is nothing to space out from a click that never happened.
+
+    This is not a micro-optimisation. A five-URL batch where four are already
+    indexed used to spend ten minutes asleep to perform one submission, and a
+    caller watching a blocking tool sit silent for ten minutes reasonably
+    concludes it has hung.
+    """
+    slept: list[float] = []
+    sender = FakeSender(["already_indexed", "skipped", "submitted"])
+    result = _run(conn, sender,
+                  ["https://example.com/a", "https://example.com/b",
+                   "https://example.com/c"], sleep=slept.append)
+    assert [attempt.outcome for attempt in result.attempts] == [
+        "already_indexed", "skipped", "submitted"]
+    assert slept == []          # no gap before c, and none after it
+
+
+def test_a_real_send_after_a_skip_is_still_paced_from_the_send(conn):
+    """The gap belongs to the click before it, not to the loop iteration.
+
+    A skip between two real submissions must not swallow the gap the second
+    one owes the first.
+    """
+    slept: list[float] = []
+    sender = FakeSender(["submitted", "already_indexed", "submitted"])
+    _run(conn, sender,
+         ["https://example.com/a", "https://example.com/b",
+          "https://example.com/c"], sleep=slept.append)
+    assert len(slept) == 1
+    assert 130 <= slept[0] <= 180
+
+
+def test_an_error_is_still_paced_because_a_click_may_have_gone_out(conn):
+    """`error` charges no slot but may follow a send that already left.
+
+    bridge.submit() guarantees "timeout" implies a frame reached the socket
+    and NOT its converse, so an error can land after a click. The ledger
+    deliberately under-counts there; pacing must not, because the cost of
+    being wrong is a burst Google can see rather than one unspent slot.
+    """
+    slept: list[float] = []
+    sender = FakeSender(["error", "submitted"])
+    _run(conn, sender, ["https://example.com/a", "https://example.com/b"],
+         sleep=slept.append)
+    assert len(slept) == 1
+
+
 def test_each_gap_is_drawn_afresh(conn):
     """A single draw reused for a whole run is a fixed, fingerprintable beat."""
     slept: list[float] = []
