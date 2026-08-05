@@ -1,0 +1,101 @@
+name: Publish to PyPI
+
+# Builds the PyPI wheel and publishes it. This is the MIRROR IMAGE of
+# release.yml, and the difference is the whole point:
+#
+#   release.yml  -> GitHub release asset, OAuth client BAKED IN.
+#   this one     -> PyPI,                 OAuth client DELIBERATELY ABSENT.
+#
+# A wheel on PyPI is mirrored, cached, and scanned by everyone; the secret in
+# it would be extractable by anyone who runs `pip download`, and the client
+# would be revoked. There is no version of "embed it carefully" that survives
+# that. So this build never runs scripts/write_embedded.py, and the step below
+# fails the run if _embedded.py reaches the wheel by any other route.
+#
+# Users lose nothing: with no embedded client, shipped_client.py downloads it
+# from the published `client` release asset on first gsc_setup(). That is the
+# same path a source checkout takes, and it has been exercised live.
+#
+# AUTHENTICATION: trusted publishing (OIDC). There is no API token to store or
+# rotate. It requires a one-time setup on pypi.org -> the project -> Publishing
+# -> add a GitHub publisher:
+#
+#   owner:     Mrshahidali420
+#   repository: google-search-console-mcp
+#   workflow:  pypi-publish.yml
+#   environment: pypi
+#
+# Until that exists, the publish step fails with an OIDC error and nothing is
+# uploaded -- which is the correct failure, not a misconfiguration to work
+# around with a token.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Where to publish"
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+jobs:
+  publish:
+    name: Build a client-free wheel and publish it
+    runs-on: ubuntu-latest
+
+    # Required by trusted publishing: the OIDC token is what stands in for an
+    # API token, and it cannot be minted without this.
+    permissions:
+      id-token: write
+
+    environment: ${{ inputs.repository }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install build tooling
+        run: python -m pip install build
+
+      # No "Inject the OAuth client" step here. That absence IS the feature,
+      # so it is asserted below rather than left to be noticed in review.
+
+      - name: Build
+        run: python -m build --wheel --sdist
+
+      - name: Prove the client is NOT in the wheel
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile, tarfile
+          failed = []
+          for wheel in glob.glob("dist/*.whl"):
+              if "gsc_mcp/_embedded.py" in zipfile.ZipFile(wheel).namelist():
+                  failed.append(wheel)
+          for sdist in glob.glob("dist/*.tar.gz"):
+              if any(n.endswith("gsc_mcp/_embedded.py")
+                     for n in tarfile.open(sdist).getnames()):
+                  failed.append(sdist)
+          if failed:
+              # Do not print the file. Name the artefact and stop.
+              sys.exit("REFUSING TO PUBLISH: an OAuth client reached "
+                       + ", ".join(failed))
+          print("no embedded client in any artefact; safe to publish")
+          PY
+
+      # A local `python -m build` on a developer machine WOULD pick the client
+      # up -- pyproject's `artifacts` entry force-includes it, and a working
+      # checkout has a real one sitting there. That is exactly why publishing
+      # happens here and not by hand.
+      - name: Publish to TestPyPI
+        if: inputs.repository == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: inputs.repository == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1

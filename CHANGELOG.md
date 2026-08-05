@@ -4,6 +4,27 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
+## [Unreleased]
+
+### Changed
+
+- **The PyPI distribution name is now `gsc-indexer-mcp`.** `gsc-mcp` on PyPI is
+  an unrelated Search Console MCP server published in April 2026 by another
+  author, and `google-search-console-mcp` is a third one. Nothing inside this
+  project moves: the import package, the `gsc-mcp` console script, the MCP
+  server name and the config directory are all unchanged. A second console
+  script, `gsc-indexer-mcp`, is installed as an alias, because a name another
+  project also claims is a name that can be taken from under you.
+
+### Added
+
+- `.github/workflows/pypi-publish.yml` — builds a wheel and sdist **without**
+  the embedded OAuth client, refuses to publish if one is present anyway, and
+  uploads via trusted publishing (OIDC, no stored token). TestPyPI or PyPI is a
+  dispatch input. The GitHub release wheel keeps its embedded client; a public
+  package index is a different exposure, and a secret on one is a revoked
+  secret.
+
 ## [0.1.0a1] — 2026-08-05
 
 First tagged release. A pre-release on purpose: `pip` will not install it
@@ -52,7 +73,7 @@ usable without the `mcp` dependency.
 
 Built by `.github/workflows/release.yml` as a wheel with the OAuth client
 embedded, and uploaded as a workflow artifact. **Not published to a package
-index** — `pip install gsc-mcp` is not yet a thing anyone can do. A source
+index** — `pip install` from an index is not yet a thing anyone can do. A source
 checkout downloads the OAuth client from the published `client` release asset
 on first `gsc_setup()`; that path has been exercised against the live URL.
 

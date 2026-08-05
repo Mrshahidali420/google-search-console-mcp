@@ -135,6 +135,23 @@ The extension must be loaded in the browser profile you paired, and the browser 
 
 ## Install
 
+The distribution is **`gsc-indexer-mcp`**. Note the `indexer`: plain `gsc-mcp`
+on PyPI is an unrelated project by another author, so installing that name gets
+you someone else's server. Everything inside this one is still `gsc_mcp` — the
+import package, the console script, the config directory.
+
+**It is not on PyPI yet** — that step is pending, and this section will say so
+until it has actually happened. When it does, it will be a pre-release, so pip
+will need `--pre`:
+
+```bash
+pip install --pre gsc-indexer-mcp   # not published yet
+```
+
+Today, install from the wheel on the
+[latest release](https://github.com/Mrshahidali420/google-search-console-mcp/releases/latest),
+or from a checkout — which is what you want if you intend to change anything:
+
 ```bash
 git clone https://github.com/Mrshahidali420/google-search-console-mcp.git
 cd google-search-console-mcp
@@ -428,7 +445,7 @@ Stated plainly, because they are the things a reviewer should look at first:
 - macOS and Linux browser detection has only ever run against fixtures, never on real hardware, here or in CI. The first person to run the smoke checklist on a Mac or a Linux box is performing that test.
 - `gsc_detect_browsers` reports `matches_authorised_account` as `null` on every real machine today. The flag reads an `account_email` key from the stored token, and nothing writes it: the current scope set returns no identity claim and the consent step does not record the authorising account. The plumbing is correct and inert. Treat the field as "unknown", not as "does not match".
 - The `extension` check reports whether the extension is **registered**, not whether it is working. Only the bridge learns whether the MV3 worker is alive, and only at submission time.
-- **No wheel has reached a package index yet.** The `client` release asset is published, so a source checkout downloads the OAuth client on first `gsc_setup()` — that path has been exercised against the live URL. The wheel path has not: it is built and verified in CI, but until a release is published, `pip install gsc-mcp` is not yet a thing anyone can do.
+- **No wheel has reached a package index yet.** `v0.1.0a1` is published as a GitHub release with the wheel attached, and the `client` release asset means a source checkout downloads the OAuth client on first `gsc_setup()` — a path exercised against the live URL. PyPI is still pending, so `pip install` from an index is not yet a thing anyone can do. When it happens the name will be `gsc-indexer-mcp`, because `gsc-mcp` on PyPI belongs to an unrelated project. Note that the PyPI wheel will deliberately **not** carry the embedded OAuth client the GitHub wheel does — a secret on a public index is a revoked secret — so an installed-from-PyPI user takes the download-at-setup path instead.
 - `mcp` is pinned `>=1.2,<2.0`. `mcp` 2.0 removed `FastMCP` outright — confirmed directly against the 2.0 wheel, which has no `fastmcp` module at all — so this server does not receive any `mcp` 2.x fixes, and it hard-conflicts with any other installed package that requires `mcp>=2`. Lifting the ceiling means porting this server to whatever construction API replaced it.
 
 ## Contributing

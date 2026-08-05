@@ -3,7 +3,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "gsc-mcp"
+# The PyPI distribution name only. The product, the console script, the MCP
+# server name, the config directory and the import package are all still
+# `gsc-mcp` / `gsc_mcp` -- none of those move, and paths.APP_NAME especially
+# must not, or every existing install loses its config directory.
+#
+# The plain name was unavailable: PyPI `gsc-mcp` was taken on 2026-04-25 by an
+# unrelated Search Console MCP server, and `google-search-console-mcp` by
+# another. `indexer` is the honest differentiator rather than a workaround --
+# neither of those drives Request Indexing in a browser, which is the part of
+# this that cannot be done through an API at all.
+name = "gsc-indexer-mcp"
 # Read from src/gsc_mcp/__init__.py rather than written here, so the wheel's
 # version and the version the MCP handshake reports have one source. See
 # [tool.hatch.version] at the foot of this file.
@@ -67,7 +77,14 @@ dependencies = [
 ]
 
 [project.scripts]
+# Two names for one entry point, on purpose. `gsc-mcp` is what every doc and
+# every MCP client config says, and it stays. But a different project owns
+# `gsc-mcp` on PyPI, and if it also installs a `gsc-mcp` command then whichever
+# package a user installed last silently wins the name. The distribution-named
+# alias is the one that cannot be taken from under us -- prefer it in anything
+# where the collision would be confusing.
 gsc-mcp = "gsc_mcp.server:main"
+gsc-indexer-mcp = "gsc_mcp.server:main"
 
 [project.urls]
 Homepage = "https://github.com/Mrshahidali420/google-search-console-mcp"
