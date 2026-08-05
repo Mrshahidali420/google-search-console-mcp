@@ -43,12 +43,28 @@ function setNativeValue(el, value) {
 }
 
 function report(id, stage) { chrome.runtime.sendMessage({ type: "progress", id, stage }); }
-function finish(id, outcome, detail) { chrome.runtime.sendMessage({ type: "result", id, outcome, detail }); }
+function finish(id, outcome, detail) {
+  chrome.runtime.sendMessage({ type: "result", id, outcome, detail,
+                               click_mode: clickModeThisUrl });
+  clickModeThisUrl = null;   // never let one URL's mode be read as the next one's
+}
 
-// Record how the most recent click was performed so the popup can show it
-// live: "trusted" (real CDP input) vs "synthetic" (isTrusted:false fallback —
-// throttle risk). The popup reads `lastClick` and reflects it dynamically.
+// How the CURRENT url's gesture-gated click was performed, sent up with its
+// verdict. Null until something clicks, so "no click happened" (skipped,
+// already indexed, inspect failed) stays distinguishable from "clicked, but
+// we could not tell how" rather than both collapsing to "synthetic".
+let clickModeThisUrl = null;
+
+// Record how the most recent click was performed. Two consumers, deliberately:
+// `chrome.storage.local` drives the popup live, and `clickModeThisUrl` rides
+// up with the verdict so it reaches gsc.log. Storage alone was not enough --
+// it is visible only in a popup nobody has open mid-run and is overwritten by
+// the next click, so on 2026-08-05 a quota investigation could not establish
+// after the fact whether the refused clicks had been trusted at all. The mode
+// is the single most diagnostic fact about a submission; it belongs in the
+// durable log, not just in a UI surface.
 function recordClick(mode) {
+  clickModeThisUrl = mode;
   try { chrome.storage.local.set({ lastClick: { mode, at: Date.now() } }); } catch {}
 }
 

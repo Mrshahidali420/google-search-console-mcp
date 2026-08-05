@@ -491,13 +491,19 @@ def test_an_empty_url_list_is_a_no_op(conn):
 # --- a refusal from Google overrides the ledger ------------------------------
 
 
-def test_a_quota_refusal_fills_the_ledger_for_that_property(conn):
-    """Google said the property is empty; our estimate yields to that.
+def test_a_quota_refusal_blocks_that_property(conn):
+    """Google said no slots are free; our estimate yields to that.
 
     Before this, a refusal left `free` still advertising a slot, so the very
     next caller read spare capacity and submitted into a second refusal. The
     ledger cannot see manual submissions or a URL resubmitted by hand, so the
     refusal is the only signal that will ever correct it.
+
+    Note what is asserted and what is NOT: the property is BLOCKED, but no
+    slots were spent to achieve it. The earlier implementation backfilled the
+    ledger to its ceiling, which blocked the property for a full 24h from the
+    refusal while real slots were ageing out minutes apart -- see
+    quota.record_refusal.
     """
     from gsc_core import quota
 
@@ -506,16 +512,31 @@ def test_a_quota_refusal_fills_the_ledger_for_that_property(conn):
     result = _run(conn, sender, ["https://example.com/a"])
 
     assert result.stop_reason == "quota_exceeded"
-    assert quota.free(conn, PROPERTY) == 0
+    assert quota.check(conn, ACCOUNT, PROPERTY).allowed is False
+    assert quota.used(conn, PROPERTY) == 0
 
 
-def test_a_quota_refusal_does_not_fill_a_different_property(conn):
+def test_a_quota_refusal_lifts_after_the_cooldown(conn):
+    """The block is minutes long, because slots come back one at a time."""
+    from datetime import UTC, datetime, timedelta
+
+    from gsc_core import quota
+
+    _run(conn, FakeSender(["quota_exceeded"]), ["https://example.com/a"])
+
+    later = datetime.now(UTC) + timedelta(
+        minutes=quota.REFUSAL_COOLDOWN_MINUTES + 1)
+    assert quota.check(conn, ACCOUNT, PROPERTY, now=later).allowed is True
+
+
+def test_a_quota_refusal_does_not_block_a_different_property(conn):
     sender = FakeSender(["quota_exceeded"])
     from gsc_core import quota
 
     _run(conn, sender, ["https://example.com/a"])
 
     assert quota.free(conn, OTHER_PROPERTY) == 11
+    assert quota.check(conn, ACCOUNT, OTHER_PROPERTY).allowed is True
 
 
 def test_an_ordinary_submission_does_not_fill_the_ledger(conn):

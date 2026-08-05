@@ -230,6 +230,41 @@ def test_quota_binding_is_none_when_everything_has_headroom(home):
     assert server.gsc_quota()[0]["binding"] is None
 
 
+def test_quota_discloses_that_it_only_counts_tool_submissions(home):
+    """The counts are an estimate and the payload has to say so.
+
+    Every quota desync this project has hit traces to the same gap: a URL
+    submitted by hand in the browser or from a phone never reaches the store,
+    so `free` is an upper bound. A caller reading the payload without the
+    docstring would otherwise report "N submissions left" as fact.
+    """
+    submission = server.gsc_quota()[0]["submission"]
+    assert submission["counts"] == "tool_submissions_only"
+    assert submission["free_is_upper_bound"] is True
+
+
+def test_quota_reports_no_refusal_until_google_makes_one(home):
+    assert server.gsc_quota()[0]["submission"]["last_refusal_at"] is None
+
+
+def test_quota_reports_refused_as_its_own_binding(home):
+    """Distinct from "submission" because it calls for a different action.
+
+    "submission" means wait for a slot to age out of a 24h window. "refused"
+    means Google overruled our count and a short cooldown is running, after
+    which asking again costs nothing. Folding them together would hide the
+    cheap option behind the expensive one's wait.
+    """
+    with store.session() as conn, store.tx(conn):
+        quota.record_refusal(conn, "sc-domain:example.com")
+
+    entry = server.gsc_quota()[0]
+    assert entry["binding"] == "refused"
+    assert entry["submission"]["last_refusal_at"] is not None
+    # Overruled, not rewritten: the ledger still shows its own estimate.
+    assert entry["submission"]["free"] == 11
+
+
 def test_quota_reports_inspection_daily_as_binding_when_exhausted(home):
     with store.session() as conn, store.tx(conn):
         quota.record_inspections(conn, "sc-domain:example.com",

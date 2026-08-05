@@ -5,6 +5,15 @@ each freeing 24h + 1min after its own use. Properties are independent, so a
 user with eight properties has eight budgets. Re-confirmed live 2026-08-05,
 against a refusal that looked at first like proof of a shared account budget.
 
+Slots free back ONE AT A TIME, not in a daily batch, and that detail is the
+one most likely to be lost. A property refused at 12:29 accepted a submission
+at 12:42, refused again at 12:54, and accepted again at 13:22 — all on the
+same account, property and machine. Nothing there is scoped to a device, an
+IP or a browser session (each of those was tested and eliminated); it is just
+individual slots ageing out of a rolling window. Anything in this module that
+treats a refusal as a statement about the next 24 hours is wrong by
+construction.
+
 The previous implementation keyed its ledger by account email, which modelled
 the limit as per-account and under-counted capacity badly — one account with
 seventeen properties was being capped at eleven submissions total.
@@ -13,8 +22,9 @@ What this ledger CANNOT see is the thing to keep in mind before trusting it:
 it counts only the slots this tool spent. Manual submissions in the browser,
 another machine, and a URL resubmitted by hand are all invisible, so `free`
 is an upper bound on real capacity, never a guarantee. That is why a refusal
-from Google is treated as authoritative — see mark_full() — and why nothing
-should conclude anything about Google's rules from these numbers alone.
+from Google is treated as authoritative — see record_refusal() — and why
+nothing should conclude anything about Google's rules from these numbers
+alone. Callers that show `free` to a human owe them that caveat with it.
 """
 from __future__ import annotations
 
@@ -30,6 +40,14 @@ log = runlog.get(__name__)
 
 SLOT_WINDOW_MINUTES = 1441  # 24h + 1min, proven against live runs
 DEFAULT_PROPERTY_SLOTS = 11
+
+#: How long to stop submitting to a property after Google refuses it. Short on
+#: purpose -- see record_refusal(). Slots return one at a time, so the useful
+#: question after a refusal is "has one come back yet", and the only way to
+#: learn the answer is to ask again. Asking is cheap: a refusal spends no slot.
+#: Long enough not to hammer, short enough to catch the next slot; measured
+#: gaps between slots freeing on a real property ran 13-28 minutes.
+REFUSAL_COOLDOWN_MINUTES = 15
 
 
 def _window_start(now: datetime) -> str:
@@ -116,51 +134,98 @@ def next_free(conn: sqlite3.Connection, property: str, *,
     )
 
 
-def mark_full(conn: sqlite3.Connection, account: str, property: str, *,
-              slots: int = DEFAULT_PROPERTY_SLOTS,
-              now: datetime | None = None) -> int:
-    """Backfill the ledger so this property reads as fully spent. Returns rows added.
+def _refusal_key(property: str) -> str:
+    return f"refused_at:{property}"
 
-    Called when Google itself answers "Quota Exceeded". That answer is
-    ground truth and the ledger is only an estimate, so the estimate yields
-    to it -- without this, a refusal left `free` reporting spare capacity
-    and the very next caller submitted straight into another refusal.
 
-    The gap being closed is not a bug in the accounting. The ledger can only
-    ever count consumption IT caused: a slot spent by hand in the browser, by
-    another machine, or by a resubmission of a URL this tool already sent, is
-    invisible here. All of those are ordinary user behaviour. So a refusal on
-    a property the ledger believes is untouched is expected, not a defect --
-    and it carries exactly one piece of information worth writing down, which
-    is that every slot is in fact gone.
+def record_refusal(conn: sqlite3.Connection, property: str, *,
+                   now: datetime | None = None) -> datetime:
+    """Note that Google refused this property, and hold off briefly.
 
-    Synthetic rows are stamped `now`, which makes them age out on the normal
-    24h+1min window rather than needing their own expiry path. That is
-    deliberately pessimistic: the real slots were spent at some earlier,
-    unknowable moment, so the ledger will free them slightly LATE. Late costs
-    a wait; early costs another hard refusal, and refusals are what this
-    function exists to stop.
+    Called when Google itself answers "Quota Exceeded". Read carefully what
+    that answer does and does not tell you, because the previous
+    implementation of this function got it wrong in a way that cost a whole
+    afternoon of misdiagnosis on 2026-08-05.
 
-    Does not open its own transaction -- callers wrap this in store.tx(),
-    like every other accounting write in this module.
+    It tells you ONE thing: zero slots are free at this instant. It says
+    nothing whatsoever about WHEN the next one frees. The window is rolling
+    and each slot ages out 24h+1min after its own use, so on a property
+    filled hours ago the slots come back one at a time, minutes apart.
+
+    What used to happen here was a backfill: write enough synthetic
+    quota_slots rows to read as fully spent, each stamped `now`. The comment
+    justifying it argued that stamping `now` is "deliberately pessimistic",
+    freeing slots slightly LATE, and that late merely costs a wait. That
+    reasoning is what broke. The real slots were spent HOURS before the
+    refusal and expire on their own earlier schedule; the synthetic ones
+    expire 24h after the refusal. So the ledger reported a property as
+    completely full straight through a window in which Google was handing
+    capacity back every few minutes -- observed live, three successful manual
+    submissions inside 45 minutes while the ledger insisted on zero. "Late"
+    was not a small wait. It was a day-long lockout invented from a single
+    bit of information.
+
+    So: record the refusal, refuse to submit for a short cooldown, and then
+    let the ledger's own estimate speak again. If capacity really is gone the
+    next attempt is refused too -- and a refusal COSTS NO SLOT, which is the
+    whole reason the cheap answer is also the correct one. Retrying is nearly
+    free; inventing a day of state is not.
+
+    Stored in `meta` rather than a table of its own: one row per property,
+    overwritten in place, no migration, and nothing to prune. Returns the
+    moment the cooldown ends. Does not open its own transaction -- callers
+    wrap this in store.tx(), like every other accounting write here.
     """
     moment = now or datetime.now(UTC)
-    deficit = slots - used(conn, property, now=moment)
-    if deficit <= 0:
-        return 0
-    stamp = utc_iso(moment)
-    conn.executemany(
-        "INSERT INTO quota_slots (account, property, used_at) VALUES (?, ?, ?)",
-        [(account, property, stamp)] * deficit,
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (_refusal_key(property), utc_iso(moment)),
     )
-    log.info("quota refused by Google for %s; ledger backfilled by %d",
-             property, deficit)
-    return deficit
+    until = moment + timedelta(minutes=REFUSAL_COOLDOWN_MINUTES)
+    log.info("quota refused by Google for %s; holding off %d min (no slot spent)",
+             property, REFUSAL_COOLDOWN_MINUTES)
+    return until
+
+
+def cooling_off(conn: sqlite3.Connection, property: str, *,
+                cooldown_minutes: int = REFUSAL_COOLDOWN_MINUTES,
+                now: datetime | None = None) -> datetime | None:
+    """When this property's post-refusal cooldown ends, or None if it is over.
+
+    None is also the answer when Google has never refused this property, so
+    callers get one shape for "nothing is holding this back".
+    """
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key=?", (_refusal_key(property),)
+    ).fetchone()
+    if row is None:
+        return None
+    moment = now or datetime.now(UTC)
+    until = datetime.fromisoformat(row["value"]) + timedelta(minutes=cooldown_minutes)
+    return until if until > moment else None
+
+
+def last_refusal(conn: sqlite3.Connection, property: str) -> datetime | None:
+    """The last time Google refused this property, or None. Never expires."""
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key=?", (_refusal_key(property),)
+    ).fetchone()
+    return None if row is None else datetime.fromisoformat(row["value"])
 
 
 @dataclass(frozen=True)
 class QuotaVerdict:
     """Whether a submission may proceed, and which limit is holding it back.
+
+    `binding` is "property", "account", "refused", or None. "refused" is the
+    odd one out and the only one sourced from Google rather than our own
+    counting: it means Google said Quota Exceeded recently and we are sitting
+    out a short cooldown. On that verdict `property_free` can be NONZERO while
+    `allowed` is False — not a contradiction, it is the ledger's estimate
+    being overruled by an observation, which is exactly what should happen.
+    `next_free_at` then carries the end of the cooldown, i.e. when to ask
+    Google again, not a moment at which a slot is known to exist.
 
     property_free and next_free_at are computed against check()'s
     RESERVE-ADJUSTED ceiling (property_slots - daily_reserve) whenever the
@@ -256,6 +321,21 @@ def check(conn: sqlite3.Connection, account: str, property: str, *,
     account_free: int | None = None
     if account_slots is not None:
         account_free = max(0, account_slots - account_used(conn, account, now=moment))
+
+    # A recent refusal outranks the ledger's own arithmetic, because it is the
+    # only input here that came from Google rather than from our own counting.
+    # It is deliberately NOT expressed by writing slots into the ledger -- see
+    # record_refusal() for what that cost -- so it has to be consulted as its
+    # own condition, and it expires on its own short clock.
+    cooldown_until = cooling_off(conn, property, now=moment)
+    if cooldown_until is not None:
+        return QuotaVerdict(
+            allowed=False,
+            binding="refused",
+            property_free=property_free,
+            account_free=account_free,
+            next_free_at=cooldown_until,
+        )
 
     binding: str | None = None
     if property_free <= 0:

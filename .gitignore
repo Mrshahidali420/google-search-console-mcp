@@ -37,3 +37,6 @@ src/gsc_mcp/_embedded.py
 # carry. Keep the notes locally; port only the scrubbed defect descriptions
 # into docs/ or an issue.
 /docs/findings-*.md
+
+# Working notes name real client properties. They stay on the machine.
+/tasks/

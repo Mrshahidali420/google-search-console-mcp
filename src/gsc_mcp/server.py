@@ -448,11 +448,27 @@ def _submission_report(
         "slots": property_slots,
         "daily_reserve": daily_reserve,
         "next_free_at": store.utc_iso(verdict.next_free_at),
+        # The counts above are an ESTIMATE and these three fields are what
+        # stop a caller from reading them as fact. The ledger sees only the
+        # slots this tool spent; anything submitted by hand in the browser,
+        # from a phone, or on another machine is invisible to it. So `used`
+        # is a lower bound, `free` an upper bound, and a property can be
+        # refused while this block cheerfully reports headroom -- which is
+        # not a bug to fix but a limit to disclose.
+        "counts": "tool_submissions_only",
+        "free_is_upper_bound": True,
+        "last_refusal_at": store.utc_iso(quota.last_refusal(conn, property)),
     }
 
 
 def _quota_binding(verdict: quota.QuotaVerdict,
                    inspection: quota.InspectionVerdict) -> str | None:
+    # "refused" is reported as itself rather than folded into "submission":
+    # they call for different actions. "submission" means wait for a slot to
+    # age out; "refused" means Google overruled our count and the wait is a
+    # short cooldown, after which asking again is free.
+    if verdict.binding == "refused":
+        return "refused"
     if not verdict.allowed:
         return "submission"
     if inspection.binding == "daily":
@@ -475,8 +491,23 @@ def gsc_quota() -> list[dict] | dict:
     One entry per property: `{"property", "submission", "inspection",
     "binding"}`.
 
+    THESE NUMBERS ARE AN ESTIMATE, NOT A MEASUREMENT, and the estimate is
+    biased in one direction. The store counts only the slots THIS TOOL
+    spent: a URL submitted by hand in Search Console, from a phone, or on
+    another machine never reaches it. So `used` is a lower bound and `free`
+    an upper bound — a property reported with headroom can still be refused
+    by Google, and that is expected behaviour rather than a defect. Do not
+    tell a user "you have N submissions left" without that caveat, and do
+    not conclude anything about Google's own rules from these counts.
+    `counts` and `free_is_upper_bound` restate this in the payload so it
+    survives being read without the docstring.
+
     "submission" is the Request-Indexing slot budget: `{"free",
-    "spendable_free", "used", "slots", "daily_reserve", "next_free_at"}`.
+    "spendable_free", "used", "slots", "daily_reserve", "next_free_at",
+    "counts", "free_is_upper_bound", "last_refusal_at"}`.
+    `last_refusal_at` is the last time Google actually said Quota Exceeded
+    for this property (ISO-8601, or None) — the only figure in the block
+    that came from Google rather than from local arithmetic.
     `free` is the RAW free-slot count and ignores daily_reserve.
     `spendable_free` is computed against the RESERVE-ADJUSTED ceiling —
     max(0, (slots - daily_reserve) - used) — NOT simply `free` minus
@@ -495,8 +526,12 @@ def gsc_quota() -> list[dict] | dict:
 
     "binding" names whichever budget is exhausted for that property right
     now — "submission" (the Request-Indexing ceiling, reserve applied),
-    "inspection_daily", or "inspection_minute" — or None when every budget
-    has headroom.
+    "refused" (Google said Quota Exceeded recently and a short cooldown is
+    running), "inspection_daily", or "inspection_minute" — or None when
+    every budget has headroom. On "refused", `spendable_free` may be
+    nonzero: the local estimate is being overruled by what Google actually
+    answered, and `next_free_at` is when to ask again rather than a moment
+    a slot is known to exist.
     """
     try:
         settings = config.load()

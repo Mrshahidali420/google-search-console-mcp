@@ -25,7 +25,7 @@ function pushRecent(url, outcome) {
 // is refused. Nothing here needs a human. The tool only listens while a run is
 // active, so most attempts fail by design — the point is to already be knocking
 // when one starts.
-const VERSION = "1.12.0";
+const VERSION = "1.12.1";
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 15000;
 let retryMs = RETRY_MIN_MS;
@@ -365,7 +365,8 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((m) => {
   if (m.type === "progress") send({ type: "progress", id: m.id, stage: m.stage });
   if (m.type === "result") {
-    send({ type: "result", id: m.id, outcome: m.outcome, detail: m.detail });
+    send({ type: "result", id: m.id, outcome: m.outcome, detail: m.detail,
+           click_mode: m.click_mode });
     chrome.storage.local.get(["currentJob"], (v) => pushRecent(v.currentJob || "", m.outcome));
   }
 });

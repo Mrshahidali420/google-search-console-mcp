@@ -401,16 +401,17 @@ def run(conn: sqlite3.Connection, sender: Sender, urls: list[str], *,
                              stop_on_throttle=stop_on_throttle)
 
         # Google just said the property is out of slots, on a property our
-        # own ledger believed had capacity. Believe Google. The ledger only
-        # counts what this tool spent, so manual submissions elsewhere -- or
-        # a URL resubmitted by hand -- leave it legitimately short; the
-        # refusal is the only signal that will ever correct it. Without this
-        # the next caller reads the same stale free count and walks into the
-        # same wall.
+        # own ledger believed had capacity. Believe Google -- the ledger only
+        # counts what this tool spent, so manual submissions elsewhere leave
+        # it legitimately short, and the refusal is the only signal that will
+        # ever correct it. But believe it for what it actually says: zero free
+        # RIGHT NOW, nothing about the next 24 hours. Slots return one at a
+        # time, so this records a short cooldown rather than writing the
+        # property off for a day (see quota.record_refusal for the incident
+        # that distinction comes from). The refusal itself spent no slot.
         if disposition.label == "quota_exceeded":
             with store.tx(conn):
-                quota.mark_full(conn, account, target_property,
-                                slots=int(cfg.get("property_slots", 11)))
+                quota.record_refusal(conn, target_property)
 
         _report(on_progress, attempts,
                 Attempt(url, target_property, disposition.label,

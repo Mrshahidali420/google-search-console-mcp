@@ -9,7 +9,8 @@ Protocol (JSON text frames):
     server -> client   {"type":"hello_ok"} | {"type":"hello_denied"}
                        | {"type":"hello_busy","reason":...}
     server -> client   {"type":"submit","id":...,"property":...,"url":...,"authuser":...}
-    client -> server   {"type":"result","id":...,"outcome":...,"detail":...?}
+    client -> server   {"type":"result","id":...,"outcome":...,"detail":...?,
+                        "click_mode":"trusted"|"synthetic"|null}
     client -> server   {"type":"progress","id":...,"stage":...}   (informational)
     client -> server   {"type":"cancel"}                          (abort the run)
     either             {"type":"ping"} / {"type":"pong"}
@@ -829,10 +830,24 @@ class BridgeSession:
         elif kind == "result":
             # `detail` carries the extension's diagnostics. Dropping it once
             # made a silent-success path impossible to audit.
+            #
+            # `click_mode` is logged unconditionally, unlike `detail`: it says
+            # whether the gesture-gated click went through trusted CDP input
+            # or fell back to a synthetic el.click(), and the extension only
+            # otherwise records that in a popup that is overwritten by the
+            # next URL. A quota investigation on 2026-08-05 could not tell
+            # afterwards which path two refused submissions had taken. None
+            # means nothing clicked (skipped, already indexed, inspect
+            # failed) — not "we do not know".
             detail = message.get("detail")
+            click_mode = message.get("click_mode")
             if detail:
                 log.info("bridge result [%s]: %s :: %s", message.get("id", "?"),
                          message.get("outcome"), detail)
+            if click_mode:
+                log.info("bridge result [%s]: %s via %s click",
+                         message.get("id", "?"), message.get("outcome"),
+                         click_mode)
             with self._pending_lock:
                 waiter = self._pending.pop(message.get("id"), None)
             if waiter:

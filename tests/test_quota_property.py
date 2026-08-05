@@ -147,66 +147,118 @@ def test_next_free_is_set_when_open_submissions_fill_the_property(tmp_path):
     assert quota.next_free(conn, PROP_A, now=now) == expected
 
 
-# --- mark_full: Google's refusal overrides our estimate -----------------------
+# --- record_refusal: Google's refusal overrides our estimate, briefly ---------
 #
 # The ledger can only count what this tool spent. A slot spent by hand in the
 # browser, from another machine, or by resubmitting a URL this tool already
 # sent, never reaches it -- all ordinary user behaviour, none of it a defect.
-# So a refusal on a property the ledger believes is empty is expected, and it
-# carries one fact worth recording: every slot is gone.
+# So a refusal on a property the ledger believes is empty is expected.
+#
+# What it means is narrower than it looks, and the predecessor of this
+# function (mark_full, which backfilled the ledger to its ceiling) got it
+# wrong: a refusal says zero slots are free AT THAT INSTANT and nothing about
+# the next 24 hours. Slots age out one at a time, so a refused property can
+# accept a submission minutes later -- observed live on 2026-08-05, three
+# times inside 45 minutes, while the backfilled ledger insisted it was full.
 
 
-def test_mark_full_leaves_no_free_slots(tmp_path):
-    conn = _conn(tmp_path)
-
-    added = quota.mark_full(conn, ACCOUNT, PROP_A)
-
-    assert added == quota.DEFAULT_PROPERTY_SLOTS
-    assert quota.free(conn, PROP_A) == 0
-
-
-def test_mark_full_only_backfills_the_shortfall(tmp_path):
+def test_a_refusal_blocks_submissions_even_with_slots_on_the_books(tmp_path):
+    """The whole point: Google's answer outranks our arithmetic."""
     conn = _conn(tmp_path)
     now = datetime.now(UTC)
-    _spend(conn, PROP_A, now - timedelta(minutes=5))
-    _spend(conn, PROP_A, now - timedelta(minutes=5))
 
-    added = quota.mark_full(conn, ACCOUNT, PROP_A, now=now)
+    quota.record_refusal(conn, PROP_A, now=now)
 
-    assert added == quota.DEFAULT_PROPERTY_SLOTS - 2
-    assert quota.used(conn, PROP_A, now=now) == quota.DEFAULT_PROPERTY_SLOTS
-
-
-def test_mark_full_on_an_already_full_property_writes_nothing(tmp_path):
-    conn = _conn(tmp_path)
-    now = datetime.now(UTC)
-    for _ in range(quota.DEFAULT_PROPERTY_SLOTS):
-        _spend(conn, PROP_A, now - timedelta(minutes=5))
-
-    assert quota.mark_full(conn, ACCOUNT, PROP_A, now=now) == 0
-    assert quota.used(conn, PROP_A, now=now) == quota.DEFAULT_PROPERTY_SLOTS
+    verdict = quota.check(conn, ACCOUNT, PROP_A, now=now)
+    assert verdict.allowed is False
+    assert verdict.binding == "refused"
+    # Not a contradiction, and load-bearing: the ledger still believes it has
+    # capacity, and is being overruled rather than rewritten.
+    assert verdict.property_free == quota.DEFAULT_PROPERTY_SLOTS
 
 
-def test_mark_full_does_not_touch_another_property(tmp_path):
-    conn = _conn(tmp_path)
+def test_a_refusal_does_not_spend_slots(tmp_path):
+    """mark_full wrote 11 rows here. That is the bug, not the fix.
 
-    quota.mark_full(conn, ACCOUNT, PROP_A)
-
-    assert quota.free(conn, PROP_B) == quota.DEFAULT_PROPERTY_SLOTS
-
-
-def test_backfilled_slots_age_out_on_the_normal_window(tmp_path):
-    """Stamped `now`, so they expire late rather than early.
-
-    The real slots were spent at some earlier, unknowable moment, so freeing
-    on our own stamp is pessimistic by design: late costs a wait, early costs
-    another hard refusal -- which is the thing this exists to prevent.
+    Backfilled rows were stamped `now`, so they expired 24h after the REFUSAL
+    while the real slots -- spent hours earlier -- expired on their own
+    schedule. The property read as full straight through a window in which
+    Google was handing capacity back every few minutes.
     """
     conn = _conn(tmp_path)
     now = datetime.now(UTC)
 
-    quota.mark_full(conn, ACCOUNT, PROP_A, now=now)
+    quota.record_refusal(conn, PROP_A, now=now)
 
-    later = now + timedelta(minutes=quota.SLOT_WINDOW_MINUTES + 1)
-    assert quota.free(conn, PROP_A, now=now) == 0
-    assert quota.free(conn, PROP_A, now=later) == quota.DEFAULT_PROPERTY_SLOTS
+    assert quota.used(conn, PROP_A, now=now) == 0
+    assert quota.free(conn, PROP_A, now=now) == quota.DEFAULT_PROPERTY_SLOTS
+
+
+def test_the_cooldown_expires_in_minutes_not_a_day(tmp_path):
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    quota.record_refusal(conn, PROP_A, now=now)
+
+    during = now + timedelta(minutes=quota.REFUSAL_COOLDOWN_MINUTES - 1)
+    after = now + timedelta(minutes=quota.REFUSAL_COOLDOWN_MINUTES + 1)
+
+    assert quota.cooling_off(conn, PROP_A, now=during) is not None
+    assert quota.cooling_off(conn, PROP_A, now=after) is None
+    assert quota.check(conn, ACCOUNT, PROP_A, now=after).allowed is True
+
+
+def test_the_cooldown_says_when_to_ask_again(tmp_path):
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+
+    quota.record_refusal(conn, PROP_A, now=now)
+
+    verdict = quota.check(conn, ACCOUNT, PROP_A, now=now)
+    assert verdict.next_free_at == now + timedelta(
+        minutes=quota.REFUSAL_COOLDOWN_MINUTES)
+
+
+def test_a_refusal_does_not_touch_another_property(tmp_path):
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+
+    quota.record_refusal(conn, PROP_A, now=now)
+
+    assert quota.check(conn, ACCOUNT, PROP_B, now=now).allowed is True
+    assert quota.free(conn, PROP_B, now=now) == quota.DEFAULT_PROPERTY_SLOTS
+
+
+def test_a_second_refusal_restarts_the_cooldown(tmp_path):
+    """One row per property, overwritten -- not an accumulating history."""
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    quota.record_refusal(conn, PROP_A, now=now)
+
+    later = now + timedelta(minutes=quota.REFUSAL_COOLDOWN_MINUTES - 1)
+    quota.record_refusal(conn, PROP_A, now=later)
+
+    just_past_the_first = now + timedelta(
+        minutes=quota.REFUSAL_COOLDOWN_MINUTES + 1)
+    assert quota.cooling_off(conn, PROP_A, now=just_past_the_first) is not None
+
+
+def test_last_refusal_outlives_the_cooldown(tmp_path):
+    """The cooldown expires; the fact that Google refused does not.
+
+    gsc_quota reports it as the one figure in its submission block that came
+    from Google rather than from local arithmetic.
+    """
+    conn = _conn(tmp_path)
+    now = datetime.now(UTC)
+    quota.record_refusal(conn, PROP_A, now=now)
+
+    long_after = now + timedelta(days=2)
+    assert quota.cooling_off(conn, PROP_A, now=long_after) is None
+    assert quota.last_refusal(conn, PROP_A) == datetime.fromisoformat(
+        store.utc_iso(now))
+
+
+def test_last_refusal_is_none_when_google_never_refused(tmp_path):
+    conn = _conn(tmp_path)
+    assert quota.last_refusal(conn, PROP_A) is None
+    assert quota.cooling_off(conn, PROP_A) is None
