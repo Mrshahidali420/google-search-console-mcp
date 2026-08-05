@@ -24,6 +24,39 @@ def test_connect_records_schema_version(tmp_path):
     assert store.schema_version(conn) == store.SCHEMA_VERSION
 
 
+def _columns(conn, table):
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def test_a_database_predating_stop_reason_gains_the_column(tmp_path):
+    """CREATE TABLE IF NOT EXISTS gives an old DB new tables, never new
+    columns. Without the ALTER pass, every write touching stop_reason on a
+    pre-existing database fails with "no such column"."""
+    db = tmp_path / "state.db"
+    old = sqlite3.connect(db)
+    old.executescript(
+        "CREATE TABLE jobs (id TEXT PRIMARY KEY, params TEXT, state TEXT,"
+        " progress TEXT, started_at TEXT, finished_at TEXT, error TEXT)"
+    )
+    old.execute("INSERT INTO jobs (id, state) VALUES ('old-job', 'running')")
+    old.commit()
+    old.close()
+
+    conn = store.connect(db)
+    assert "stop_reason" in _columns(conn, "jobs")
+    # The migration adds, it does not rebuild: the existing row survives.
+    store.update_job(conn, "old-job", state="stopped_throttled",
+                     stop_reason="no_quota")
+    assert store.get_job(conn, "old-job")["stop_reason"] == "no_quota"
+
+
+def test_the_column_migration_runs_only_once(tmp_path):
+    db = tmp_path / "state.db"
+    store.connect(db).close()
+    conn = store.connect(db)
+    assert "stop_reason" in _columns(conn, "jobs")
+
+
 def test_connect_is_idempotent(tmp_path):
     db = tmp_path / "state.db"
     first = store.connect(db)

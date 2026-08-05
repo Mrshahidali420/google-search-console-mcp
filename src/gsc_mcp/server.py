@@ -1013,6 +1013,10 @@ def gsc_job_status(job_id: str | None = None) -> dict:
     States: pending, running, completed, stopped_user, stopped_throttled,
     failed. `results` holds one entry per URL attempted so far, and `live`
     says whether a worker is still on it in this process.
+
+    `stop_reason` says why a run ended early — "quota_exceeded", "no_quota",
+    "stopped_by_user". It is the only trace of a run refused at the gate,
+    which attempts nothing and so leaves `results` and `error` both empty.
     """
     return tools_submit.job_status(job_id)
 

@@ -321,6 +321,11 @@ def job_status(job_id: str | None = None) -> dict:
                 "started_at": job.get("started_at"),
                 "finished_at": job.get("finished_at"),
                 "error": job.get("error"),
+                # Why the run ended early, when it did. Distinct from
+                # `error`: a run that stops at the gate with "no_quota"
+                # never attempted anything and never failed, so `results`
+                # and `error` are both empty and this is the only trace.
+                "stop_reason": job.get("stop_reason"),
                 # The row alone cannot tell a live job from one whose worker
                 # died; only the registry knows, until the next startup
                 # reconcile catches up.

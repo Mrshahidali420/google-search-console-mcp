@@ -182,6 +182,25 @@ def test_job_status_keeps_no_property_and_no_quota_apart(store_conn):
     assert any("quota" in note for note in notes)
 
 
+def test_job_status_reports_why_a_run_stopped_early(store_conn):
+    store.create_job(store_conn, "job-1", {"urls": [], "total": 1})
+    store.update_job(store_conn, "job-1", state="stopped_throttled",
+                     stop_reason="quota_exceeded")
+    assert tools_submit.job_status("job-1")["stop_reason"] == "quota_exceeded"
+
+
+def test_a_run_refused_at_the_gate_still_names_its_cause(store_conn):
+    """no_quota attempts nothing, so results and error are both empty and
+    stop_reason is the only thing distinguishing it from a clean finish."""
+    store.create_job(store_conn, "job-1", {"urls": [], "total": 1})
+    store.update_job(store_conn, "job-1", state="stopped_throttled",
+                     stop_reason="no_quota")
+    result = tools_submit.job_status("job-1")
+    assert result["results"] == []
+    assert result["error"] is None
+    assert result["stop_reason"] == "no_quota"
+
+
 def test_job_status_reports_a_failed_job_with_its_stored_error(store_conn):
     _seed_job(store_conn, "job-1", state="failed", error="NoBrowser")
     result = tools_submit.job_status("job-1")

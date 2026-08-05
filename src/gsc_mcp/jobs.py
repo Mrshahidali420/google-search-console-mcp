@@ -385,7 +385,15 @@ def _worker(job_id: str, urls: list[str], cfg: dict,
             store.update_job(conn, job_id, progress=progress)
 
         result = _execute(conn, job_id, urls, cfg, stop_event, record)
-        store.update_job(conn, job_id, state=_final_state(result, stop_event))
+        # stop_reason travels WITH the state, not just into _final_state().
+        # Several reasons collapse onto one state -- "quota_exceeded" and
+        # "rate_limited" both land in stopped_throttled -- and a run stopped
+        # at the gate with "no_quota" never records an attempt, so the
+        # results list cannot be read backwards to recover the cause. The
+        # synchronous path (tools_submit) has always returned this; only the
+        # async path was dropping it.
+        store.update_job(conn, job_id, state=_final_state(result, stop_event),
+                         stop_reason=result.stop_reason)
     except Exception as exc:  # noqa: BLE001 — a dead worker must not leave a
         # job marked running forever: the row would stay live until the next
         # startup reconcile, and "one job at a time" would mean "no job ever

@@ -73,6 +73,42 @@ def test_resuming_a_finished_job_clears_finished_at_and_error(tmp_path):
     assert job["error"] is None
 
 
+def test_stop_reason_is_persisted_on_the_job_row(tmp_path):
+    conn = _conn(tmp_path)
+    store.create_job(conn, "job-1", {})
+    store.update_job(conn, "job-1", state="stopped_throttled",
+                     stop_reason="quota_exceeded")
+    assert store.get_job(conn, "job-1")["stop_reason"] == "quota_exceeded"
+
+
+def test_a_job_with_no_stop_reason_reads_as_none(tmp_path):
+    conn = _conn(tmp_path)
+    store.create_job(conn, "job-1", {})
+    store.update_job(conn, "job-1", state="completed")
+    assert store.get_job(conn, "job-1")["stop_reason"] is None
+
+
+def test_resuming_a_stopped_job_clears_the_stop_reason(tmp_path):
+    """A resumed run must not still advertise why the last one gave up."""
+    conn = _conn(tmp_path)
+    store.create_job(conn, "job-1", {})
+    store.update_job(conn, "job-1", state="stopped_throttled",
+                     stop_reason="no_quota")
+    store.update_job(conn, "job-1", state="running")
+    assert store.get_job(conn, "job-1")["stop_reason"] is None
+
+
+def test_a_live_state_carrying_an_explicit_stop_reason_keeps_it(tmp_path):
+    """The clear must not collide with an explicit value in one SET."""
+    conn = _conn(tmp_path)
+    store.create_job(conn, "job-1", {})
+    store.update_job(conn, "job-1", state="running", stop_reason="odd",
+                     error="also odd")
+    job = store.get_job(conn, "job-1")
+    assert job["stop_reason"] == "odd"
+    assert job["error"] == "also odd"
+
+
 def test_update_job_raises_for_unknown_id(tmp_path):
     conn = _conn(tmp_path)
     with pytest.raises(KeyError):

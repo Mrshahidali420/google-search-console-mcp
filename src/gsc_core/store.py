@@ -19,7 +19,19 @@ from . import paths, runlog
 
 log = runlog.get(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+#: Columns added to existing tables after their first release, as
+#: (table, column, declaration). CREATE TABLE IF NOT EXISTS gives an old
+#: database new TABLES for free; it does nothing whatsoever for a new COLUMN
+#: on a table that already exists, which is a quiet way to ship a schema the
+#: code assumes and the store does not have. Each entry is applied only when
+#: absent, so this stays idempotent and order-independent. NULL-able and
+#: without a default, always: SQLite rewrites nothing for that, and a column
+#: added here is by definition unknown for every row that predates it.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("jobs", "stop_reason", "TEXT"),
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -66,7 +78,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     progress    TEXT,
     started_at  TEXT,
     finished_at TEXT,
-    error       TEXT
+    error       TEXT,
+    stop_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS quota_slots (
@@ -87,6 +100,26 @@ CREATE INDEX IF NOT EXISTS idx_inspection_property ON inspection_calls (property
 """
 
 
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Apply _ADDED_COLUMNS to tables that do not have them yet.
+
+    Reads the live table shape from PRAGMA table_info rather than trying the
+    ALTER and swallowing the error: "duplicate column name" is not reliably
+    distinguishable from a real failure by message, and catching it broadly
+    would hide a genuinely broken schema behind a successful open.
+    """
+    for table, column, declaration in _ADDED_COLUMNS:
+        present = {row["name"] for row in
+                   conn.execute(f"PRAGMA table_info({table})")}
+        if not present or column in present:
+            # An absent table is not this function's business: _SCHEMA has
+            # already run, so a missing table means something is wrong that
+            # an ALTER would only obscure.
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        log.info("added column %s.%s to an existing database", table, column)
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     """Open the store, creating schema if absent. Safe to call concurrently."""
     target = path or paths.db_path()
@@ -104,12 +137,13 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
             "access will serialise", mode)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    _add_missing_columns(conn)
 
     # Advance the stamp only when it is behind SCHEMA_VERSION; never touch it
-    # otherwise. _SCHEMA above is all CREATE ... IF NOT EXISTS, so applying it
-    # is what actually gives an old database the new tables -- that already
-    # happened via executescript() before we get here, with no bespoke
-    # migration required. This block only updates the version label that
+    # otherwise. _SCHEMA above is all CREATE ... IF NOT EXISTS, and
+    # _add_missing_columns() covers what that cannot (a new column on an
+    # existing table), so between them an old database is brought up to date
+    # before we get here. This block only updates the version label that
     # describes what just happened:
     #   - no stamp yet -> this is a brand-new database, stamp SCHEMA_VERSION.
     #   - stamp is not a parseable integer -> leave it alone. Refusing to
@@ -500,7 +534,17 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> dict | None:
 
 def update_job(conn: sqlite3.Connection, job_id: str, *,
                state: str | None = None, progress: dict | None = None,
-               error: str | None = None) -> None:
+               error: str | None = None,
+               stop_reason: str | None = None) -> None:
+    """Patch a job row. Only the fields passed are touched.
+
+    stop_reason is WHY a run ended early -- "quota_exceeded", "no_quota",
+    "stopped_by_user" -- as opposed to `error`, which means the worker itself
+    died. A run that stops at the gate with "no_quota" records no attempt at
+    all, so without this column that cause is unrecoverable from the row and
+    a caller can only guess from a results list that is empty for two
+    completely different reasons.
+    """
     if state is not None and state not in JOB_STATES:
         raise ValueError(f"unknown job state: {state}")
 
@@ -513,17 +557,31 @@ def update_job(conn: sqlite3.Connection, job_id: str, *,
             assignments.append("finished_at=?")
             values.append(utc_iso(datetime.now(UTC)))
         else:
-            # Moving back to a live state: a previous run's completion time and
-            # error message are stale by definition, and a consumer treating
-            # finished_at as "done" would misread the resumed job.
+            # Moving back to a live state: a previous run's completion time,
+            # error and stop reason are stale by definition, and a consumer
+            # treating finished_at as "done" would misread the resumed job.
+            # stop_reason is cleared with them for the same reason -- a
+            # resumed run that then finishes cleanly must not still be
+            # advertising why the last one gave up.
+            #
+            # Each clear is skipped when the caller also passed that field, so
+            # one column never gets two assignments in a single SET. SQLite's
+            # behaviour for that is not worth relying on, and "live state plus
+            # an explicit reason" is a contradiction whichever way it resolved.
             assignments.append("finished_at=NULL")
-            assignments.append("error=NULL")
+            if error is None:
+                assignments.append("error=NULL")
+            if stop_reason is None:
+                assignments.append("stop_reason=NULL")
     if progress is not None:
         assignments.append("progress=?")
         values.append(json.dumps(progress))
     if error is not None:
         assignments.append("error=?")
         values.append(error)
+    if stop_reason is not None:
+        assignments.append("stop_reason=?")
+        values.append(stop_reason)
     if not assignments:
         return
 

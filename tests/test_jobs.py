@@ -711,6 +711,26 @@ def test_a_throttled_run_lands_in_stopped_throttled(monkeypatch, home, reason):
     assert _read(job_id)["state"] == "stopped_throttled"
 
 
+@pytest.mark.parametrize("reason", ["rate_limited", "quota_exceeded",
+                                    "no_quota"])
+def test_the_stop_reason_survives_onto_the_job_row(monkeypatch, home, reason):
+    """All three collapse onto stopped_throttled, so the state cannot say
+    which happened. "no_quota" stops at the gate and records no attempt at
+    all, leaving the row the only place the cause can be read."""
+    monkeypatch.setattr(jobs, "_execute",
+                        _fake_execute([], stop_reason=reason))
+    job_id = jobs.start(["https://example.com/a"], CFG)
+    _await_terminal(job_id)
+    assert _read(job_id)["stop_reason"] == reason
+
+
+def test_a_run_that_ends_on_its_own_records_no_stop_reason(monkeypatch, home):
+    monkeypatch.setattr(jobs, "_execute", _fake_execute(["submitted"]))
+    job_id = jobs.start(["https://example.com/a"], CFG)
+    _await_terminal(job_id)
+    assert _read(job_id)["stop_reason"] is None
+
+
 def test_a_crashing_worker_fails_the_job_rather_than_leaving_it_running(
         monkeypatch, home):
     def explode(*args, **kwargs):

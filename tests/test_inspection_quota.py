@@ -97,8 +97,10 @@ def test_prune_removes_old_rows_and_keeps_recent_ones(conn):
     assert quota.inspection_used(conn, PROP, now=NOW)["day"] == 2
 
 
-def test_schema_is_version_two(conn):
-    assert store.schema_version(conn) == 2
+def test_a_fresh_database_is_stamped_with_the_current_version(conn):
+    """Against SCHEMA_VERSION, not a literal: this test is about the stamp
+    tracking the code, and every later migration would move the number."""
+    assert store.schema_version(conn) == store.SCHEMA_VERSION
 
 
 def test_an_existing_v1_database_gains_the_table_and_advances(tmp_path):
@@ -118,7 +120,7 @@ def test_an_existing_v1_database_gains_the_table_and_advances(tmp_path):
         assert conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name='inspection_calls'").fetchall()
-        assert store.schema_version(conn) == 2
+        assert store.schema_version(conn) == store.SCHEMA_VERSION
     finally:
         conn.close()
 
