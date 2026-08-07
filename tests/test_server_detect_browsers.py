@@ -139,7 +139,7 @@ def test_the_match_is_still_reported_without_naming_the_account(survey,
     survey([_candidate("chrome", "Default", ACCOUNT)])
     entry = tools_browsers.detect_browsers()["profiles"][0]
     assert entry["matches_authorised_account"] is True
-    assert entry["signed_in"] is True
+    assert entry["account_on_disk"] is True
 
 
 def test_a_display_name_that_is_an_address_is_replaced(survey):
@@ -347,7 +347,7 @@ def test_a_signed_out_chrome_profile_reports_signed_out(survey, monkeypatch):
     _signed_in_account(monkeypatch, ACCOUNT)
     survey([_candidate("chrome", "Default", None)])
     entry = tools_browsers.detect_browsers()["profiles"][0]
-    assert entry["signed_in"] is False
+    assert entry["account_on_disk"] is False
     assert entry["matches_authorised_account"] is False
 
 
@@ -355,7 +355,7 @@ def test_matching_is_unknown_when_no_account_has_authorised_yet(survey):
     """Nothing has been authorised, so nothing can be matched against."""
     survey([_candidate("chrome", "Default", OTHER)])
     entry = tools_browsers.detect_browsers()["profiles"][0]
-    assert entry["signed_in"] is True
+    assert entry["account_on_disk"] is True
     assert entry["matches_authorised_account"] is None
 
 

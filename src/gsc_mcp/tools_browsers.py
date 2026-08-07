@@ -265,10 +265,14 @@ def _entry(candidate: profiles.Candidate, best: profiles.Candidate | None,
         "extensions_url": brand.extensions_url,
         "profile": profile.directory,
         "display_name": _safe_name(profile),
-        # "an account was found on disk", not "somebody is logged in": for a
-        # brand that records nothing, False means only "not discoverable",
-        # which is why account_discoverable travels beside it.
-        "signed_in": bool(profile.email),
+        # Named for what it is: an account address found in this profile's
+        # files. It used to be called signed_in, which claimed more than the
+        # check performs — no token is validated, nobody's session is
+        # inspected, and on Edge the very same file records MICROSOFT
+        # accounts, so the old name was simply false there. For a brand that
+        # records nothing, False means only "not discoverable", which is why
+        # account_discoverable travels beside it.
+        "account_on_disk": bool(profile.email),
         "account_discoverable": brand.reports_google_account,
         "matches_authorised_account": _matches(profile, brand, account_email),
         # True, False, or None — and None is not a polite False here either.

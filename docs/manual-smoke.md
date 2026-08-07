@@ -152,7 +152,7 @@ account you just authorised.** Check the avatar in the top right.
 
 - [ ] The recommended profile really is signed in as that account.
 
-If it is not, note what `signed_in`, `account_discoverable` and
+If it is not, note what `account_on_disk`, `account_discoverable` and
 `matches_authorised_account` said for it and file all three — the ranking
 picking the wrong profile is worth knowing about. Then **pin the right one
 and carry on with the rest of the checklist against it**:
@@ -177,7 +177,7 @@ Two things you must **not** treat as failures:
   the stored token, and nothing writes one, because the current scope set
   returns no identity claim. It is inert plumbing, not a bug you found.
   Do not report a `null` here.
-- On **Microsoft Edge**, `signed_in: true` is not evidence of a Google
+- On **Microsoft Edge**, `account_on_disk: true` is not evidence of a Google
   sign-in. Edge stores Microsoft account addresses in the same file and the
   same key Chrome uses for Google ones, so an Edge profile may show as
   signed in when it is signed in to Microsoft — and if your Microsoft and

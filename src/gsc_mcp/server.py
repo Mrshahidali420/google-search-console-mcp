@@ -907,7 +907,7 @@ def gsc_detect_browsers() -> dict:
     which single profile to use, so each entry carries its own brand
     context (`browser`, `browser_key`, `extensions_url`) and stands alone.
     Each profile is `{"browser", "browser_key", "extensions_url",
-    "profile", "display_name", "signed_in", "account_discoverable",
+    "profile", "display_name", "account_on_disk", "account_discoverable",
     "matches_authorised_account", "has_extension", "recommended"}`.
 
     `extensions_url` is where that browser's extensions page lives
@@ -923,9 +923,12 @@ def gsc_detect_browsers() -> dict:
     installed"; telling a user with a working install to reinstall it is
     the one wrong answer this flag exists to avoid.
 
-    `signed_in` says a Google account was found in that profile's files.
+    `account_on_disk` says an account address was found in that profile's
+    files — found, not validated: no token is checked and nobody's live
+    session is inspected, and on Microsoft Edge the same file records
+    Microsoft accounts, so treat it as a hint rather than a login check.
     `account_discoverable` is a fact about the BRAND: Brave, Vivaldi, Opera
-    and plain Chromium record no Google account at all, so `signed_in:
+    and plain Chromium record no Google account at all, so `account_on_disk:
     false` there means "not discoverable", NOT "nobody is signed in".
     `matches_authorised_account` is true, false, or NULL — null means the
     question could not be asked (nothing has authorised yet, or the brand
