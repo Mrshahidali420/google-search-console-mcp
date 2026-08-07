@@ -101,7 +101,7 @@ def unexpected(tool: str, exc: Exception, fix: str = FIX_UNEXPECTED) -> dict:
     Without this an unmodelled failure -- an expired token meeting a
     transiently failing token endpoint raises a plain RuntimeError out of
     the eager probe in gsc_check_status, for one -- escapes the tool.
-    FastMCP does turn that into `isError: true` rather than killing the
+    The SDK does turn that into `isError: true` rather than killing the
     session, but the caller loses the structured `fix` this package
     promises and gets a stringified exception to parse instead.
 

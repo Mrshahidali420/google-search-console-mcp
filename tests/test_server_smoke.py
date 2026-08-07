@@ -2,19 +2,19 @@
 
 Every other test in this suite calls gsc_* tool functions directly as plain
 Python. None of them proves the server starts, registers its tools with
-FastMCP, and answers a real MCP client over a real transport. That gap
+the SDK, and answers a real MCP client over a real transport. That gap
 matters because the README makes exactly that claim to strangers.
 
-`FastMCP.list_tools()` (the shape suggested in the task brief) was
+`MCPServer.list_tools()` (the shape suggested in the task brief) was
 considered and rejected: it calls straight into the in-process
 `ToolManager`, bypassing JSON-RPC entirely, so it cannot detect a broken
 transport, a bad initialization handshake, or a tool that fails to survive
-serialization. `mcp.shared.memory.create_connected_server_and_client_session`
-is used instead — it runs the real `Server.run()` loop against a real
-`ClientSession` over in-memory streams, so `client_session.list_tools()`
-travels through the same JSON-RPC path a real client (Claude Desktop, an
-MCP Inspector, anything else) would use. No subprocess/stdio fallback was
-needed: this transport is available in the installed mcp 1.29.0.
+serialization. `mcp.client.Client` handed the server object is used
+instead — its in-memory transport runs the real server loop against a real
+client session, so `client.list_tools()` travels through the same JSON-RPC
+path a real client (Claude Desktop, an MCP Inspector, anything else) would
+use. (mcp 1.x spelled this `create_connected_server_and_client_session`;
+mcp 2.0 replaced it with the Client class.)
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import asyncio
 from pathlib import Path
 
 from mcp import types
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.client import Client
 
 EXPECTED = {
     "gsc_list_sites", "gsc_doctor", "gsc_check_status",
@@ -41,8 +41,8 @@ EXPECTED = {
 async def _list_tools_over_the_wire() -> list[types.Tool]:
     from gsc_mcp import server
 
-    async with create_connected_server_and_client_session(server.mcp) as session:
-        result = await session.list_tools()
+    async with Client(server.mcp) as client:
+        result = await client.list_tools()
     return result.tools
 
 

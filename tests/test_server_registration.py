@@ -2,7 +2,7 @@
 
 Everything under this milestone was built behind server.py: a run loop, a
 quota gate, a bridge, a worker thread. None of it is worth anything until
-FastMCP knows the four tool names, so these tests go through the registry
+the SDK's registry knows the tool names, so these tests go through the registry
 rather than through the module, and they check the wiring rather than the
 behaviour — the behaviour has its own tests in test_tools_submit.py and
 test_tools_jobs.py.
@@ -25,11 +25,11 @@ SUBMISSION_TOOLS = ("gsc_request_indexing", "gsc_start_indexing_job",
 
 
 def registered() -> dict[str, Any]:
-    """What a client can actually call, read off FastMCP's own registry.
+    """What a client can actually call, read off the SDK's own tool registry.
 
     Private API, for the reason test_no_stdout.py gives: it is the only
     thing that knows what was registered, it fails loudly on an upgrade,
-    and the mcp>=1.2,<2.0 pin holds the surface still.
+    and the mcp>=2.0,<3 pin holds the surface still.
     """
     return {tool.name: tool.fn for tool in server.mcp._tool_manager.list_tools()}
 
@@ -40,7 +40,7 @@ def test_the_four_submission_tools_are_registered() -> None:
 
 @pytest.mark.parametrize("name", SUBMISSION_TOOLS)
 def test_every_submission_tool_documents_itself(name: str) -> None:
-    """A tool's docstring is its entire interface to a model, and FastMCP
+    """A tool's docstring is its entire interface to a model, and the SDK
     ships it as the description. An undocumented tool is registered but
     unusable."""
     tool = {t.name: t for t in server.mcp._tool_manager.list_tools()}[name]
@@ -138,7 +138,7 @@ def test_the_discovery_tools_are_registered() -> None:
 
 @pytest.mark.parametrize("name", DISCOVERY_TOOLS)
 def test_every_discovery_tool_documents_itself(name: str) -> None:
-    """Same reason as the submission tools: FastMCP ships the docstring as
+    """Same reason as the submission tools: the SDK ships the docstring as
     the description, and it is the only thing a calling model reads before
     deciding whether spending inspection budget is worth it."""
     tool = {t.name: t for t in server.mcp._tool_manager.list_tools()}[name]
@@ -207,7 +207,7 @@ def test_find_unindexed_keeps_its_documented_defaults(
 
 
 #: The parameter names a CLIENT sees, per tool. A wrapper's parameter name
-#: is public API — FastMCP publishes it in the tool's input schema and a
+#: is public API — the SDK publishes it in the tool's input schema and a
 #: model calls by keyword — so renaming one silently breaks every existing
 #: caller with a schema error. Positional delegation tests cannot see that:
 #: they would pass just as happily against a parameter called `cap`.

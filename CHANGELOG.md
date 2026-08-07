@@ -4,6 +4,23 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
+## [Unreleased]
+
+### Changed
+
+- **Ported to `mcp` 2.0; the pin is now `mcp>=2.0,<3`.** The 1.x cap made
+  this package hard-conflict with anything requiring `mcp>=2`, and it was
+  load-bearing only because 2.0 renamed `FastMCP` to `MCPServer` with a
+  different construction API. The port itself was small: one import, one
+  constructor — and it retired a hack, because `MCPServer` takes `version=`
+  directly where FastMCP forced this project to reach into the wrapped
+  lowlevel server to stamp its own version on the handshake. The wire-level
+  tests moved from `mcp.shared.memory` (gone in 2.0) to the new
+  `mcp.client.Client` in-memory transport, and the handshake-identity tests
+  now read `serverInfo` off a real initialize response instead of a private
+  attribute. The flip side is deliberate: this package now conflicts with
+  anything still requiring `mcp<2`.
+
 ## [0.1.0a5] — 2026-08-07
 
 The first CI run on Linux and macOS found two bugs that a Windows-only test

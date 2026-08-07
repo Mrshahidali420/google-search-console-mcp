@@ -77,7 +77,7 @@ def test_gsc_setup_writes_nothing_on_the_failure_path(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 def registered_tools():
-    """What the server actually exposes, read off FastMCP's own registry.
+    """What the server actually exposes, read off the SDK's own tool registry.
 
     Not `dir(server)` filtered by a `gsc_` prefix. The prefix is a naming
     convention, not the registration mechanism: a tool registered under any

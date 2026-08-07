@@ -7,7 +7,7 @@ file is already at its size ceiling, and a tool's docstring is its entire
 interface to a model, so the docstring is the part that belongs beside the
 registration.
 
-Import order is load-bearing. `runlog.init()` runs before `FastMCP` is
+Import order is load-bearing. `runlog.init()` runs before `MCPServer` is
 constructed, and before anything else in this module can log a line —
 stdout is the MCP JSON-RPC transport, so a stray print (from this module,
 from a library it imports, or from a handler that logs to the wrong
@@ -33,10 +33,10 @@ from datetime import UTC, datetime
 
 from gsc_core import api, config, gauth, paths, perf, quota, routing, runlog, store
 
-# Must run before FastMCP is constructed — see the module docstring.
+# Must run before MCPServer is constructed — see the module docstring.
 runlog.init()
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402 — import order is deliberate
+from mcp.server.mcpserver import MCPServer  # noqa: E402 — import order is deliberate
 
 # noqa: E402 on the import below — import order is deliberate, see above.
 from . import (deps, envelopes, jobs, onboarding, tools_audit,  # noqa: E402
@@ -45,18 +45,13 @@ from . import __version__  # noqa: E402 — import order is deliberate, see abov
 
 log = runlog.get(__name__)
 
-mcp = FastMCP("gsc-mcp")
-
-# FastMCP takes no version argument, and the lowlevel Server it wraps falls
-# back to importlib.metadata.version("mcp") when its own version is unset --
-# so an unstamped server introduces itself with the SDK's version number.
-# That is worse than a blank field: it is a plausible number that is not
-# ours, and it is the number a bug report will quote. Assigning the
-# attribute the SDK already reads is the only route FastMCP leaves open;
-# test_server_identity.py pins the result at the handshake, so a future SDK
-# that renames the attribute reddens there rather than shipping the wrong
-# version silently.
-mcp._mcp_server.version = __version__
+# version= because an unstamped server falls back to the SDK's own version
+# number at the handshake — a plausible number that is not ours, and the
+# number a bug report would quote. (FastMCP took no version argument at
+# all; reaching into the wrapped lowlevel server was the port-blocking hack
+# this parameter retired.) test_server_identity.py pins the result at the
+# handshake, so a regression reddens there rather than shipping silently.
+mcp = MCPServer("gsc-mcp", version=__version__)
 
 # The refusal envelope and its remedy strings live in envelopes.py, shared
 # with tools_audit and tools_submit — see that module for why they are not
@@ -418,7 +413,7 @@ def gsc_check_status(urls: list[str], concurrency: int | None = None) -> dict:
         # The eager probe above raises a plain RuntimeError when a stored
         # token is expired AND Google's token endpoint is transiently
         # failing — neither NotConfigured nor AuthRequired. Without this
-        # branch that leaves the tool via FastMCP as an isError with no
+        # branch that leaves the tool via the SDK as an isError with no
         # structured fix attached.
         return envelopes.unexpected("gsc_check_status", exc)
 

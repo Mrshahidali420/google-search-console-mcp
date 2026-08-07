@@ -52,10 +52,12 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.31",
-    # <2.0: mcp 2.0.0 removed FastMCP outright, renaming it to MCPServer
-    # under mcp.server.mcpserver with a different construction API. Pinned
-    # below that break until this server is ported to the new shape.
-    "mcp>=1.2,<2.0",
+    # >=2.0: this server is written against mcp 2.0's MCPServer
+    # (mcp.server.mcpserver) and its Client-based test transport; 1.x
+    # spelled both differently (FastMCP, mcp.shared.memory), so there is no
+    # version range that satisfies both shapes. <3: the 1.x -> 2.0 break
+    # was real, so the next major is assumed breaking until read.
+    "mcp>=2.0,<3",
     # >=12: the release that introduced the THREADING (sync) implementation
     # the bridge server is built on. Everything bridge.py touches is present
     # in 12.0 as shipped -- serve(), Server.serve_forever(), Server.shutdown(),
