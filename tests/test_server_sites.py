@@ -1,13 +1,8 @@
-import pytest
-
 from gsc_core import store
 from gsc_mcp import envelopes, server
 
-
-@pytest.fixture()
-def home(tmp_path, monkeypatch):
-    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
-    return tmp_path
+# The `home` fixture comes from conftest — this file's own copy was
+# byte-identical and only shadowed it.
 
 
 def test_server_import_writes_nothing_to_stdout(capsys):

@@ -52,9 +52,10 @@ def test_every_tool_is_registered_and_described(tmp_path, monkeypatch):
     names = {tool.name for tool in tools}
     # Equality, not a subset check: the claim this test makes is "exactly
     # these tools ship". A subset check (EXPECTED <= names) would pass
-    # even if a fifteenth, unplanned tool were accidentally registered
-    # under any name — including one from a later plan that leaked in
-    # early.
+    # even if one more, unplanned tool were accidentally registered under
+    # any name — including one from a later plan that leaked in early.
+    # (Count-agnostic on purpose; a numbered version of this comment went
+    # stale the first time the tool count grew.)
     assert names == EXPECTED
     for tool in tools:
         assert tool.description, f"{tool.name} has no description"

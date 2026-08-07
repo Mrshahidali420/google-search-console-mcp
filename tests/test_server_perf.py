@@ -30,12 +30,14 @@ class _SignedOutProvider:
 
 
 @pytest.fixture()
-def home(tmp_path, monkeypatch):
-    monkeypatch.setenv("GSC_MCP_HOME", str(tmp_path))
+def home(home, monkeypatch):
+    """conftest's throwaway home, plus the provider stub and seeded site
+    every test here needs. Overrides by requesting the parent fixture of
+    the same name, so the env-pointing logic lives only in conftest."""
     monkeypatch.setattr(server.deps, "provider", lambda: object())
     with store.session() as conn, store.tx(conn):
         store.upsert_site(conn, "sc-domain:example.com", "example.com", "siteOwner", [])
-    return tmp_path
+    return home
 
 
 # ------------------------------------------------------------- gsc_performance
