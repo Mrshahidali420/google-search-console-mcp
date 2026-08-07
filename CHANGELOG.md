@@ -4,10 +4,13 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
-## [Unreleased]
+## [0.1.0a5] — 2026-08-07
 
 The first CI run on Linux and macOS found two bugs that a Windows-only test
-history could not.
+history could not. The clock-tick bug below is the one that matters in the
+field: it shipped in every version to date, and its failure mode is a
+re-sent Request Indexing — a second real click charged as one recorded
+quota slot.
 
 ### Changed
 
