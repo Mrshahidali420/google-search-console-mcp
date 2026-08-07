@@ -9,7 +9,26 @@ Notable changes to `gsc-mcp`. Format loosely follows
 The first CI run on Linux and macOS found two bugs that a Windows-only test
 history could not.
 
+### Changed
+
+- **`gsc_detect_browsers` now reports `account_on_disk` instead of
+  `signed_in`.** The old name claimed more than the check performs: no token
+  is validated and nobody's live session is inspected — an account address is
+  found in the profile's files, or it is not. On Microsoft Edge the very same
+  file records Microsoft accounts, so `signed_in: true` there was simply
+  false. Renamed for what it is; `account_discoverable` travels beside it
+  unchanged.
+
 ### Fixed
+
+- **A bridge port collision now fails in seconds with the real cause.** The
+  port is fixed at 8765, so a second gsc-mcp run could not bind it — and the
+  bind failure happened in a daemon thread with nobody to report to, so the
+  run waited out the full connect timeout and then blamed the extension:
+  "the extension never connected", which was never the truth. The session now
+  records the failure (exception type name only; an OSError's message is
+  unauthored text) and the run fails immediately, naming the port and the
+  likeliest remedy: stop the other run, or set `bridge_port` in config.
 
 - **The bridge's browser match was Windows-only.** `os.path.normcase` folds
   case on Windows and is the identity everywhere else, and `os.path.basename`
