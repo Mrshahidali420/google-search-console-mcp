@@ -1003,3 +1003,53 @@ def test_a_progress_frame_for_a_settled_command_is_ignored(session):
     assert session.last_stage == "inspecting"
     thread.join(SETTLE)
     conn.close()
+
+
+def test_a_taken_port_sets_the_flag_instead_of_ready():
+    """A second run on 8765 used to look like a missing extension.
+
+    start() runs in a daemon thread, so its OSError has nobody to
+    propagate to — the flag is the only channel that survives the thread.
+    Type name only, because an OSError's message is unauthored text.
+    """
+    import socket
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    try:
+        sess = bridge.BridgeSession(port=port, token=TOKEN,
+                                    connect_timeout=SETTLE)
+        thread = threading.Thread(target=sess.start, daemon=True)
+        thread.start()
+        thread.join(SETTLE)
+        assert not sess.ready.is_set()
+        assert sess.bind_error == "OSError"
+    finally:
+        blocker.close()
+
+
+def test_a_taken_port_fails_the_run_fast_and_names_the_port(monkeypatch):
+    """bridge_session must not spend the connect timeout to report the
+    wrong cause. The message it raises is the one an MCP client sees, so
+    it must name the port and carry nothing from the OSError itself."""
+    import socket
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    monkeypatch.setattr(bridge, "load_or_create_token", lambda: TOKEN)
+    monkeypatch.setattr(bridge, "ensure_browser_open",
+                        lambda target, auto_launch=True: False)
+    cfg = {"bridge_port": port, "bridge_connect_timeout": 60}
+    started = time.monotonic()
+    try:
+        with pytest.raises(bridge.ExtensionNotConnected) as caught:
+            with bridge.bridge_session(target=None, cfg=cfg):
+                pytest.fail("a session on a taken port must not yield")
+    finally:
+        blocker.close()
+    assert str(port) in str(caught.value)
+    assert "OSError" in str(caught.value)
+    # Seconds, not the 60s connect timeout the wrong diagnosis waited out.
+    assert time.monotonic() - started < 15

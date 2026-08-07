@@ -232,6 +232,10 @@ class BridgeSession:
         #: Callers start start() in a thread and wait on this instead of
         #: poll-connecting, which is both exact and free.
         self.ready = threading.Event()
+        #: The exception TYPE NAME if the socket could not be bound, else
+        #: None. Read by open_session after its ready-wait; an OSError's
+        #: message is unauthored text, so the name is all that crosses.
+        self.bind_error: str | None = None
         self._server: object | None = None
         self._conn: object | None = None
         self._conn_lock = threading.Lock()
@@ -292,6 +296,13 @@ class BridgeSession:
             log.warning("bridge could not listen on 127.0.0.1:%s (%s) — "
                         "another run may already hold the port",
                         self.port, type(exc).__name__)
+            # The flag, not the log line, is what reaches the operator: the
+            # session runner reads it and fails the run in seconds with the
+            # real cause, instead of spending the full connect timeout to
+            # report "the extension never connected" — which is wrong
+            # whenever the truth is that the port was taken. Type name only,
+            # same reasoning as the log line.
+            self.bind_error = type(exc).__name__
             return
         with listening as server:
             self._server = server
@@ -972,7 +983,21 @@ def bridge_session(target: object, cfg: dict) -> Iterator[BridgeSession]:
                             target=target)
     thread = threading.Thread(target=session.start, daemon=True)
     thread.start()
-    session.ready.wait(10)
+    if not session.ready.wait(10):
+        # Without this check the run waits out the full connect timeout and
+        # reports "the extension never connected" — a wrong diagnosis
+        # whenever the truth is that the socket never existed for it to
+        # connect TO. The likeliest cause by far is a second gsc-mcp run
+        # (port 8765 is fixed by default), and the extension itself retries
+        # against whichever run holds the port, so "stop the other one" is
+        # the complete remedy. ExtensionNotConnected because its message is
+        # the one this project repeats to an MCP client, and this one
+        # carries a port number and nothing else.
+        raise ExtensionNotConnected(
+            f"the bridge could not listen on 127.0.0.1:{session.port}"
+            + (f" ({session.bind_error})" if session.bind_error else "")
+            + " — another gsc-mcp run probably holds the port; stop it, or "
+              "set bridge_port in config.json to a free one")
     log.info("bridge listening on ws://127.0.0.1:%s (waiting up to %ss for "
              "the extension)", session.port, total_wait)
     try:
