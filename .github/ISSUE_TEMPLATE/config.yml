@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Known issues in this release
+    url: https://github.com/Mrshahidali420/google-search-console-mcp/blob/master/CHANGELOG.md
+    about: Several 0.1.0 defects are already documented. Check here before filing.
+  - name: Setup and quota questions
+    url: https://github.com/Mrshahidali420/google-search-console-mcp/discussions
+    about: How something works, rather than something being broken.
+  - name: Report a security issue privately
+    url: https://github.com/Mrshahidali420/google-search-console-mcp/security/advisories/new
+    about: Anything involving tokens, OAuth or the local bridge. Please do not open a public issue.

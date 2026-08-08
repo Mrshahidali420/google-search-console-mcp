@@ -1,0 +1,89 @@
+name: Bug report
+description: Something behaved differently than documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Two things worth knowing before you start:
+
+        **Check the Known issues in [CHANGELOG.md](../blob/master/CHANGELOG.md) first.**
+        A few defects are already documented for 0.1.0 — notably a transient
+        rate-limit from Google ending an entire batch. If it is one of those, a
+        "me too" comment on the existing issue is more useful than a new report.
+
+        **Never paste your bridge token.** It is in `bridge_token.txt` in your
+        `GSC_MCP_HOME`. It should not appear in logs, and if you find that it
+        does, please report *that* — it is more serious than whatever brought
+        you here.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: |
+        The tool call you made and its arguments, with any real domain replaced
+        by `example.com` if you would rather not share it.
+      placeholder: |
+        1. Called gsc_request_indexing(site_url="sc-domain:example.com", urls=[...])
+        2. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`pip show gsc-indexer-mcp`, or the version your MCP client reports."
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: |
+        Worth being precise. Everything in this project has been exercised by
+        hand on Windows only, so a macOS or Linux report is especially valuable.
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      placeholder: "Claude Code, Claude Desktop, Cursor, VS Code, LM Studio…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: gsc_doctor() output
+      description: |
+        Optional, but it usually answers the first three questions anyone would
+        ask. It reports check results, not credentials.
+      render: json
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        From `gsc.log` in your `GSC_MCP_HOME`. Please include the lines around
+        the failure rather than the whole file — and re-read them for anything
+        you would not want public.
+      render: shell

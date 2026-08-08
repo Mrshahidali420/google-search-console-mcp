@@ -5,7 +5,7 @@
 
 # Google Search Console MCP Server
 
-**An MCP server that gives Claude and other AI agents real control over Google Search Console** — list your properties, check whether a URL is indexed, submit sitemaps, pull search analytics, and diagnose setup problems, all from a conversation.
+**An MCP server that gives Claude and other AI agents real control over Google Search Console** — list your properties, check whether a URL is indexed, find the pages Google left out, run URL inspection in bulk, submit sitemaps, request indexing, and pull search analytics, all from a conversation.
 
 [![PyPI](https://img.shields.io/pypi/v/gsc-indexer-mcp?label=pypi%20gsc-indexer-mcp&color=blue)](https://pypi.org/project/gsc-indexer-mcp/)
 [![CI](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml)
@@ -18,6 +18,25 @@
 
 **[shahidali.co/tools/gsc-mcp](https://www.shahidali.co/tools/gsc-mcp/)** is the project page: the same install
 lines, the tool list, and what the quota rules actually are, written for people who have not opened this repo.
+
+<details>
+<summary><b>Contents</b></summary>
+
+- [Add it to your agent](#add-it-to-your-agent) — one-liners for Claude Code, Cursor, VS Code, LM Studio
+- [Project status](#project-status) — what is verified, and on how many platforms
+- [Tools](#tools) — the fifteen tools this server registers
+- [Why quota accounting is the hard part](#why-quota-accounting-is-the-hard-part)
+- [Finding what is not indexed](#finding-what-is-not-indexed) · [Reason codes](#reason-codes)
+- [Submitting URLs](#submitting-urls) · [Which tool](#which-tool) · [Before your first submission](#before-your-first-submission)
+- [Requirements](#requirements)
+- [Install](#install) · [The OAuth client is handled for you](#the-oauth-client-is-handled-for-you) · [Using your own OAuth client instead](#using-your-own-oauth-client-instead)
+- [Getting started](#getting-started) — first run, sign-in, the browser extension
+- [Development](#development) · [Architecture](#architecture)
+- [Privacy](#privacy) — what leaves your machine, and what does not
+- [Known gaps](#known-gaps) — read this before trusting it with a client property
+- [Contributing](#contributing) · [License](#license)
+
+</details>
 
 ## Add it to your agent
 
@@ -502,6 +521,12 @@ Stated plainly, because they are the things a reviewer should look at first:
 ## Contributing
 
 Contributions are genuinely welcome — issues, pull requests, bug reports, docs fixes, all of it. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Good first issues are the CI legs listed under Known gaps.
+
+**The single most useful thing you can contribute right now is a bug report from a machine that is not Windows.** Everything here has been exercised by hand on one operating system, by one person; see [Known gaps](#known-gaps).
+
+- [Report a bug](https://github.com/Mrshahidali420/google-search-console-mcp/issues/new?template=bug_report.yml) · [Request a feature](https://github.com/Mrshahidali420/google-search-console-mcp/issues/new?template=feature_request.yml)
+- [Security policy](SECURITY.md) — please report anything involving tokens, OAuth or the local bridge privately
+- [Code of conduct](CODE_OF_CONDUCT.md)
 
 ## License
 

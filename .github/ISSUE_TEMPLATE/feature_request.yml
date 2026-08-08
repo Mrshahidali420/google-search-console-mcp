@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest a tool, an option, or a change in behaviour.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: |
+        The task, not the solution. What you are doing by hand today, and how
+        often, tells more than a proposed API does.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: A tool name and its arguments, if you have got that far.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: |
+        Including "nothing, I gave up" — that is a useful answer.
+
+  - type: checkboxes
+    id: quota
+    attributes:
+      label: Does this spend indexing quota?
+      description: |
+        Request Indexing is capped at roughly eleven URLs per property per
+        rolling day and a spent slot cannot be recovered. Anything that spends
+        one needs a different level of care than anything that only reads.
+      options:
+        - label: This would spend Request Indexing slots
+        - label: This only reads (index status, analytics, sitemaps)
+        - label: Not sure
