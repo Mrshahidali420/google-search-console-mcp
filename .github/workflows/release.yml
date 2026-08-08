@@ -93,15 +93,45 @@ jobs:
         run: |
           version=$(python -c "import re, pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/gsc_mcp/__init__.py').read_text()).group(1))")
           tag="v$version"
-          notes="Wheel with the OAuth client embedded, so no Cloud Console setup is needed.
 
-          The PyPI build of the same version deliberately omits the client and downloads it at first setup: \`pip install --pre gsc-indexer-mcp\`.
+          # Pull this version's own section out of CHANGELOG.md. A link to the
+          # file is not release notes: anyone reading the release has to leave
+          # it, find the right heading, and scroll past every later version.
+          python - "$version" > notes-body.md <<'PY'
+          import pathlib, re, sys
 
-          What changed: https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md"
+          version = sys.argv[1]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          heads = list(re.finditer(r"^## \[([^\]]+)\].*$", text, re.M))
+          for i, h in enumerate(heads):
+              if h.group(1) != version:
+                  continue
+              end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+              sys.stdout.write(text[h.end():end].strip() + "\n")
+              break
+          else:
+              raise SystemExit(f"CHANGELOG.md has no section for {version}")
+          PY
+
+          # A pre-release needs --pre to install from PyPI; a final release does
+          # not, and telling people otherwise sends them to the wrong command.
+          case "$version" in
+            *a*|*b*|*rc*) pre_flag=" --pre" ;;
+            *)            pre_flag="" ;;
+          esac
+
+          {
+            cat notes-body.md
+            printf '\n---\n\n'
+            printf 'The attached wheel has the OAuth client embedded, so no Cloud Console setup is needed.\n\n'
+            printf 'The PyPI build of the same version deliberately omits the client and downloads it at first setup: `pip install%s gsc-indexer-mcp`.\n' "$pre_flag"
+          } > notes.md
+
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag exists; replacing the wheel"
+            echo "release $tag exists; replacing the wheel and refreshing the notes"
             gh release upload "$tag" dist/*.whl --clobber
+            gh release edit "$tag" --notes-file notes.md
           else
             gh release create "$tag" dist/*.whl \
-              --title "$tag" --notes "$notes" --latest
+              --title "$tag" --notes-file notes.md --latest
           fi
