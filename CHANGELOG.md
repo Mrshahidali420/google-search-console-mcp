@@ -4,6 +4,57 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
+## [0.1.0] — 2026-08-08
+
+First release without a pre-release suffix. Nothing in the code changed from
+`0.1.0a6`; what changed is who is expected to install it. Through the alpha
+series the PEP 440 suffix meant pip refused the package without `--pre`, which
+kept out exactly the people whose bug reports this project needs. That gate is
+now deliberately removed.
+
+**This is a first stable-numbered release, not a mature one.** Read the Known
+issues below before you point it at a property that matters.
+
+### Changed
+
+- **Version is now `0.1.0`**, installable with a plain `pip install
+  gsc-indexer-mcp`; `--pre` is no longer required. The
+  `Development Status` classifier moves from `2 - Pre-Alpha` to `4 - Beta`.
+
+### Verified
+
+- **The live submission pass ran for the first time** (Windows 11, Brave,
+  a real Google account, a real property). Until now every claim about the
+  submission path rested on code review and fakes.
+  - First-ever pairing works cold: the bridge mints a token, unauthenticated
+    connections are rejected, the extension pairs and then reconnects on its
+    own. **The token appeared in no log line and no tool result.**
+  - With the browser fully closed, `auto_launch_browser` opens it and the URL
+    is submitted without a second call.
+  - Quota accounting is per property in practice, not just in intent: the
+    submitted property went 11 → 10 while every other property held at 11.
+  - Sections 9.3–9.7 of [docs/manual-smoke.md](docs/manual-smoke.md) — service
+    worker restart, network loss, `gsc_stop_job`, restart mid-job, and a real
+    `Quota Exceeded` — **have still not been run by anyone.**
+
+### Known issues
+
+These are open and unfixed in this release. They are listed because finding
+them the hard way is worse than reading them here.
+
+- **A transient rate-limit ends the whole batch.** When Google answers a
+  Request Indexing click with a short-term "try again later", it is treated as
+  a hard throttle: `stop_on_throttle` halts the run and every remaining URL is
+  dropped. Observed once, then an immediate retry of the same URL succeeded
+  with no wait — so the batch was abandoned for something that had already
+  cleared. On a long job this can cost you most of the run. **Workaround:
+  re-issue the call; URLs already submitted are not re-charged.**
+- **A refusal is not recorded.** `last_refusal_at` stayed `null` after the
+  refusal above, so the ledger cannot yield to a limit it was never told
+  about.
+- **`gsc_quota` ignores its `site_url` filter** and returns every property.
+  Cosmetic — the numbers themselves are correct.
+
 ## [0.1.0a6] — 2026-08-08
 
 ### Changed

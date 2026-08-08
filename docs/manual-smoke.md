@@ -12,9 +12,16 @@ real Google account with nine properties (2026-08-04).** They found two
 real defects, both since fixed — a profile ranking that crashed when no
 account was on record, and an extension check that reported a version off
 the disk as though it were the one the browser was running. That is the
-argument for running this rather than trusting the suite. **Step 9 has
-never been run by anyone**, so every claim about submission in this
-repository still rests on code review alone.
+argument for running this rather than trusting the suite.
+
+**Step 9 was opened on 2026-08-08: 9.1 and 9.2 have now been run for real,
+on Windows 11 against a live property, and both pass.** That run
+immediately found three defects code review had not — a transient
+rate-limit ending an entire batch, a refusal that was never recorded, and
+`gsc_quota` ignoring its filter. See the Known issues in `CHANGELOG.md`.
+**9.3 through 9.7 have still never been run by anyone**, so every claim
+about worker restarts, network loss, job control and genuine quota
+exhaustion still rests on code review alone.
 
 It comes in two passes. **Steps 1-8 spend no indexing quota** — the most
 expensive call in them is `sites.list` — and are the read-only path.

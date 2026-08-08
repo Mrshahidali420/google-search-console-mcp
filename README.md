@@ -11,7 +11,7 @@
 [![CI](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrshahidali420/google-search-console-mcp/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-green)](LICENSE)
-[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)](#project-status)
+[![Status: beta](https://img.shields.io/badge/status-beta-yellow)](#project-status)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 > Built for SEO practitioners tired of checking index status and submitting sitemaps by hand, one property at a time, and for the AI agents that can do it for them.
@@ -52,7 +52,15 @@ first call `gsc_setup()` — see [The OAuth client is handled for you](#the-oaut
 
 ## Project status
 
-**Pre-alpha. The whole surface is wired up, and it has now met a real Google account — on one operating system, driven by one person.**
+**Beta. The whole surface is wired up, and it has now met a real Google account — on one operating system, driven by one person.**
+
+`0.1.0` drops the pre-release suffix so that `pip install` finds it without
+`--pre`. That is a decision about reach, not a claim of maturity: this project
+needs bug reports from people who are not its author, and a package pip refuses
+to install by default does not get them. **Read the Known issues in
+[CHANGELOG.md](CHANGELOG.md) before pointing it at a property you care about** —
+in particular, a transient rate-limit from Google currently ends the whole
+batch. Bug reports are the point; please file them.
 
 Fifteen tools are registered on the server and covered by a wire-level smoke test that connects a real MCP client session and confirms every tool answers with a description. Storage, quota accounting, OAuth, and config are the foundation underneath them. Sign-in has been walked for real, on Windows against a live Google account — see [docs/manual-smoke.md](docs/manual-smoke.md), which is also where the defects that run found are recorded. Submission has since driven a real browser and had Google confirm real Request Indexing calls, in Chrome and in Brave, against live properties. That is one platform and one operator, and every automated assertion about it is still made against a fake; see Known gaps for what that does and does not buy you.
 
@@ -178,11 +186,12 @@ on PyPI is an unrelated project by another author, so installing that name gets
 you someone else's server. Everything inside this one is still `gsc_mcp` — the
 import package, the console script, the config directory.
 
-It is a pre-release, so pip needs `--pre`:
-
 ```bash
-pip install --pre gsc-indexer-mcp
+pip install gsc-indexer-mcp
 ```
+
+Versions up to and including `0.1.0a6` were pre-releases and needed `--pre`.
+From `0.1.0` they do not.
 
 Or skip installing entirely and let `uvx gsc-indexer-mcp` fetch it on demand,
 which is what the buttons at the top of this page do.

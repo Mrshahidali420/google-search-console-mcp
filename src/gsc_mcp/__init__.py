@@ -14,9 +14,9 @@ from __future__ import annotations
 # means it is readable without the package being installed, which is how
 # this repo is run during development.
 #
-# The `a1` suffix is load-bearing, not decoration: PEP 440 makes it a
-# pre-release, so pip will not install it unless the caller passes --pre.
-# That matches the Pre-Alpha classifier and the Known gaps in the README --
-# nobody should land on this by accident while the submission path is still
-# this young. Drop the suffix when the gaps close, not before.
-__version__ = "0.1.0a6"
+# Through 0.1.0a6 this carried a PEP 440 pre-release suffix, which kept pip
+# from installing it without --pre. That gate is deliberately gone as of
+# 0.1.0: the point of a plain version is that people can find the thing and
+# report what breaks. The Known gaps in the README, not the version string,
+# are now what tells a reader how young the submission path still is.
+__version__ = "0.1.0"
