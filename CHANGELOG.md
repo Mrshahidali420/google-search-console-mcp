@@ -4,7 +4,7 @@ Notable changes to `gsc-mcp`. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
-## [Unreleased]
+## [0.1.0a6] — 2026-08-08
 
 ### Changed
 
